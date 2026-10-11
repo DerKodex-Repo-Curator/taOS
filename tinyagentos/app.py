@@ -1398,14 +1398,16 @@ def create_app(data_dir: Path | None = None, catalog_dir: Path | None = None) ->
         # start() never raises and a broken bridge is reported by
         # GET /api/cast/discovery/status rather than hidden.
         app.state.mdns_reflector = None
+        app.state.mdns_reflector_start_error = None
         if (config.mdns_reflector or {}).get("enabled") is True:
             try:
                 from tinyagentos.services.mdns_reflector import MdnsReflector
                 mdns_reflector = MdnsReflector.from_config(config.mdns_reflector)
                 await mdns_reflector.start()
                 app.state.mdns_reflector = mdns_reflector
-            except Exception:
+            except Exception as exc:
                 logger.exception("mdns reflector failed to start, continuing without")
+                app.state.mdns_reflector_start_error = str(exc) or type(exc).__name__
 
         # System event bus — unified typed-event broadcast.
         from tinyagentos.events import EventBus, SystemEventStore

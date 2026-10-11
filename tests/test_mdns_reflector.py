@@ -273,6 +273,22 @@ async def test_status_route_reports_disabled_when_not_configured(client):
 
 
 @pytest.mark.asyncio
+async def test_status_route_reports_enabled_reflector_that_failed_to_start(client):
+    # Enabled in config but start() blew up in lifespan: that is a broken
+    # bridge, not a disabled feature, so it must not read as "disabled".
+    client._transport.app.state.mdns_reflector = None
+    client._transport.app.state.mdns_reflector_start_error = "boom"
+    try:
+        resp = await client.get("/api/cast/discovery/status")
+    finally:
+        client._transport.app.state.mdns_reflector_start_error = None
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["state"] == "unavailable"
+    assert body["reason"] == "start_failed"
+
+
+@pytest.mark.asyncio
 async def test_status_route_reports_unavailable_bridge(client):
     async def opener(name, ip):
         raise OSError(1, "Operation not permitted")

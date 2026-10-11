@@ -221,6 +221,16 @@ def disabled_status() -> dict:
     return {"state": "disabled", "reason": "reflector_not_enabled", "interfaces": []}
 
 
+def start_failed_status(error: str) -> dict:
+    """Status when the reflector is enabled but failed to start: not bridging."""
+    return {
+        "state": "unavailable",
+        "reason": "start_failed",
+        "error": error,
+        "interfaces": [],
+    }
+
+
 def discovery_view(devices: list, status: dict) -> dict:
     """Contract for the cast device list (C1).
 

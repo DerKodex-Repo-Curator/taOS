@@ -9,7 +9,10 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Request
 
-from tinyagentos.services.mdns_reflector import disabled_status
+from tinyagentos.services.mdns_reflector import (
+    disabled_status,
+    start_failed_status,
+)
 
 router = APIRouter()
 
@@ -19,5 +22,8 @@ async def cast_discovery_status(request: Request) -> dict:
     """``state`` is ``ok``, ``unavailable`` (with ``reason``) or ``disabled``."""
     reflector = getattr(request.app.state, "mdns_reflector", None)
     if reflector is None:
+        error = getattr(request.app.state, "mdns_reflector_start_error", None)
+        if error:
+            return start_failed_status(error)
         return disabled_status()
     return reflector.status()
