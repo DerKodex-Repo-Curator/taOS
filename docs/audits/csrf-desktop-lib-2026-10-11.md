@@ -31,9 +31,16 @@ desktop patches `window.fetch` at startup to attach the header centrally.
 4. Nothing captures a pre-patch `fetch` reference that is then used for a
    mutation. The only captures are `backendStatus.ts:40` (polls
    `GET /api/health`, created lazily inside React) and `taos-fetch.ts`
-   (applies `withCsrf` itself). No `XMLHttpRequest`, `sendBeacon` or worker
-   code exists under `desktop/src`.
-5. Every URL in the candidate files is a relative `/api/...` path, so the
+   (applies `withCsrf` itself). No `XMLHttpRequest`, `sendBeacon`, Web Worker
+   or SharedWorker code exists under `desktop/src`; the service worker in
+   point 3 is the only worker, and it sends no mutations.
+5. The header is added only when the `csrf_token` cookie is readable.
+   `CSRFMiddleware` (`tinyagentos/middleware/csrf.py`) sets that cookie on
+   every response that lacks one, so it is present from the first page load.
+   If it were ever missing, the backend fails closed: a signed-in mutation
+   with no header gets 403 ("CSRF token missing"), it is never accepted
+   unprotected.
+6. Every URL in the candidate files is a relative `/api/...` path, so the
    same-origin gate in the wrapper always passes.
 
 Step 3 of the card's method (which auth the route uses) does not change any
