@@ -23,8 +23,6 @@ async def _until(pred, timeout=5.0):
 
 
 @pytest.mark.asyncio
-
-
 async def test_subscriber_fires_on_status_change():
     """A backend flipping from ok to error should trigger the subscriber."""
     state = {"healthy": True}
@@ -65,8 +63,6 @@ async def test_subscriber_fires_on_status_change():
 
 
 @pytest.mark.asyncio
-
-
 async def test_subscriber_fires_on_model_list_change():
     """A backend that loads a new model should trigger subscribers."""
     model_state = {"models": [{"name": "m1"}]}
@@ -100,8 +96,6 @@ async def test_subscriber_fires_on_model_list_change():
 
 
 @pytest.mark.asyncio
-
-
 async def test_subscriber_not_fired_when_signature_stable():
     """Successive identical probe results should NOT fire subscribers."""
     fire_count = {"n": 0}
@@ -139,8 +133,6 @@ async def test_subscriber_not_fired_when_signature_stable():
 
 
 @pytest.mark.asyncio
-
-
 async def test_failing_subscriber_does_not_crash_poll_loop():
     """A subscriber raising an exception should be isolated — other
     subscribers still fire and the poll loop keeps running."""
@@ -169,8 +161,6 @@ async def test_failing_subscriber_does_not_crash_poll_loop():
 
 
 @pytest.mark.asyncio
-
-
 async def test_multiple_subscribers_all_fire():
     fires = {"a": 0, "b": 0}
 
