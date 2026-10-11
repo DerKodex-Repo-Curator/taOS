@@ -232,3 +232,69 @@ async def test_bad_policy_value_is_422(client):
         "/api/taos-agent/actions/policy", json={"kind": "test.write", "policy": "always"}
     )
     assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_action_is_executing_while_executor_runs(client, app):
+    """The row reads ``executing`` during the write and ``executed`` only after it."""
+    seen: list[str] = []
+
+    async def _executor(action: dict) -> dict:
+        row = await app.state.taos_agent_actions.get(action["id"])
+        seen.append(row["state"])
+        return {"ok": True}
+
+    app.state.taos_agent_action_executors["test.slow"] = _executor
+    body = await _create(client, kind="test.slow")
+    aid = body["action_id"]
+    await client.post(f"/api/taos-agent/actions/{aid}/confirm")
+    resp = await client.post(f"/api/taos-agent/actions/{aid}/execute")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["state"] == "executed"
+    assert seen == ["executing"]
+    row = await app.state.taos_agent_actions.get(aid)
+    assert row["state"] == "executed"
+
+
+@pytest.mark.asyncio
+async def test_interrupted_execution_is_never_replayed(client, app, executed):
+    """A claim whose executor never finished stays ``executing``; execute is 409."""
+    body = await _create(client)
+    aid = body["action_id"]
+    await client.post(f"/api/taos-agent/actions/{aid}/confirm")
+    # The process stops right after the claim, before the executor returns.
+    claimed = await app.state.taos_agent_actions.claim_for_execution(aid)
+    assert claimed["state"] == "executing"
+    resp = await client.post(f"/api/taos-agent/actions/{aid}/execute")
+    assert resp.status_code == 409
+    assert executed == []
+    row = await app.state.taos_agent_actions.get(aid)
+    assert row["state"] == "executing"
+    assert row["executed_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_pending_actions_can_be_listed_by_their_owner(client, app, executed):
+    """A missed confirm card is recoverable: the owner can list pending actions."""
+    first = await _create(client)
+    second = await _create(client)
+    await client.post(f"/api/taos-agent/actions/{second['action_id']}/decline")
+
+    resp = await client.get("/api/taos-agent/actions", params={"state": "pending"})
+    assert resp.status_code == 200, resp.text
+    ids = [a["action_id"] for a in resp.json()["actions"]]
+    assert ids == [first["action_id"]]
+
+    code = app.state.auth.add_user_invite("bob", "admin")
+    app.state.auth.complete_invite("bob", code, "Bob", "", "bobpass123")
+    bob = app.state.auth.find_user("bob")
+    bob_session = app.state.auth.create_session(user_id=bob["id"], long_lived=True)
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        cookies={"taos_session": bob_session},
+        event_hooks=csrf_event_hooks(),
+    ) as bob_client:
+        resp = await bob_client.get("/api/taos-agent/actions", params={"state": "pending"})
+    assert resp.status_code == 200
+    assert resp.json()["actions"] == []
