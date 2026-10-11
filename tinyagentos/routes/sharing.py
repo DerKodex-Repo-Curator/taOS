@@ -47,7 +47,7 @@ async def _caller_owns_artifact(
         if project_store is not None:
             project = await project_store.get_project(artifact_id)
             if project is not None:
-                # Check if the project is owned by the user (either created_by or user_id)
+                # Check if the project is owned by the user (user_id field per requirements)
                 return project.get("created_by") == owner_id or project.get("user_id") == owner_id
         return False
     
