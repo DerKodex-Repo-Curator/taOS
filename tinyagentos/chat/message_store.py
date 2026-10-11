@@ -269,6 +269,58 @@ class ChatMessageStore(BaseStore):
             desc = cursor.description
         return [_parse(r, desc) for r in rows]
 
+    async def latest_previews(self, channel_ids: list[str]) -> dict[str, dict]:
+        """Return the latest non-deleted, non-thread, non-ephemeral message per channel.
+
+        Returns {channel_id: {"text": <collapsed content, max 120 chars>,
+                               "author_id": ..., "author_type": ..., "created_at": ...}}.
+        Empty input returns {} without querying.
+        """
+        if not channel_ids:
+            return {}
+
+        placeholders = ",".join("?" * len(channel_ids))
+        sql = f"""
+            WITH ranked AS (
+                SELECT
+                    channel_id,
+                    content,
+                    author_id,
+                    author_type,
+                    created_at,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY channel_id
+                        ORDER BY created_at DESC
+                    ) AS rn
+                FROM chat_messages
+                WHERE channel_id IN ({placeholders})
+                  AND deleted_at IS NULL
+                  AND thread_id IS NULL
+                  AND ephemeral = 0
+            )
+            SELECT channel_id, content, author_id, author_type, created_at
+            FROM ranked
+            WHERE rn = 1
+        """
+        async with self._db.execute(sql, channel_ids) as cursor:
+            rows = await cursor.fetchall()
+            desc = cursor.description
+
+        result: dict[str, dict] = {}
+        for row in rows:
+            parsed = _parse(row, desc)
+            # Collapse whitespace and truncate to 120 chars
+            text = " ".join(parsed["content"].split())
+            if len(text) > 120:
+                text = text[:120]
+            result[parsed["channel_id"]] = {
+                "text": text,
+                "author_id": parsed["author_id"],
+                "author_type": parsed["author_type"],
+                "created_at": parsed["created_at"],
+            }
+        return result
+
     async def edit_message(self, message_id: str, content: str) -> None:
         now = time.time()
         await self._db.execute(
