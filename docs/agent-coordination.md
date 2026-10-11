@@ -724,7 +724,7 @@ different project, and 403 when the agent lacks the `canvas_read` scope or the
   gets 404); the record stays in history as `status=withdrawn` with the reason,
   and the withdraw is audit-logged). The same withdraw route also serves the
   session path for the decision's owner or an admin. `GET /api/decisions`
-  also accepts the registry JWT (tsk-f75p3z): with a Bearer it returns ONLY
+  also accepts the registry JWT (tsk-f75p3z): with a registry JWT it returns ONLY
   the decisions this agent raised in its granted projects (the same set as
   `GET /api/decisions/agent`, honouring the `status`, `project_id` and `limit`
   query params), never the user's inbox; with a session it is unchanged. The

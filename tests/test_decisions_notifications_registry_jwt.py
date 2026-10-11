@@ -212,3 +212,28 @@ async def test_list_notifications_session_path_unchanged(client):
     resp = await client.get("/api/notifications")
     assert resp.status_code == 200, resp.text
     assert "for the user" in [n["title"] for n in resp.json()]
+
+
+@pytest.mark.asyncio
+async def test_list_decisions_registry_jwt_project_filter_applies_before_limit(client):
+    """With grants on two projects, ?project_id=B finds an older B decision even
+    when more than 500 newer decisions sit in project A (the filter is pushed
+    into the store query, so the row limit applies after it)."""
+    app = client._transport.app
+    cid, token = await _mint_agent(app, "proj-a", ("decisions_write",))
+    await app.state.agent_grants.add_grant(cid, "decisions_write", project_id="proj-b")
+    store = app.state.decision_store
+    old_b = await store.create(
+        from_agent=cid, question="b q", type="approve_deny", project_id="proj-b"
+    )
+    for i in range(501):
+        await store.create(
+            from_agent=cid, question=f"a q {i}", type="approve_deny", project_id="proj-a"
+        )
+    async with _agent_client(app, token) as ac:
+        resp = await ac.get("/api/decisions", params={"project_id": "proj-b"})
+        other = await ac.get("/api/decisions", params={"project_id": "proj-c"})
+    assert resp.status_code == 200, resp.text
+    assert [d["id"] for d in resp.json()["items"]] == [old_b["id"]]
+    assert other.status_code == 200, other.text
+    assert other.json()["items"] == []

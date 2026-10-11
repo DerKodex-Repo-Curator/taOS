@@ -424,9 +424,9 @@ async def list_decisions(
 
     agent_cid = await registry_agent_caller(request, "decisions_write")
     if agent_cid is not None:
-        items = await _agent_own_decisions(request, agent_cid, status=status)
-        if project_id is not None:
-            items = [d for d in items if d.get("project_id") == project_id]
+        items = await _agent_own_decisions(
+            request, agent_cid, status=status, project_id=project_id
+        )
         return {"items": items[: max(1, min(int(limit), 500))]}
 
     user = await current_user_or_device(request)
@@ -470,12 +470,16 @@ async def list_decisions_as_agent(request: Request):
 
 
 async def _agent_own_decisions(
-    request: Request, canonical_id: str, status: str | None = None
+    request: Request,
+    canonical_id: str,
+    status: str | None = None,
+    project_id: str | None = None,
 ) -> list[dict]:
     """The decisions *canonical_id* raised, limited to the projects it holds an
     active decisions_write grant for (rules in list_decisions_as_agent).
     Shared by GET /api/decisions/agent and the registry-JWT path of
-    GET /api/decisions."""
+    GET /api/decisions.  A *project_id* narrows the scope inside the store
+    query, so the row limit applies after that filter."""
     from datetime import datetime, timezone
     from tinyagentos.agent_token_auth import _grant_unexpired
 
@@ -497,15 +501,22 @@ async def _agent_own_decisions(
     # The multi-project fallback below still filters after the fetch.
     if None in allowed_projects:
         # Global grant: only null-project decisions
+        if project_id is not None:
+            return []
         items = await store.list(from_agent=canonical_id, project_id=None, status=status, limit=500)
     else:
-        # Per-project grants: only those projects.
+        # Per-project grants: only those projects.  A requested project_id
+        # narrows the set to that one project (or nothing when not granted).
+        if project_id is not None:
+            allowed_projects &= {project_id}
         # Push the project filter into the store query so the limit applies
         # after scoping. If there is exactly one allowed project, use it
         # directly; otherwise fall back to Python filtering after the fetch.
+        if not allowed_projects:
+            return []
         if len(allowed_projects) == 1:
-            project_id = allowed_projects.pop()
-            items = await store.list(from_agent=canonical_id, project_id=project_id, status=status, limit=500)
+            only_project = allowed_projects.pop()
+            items = await store.list(from_agent=canonical_id, project_id=only_project, status=status, limit=500)
         else:
             items = await store.list(from_agent=canonical_id, status=status, limit=500)
             items = [d for d in items if d.get("project_id") in allowed_projects]
