@@ -90,9 +90,29 @@ class TestProxyRewritesCssResponse:
         assert b"example.com%2Fs%2Fi.png" in resp.content
 
     @respx.mock
-    async def test_oversized_css_body_is_served_unrewritten(self, client):
-        """CSS >512 KiB is served unchanged to avoid catastrophic backtracking."""
-        # Create CSS content larger than 512 KiB (524,288 bytes)
+    async def test_text_css_media_type_is_matched_case_insensitively(self, client):
+        respx.get("http://example.com/s/upper.css").mock(
+            return_value=Response(
+                200,
+                content=b'a{background:url(i.png)}',
+                headers={"content-type": "Text/CSS; charset=utf-8"},
+            )
+        )
+        with patch(
+            "tinyagentos.routes.desktop_browser.ssrf.socket.getaddrinfo",
+            return_value=[(2, 1, 6, "", ("93.184.216.34", 0))],
+        ):
+            resp = await client.get(
+                "/api/desktop/browser/proxy",
+                params={"profile_id": "personal", "url": "http://example.com/s/upper.css"},
+            )
+        assert resp.status_code == 200
+        assert b"example.com%2Fs%2Fi.png" in resp.content
+
+    @respx.mock
+    async def test_oversized_css_body_is_refused(self, client):
+        """CSS over 512 KiB is refused (502), never served with unproxied references."""
+        # Larger than 512 KiB (524,288 bytes)
         oversized_content = b".class {" + b"url(x)" * 200000 + b"}"
         respx.get("http://example.com/oversized.css").mock(
             return_value=Response(
@@ -109,6 +129,6 @@ class TestProxyRewritesCssResponse:
                 "/api/desktop/browser/proxy",
                 params={"profile_id": "personal", "url": "http://example.com/oversized.css"},
             )
-        assert resp.status_code == 200
-        # The body should be unchanged (not rewritten)
-        assert resp.content == oversized_content
+        assert resp.status_code == 502
+        assert "too large" in resp.json().get("error", "")
+        assert b"url(x)" not in resp.content

@@ -66,7 +66,7 @@ _FETCH_TIMEOUT = 15.0   # seconds — total deadline including all redirect hops
 _HOP_TIMEOUT = 5.0      # seconds — per-operation (connect + read) limit per hop
 _MAX_RESPONSE_BYTES = 10 * 1024 * 1024  # 10 MB hard cap
 _MAX_REQUEST_BYTES = 10 * 1024 * 1024   # 10 MB cap on forwarded request bodies (POST forms/uploads)
-# CSS rewriting limit: larger bodies are served unchanged to avoid catastrophic backtracking
+# CSS rewriting limit: larger bodies are refused (502) so the per-match rewrite cost stays bounded
 _CSS_REWRITE_MAX_BYTES = 512 * 1024  # 512 KiB
 # Request headers we forward to upstream for non-GET methods. Only the content
 # framing — never the client's cookies (we use the server-side jar), Host,
@@ -388,7 +388,9 @@ async def proxy_get(
             continue
         out_headers[k] = v
 
-    content_type = response.headers.get("content-type", "")
+    # Media types are case-insensitive (RFC 2045); normalise once so neither
+    # the text/css nor the text/html branch can be bypassed by Text/CSS.
+    content_type = response.headers.get("content-type", "").lower()
 
     if len(response.content) > _MAX_RESPONSE_BYTES:
         _logger.info(
@@ -409,15 +411,19 @@ async def proxy_get(
 
     if "text/css" in content_type:
         # Stylesheets carry origin-absolute url() and @import references too.
-        # Skip rewrite for oversized bodies to avoid catastrophic backtracking.
+        # Oversized bodies are refused outright: the regex is linear-time but
+        # every match runs a Python callback, so a 10 MB url(x) flood still
+        # costs ~20s, and serving the body unrewritten would hand the page
+        # unproxied references instead.
         charset = _detect_charset(content_type, b"")
         decoded_len = len(response.content.decode(charset or "utf-8", errors="replace"))
         if decoded_len > _CSS_REWRITE_MAX_BYTES:
-            return Response(
-                content=response.content,
-                status_code=response.status_code,
-                headers=out_headers,
-                media_type="text/css; charset=utf-8",
+            _logger.info(
+                "browser proxy stylesheet too large: bytes=%d limit=%d",
+                decoded_len, _CSS_REWRITE_MAX_BYTES,
+            )
+            return JSONResponse(
+                {"error": "stylesheet too large"}, status_code=502,
             )
         rewritten_css = rewrite_css(
             response.content, base_url=str(response.url), proxy=_proxy_url,
