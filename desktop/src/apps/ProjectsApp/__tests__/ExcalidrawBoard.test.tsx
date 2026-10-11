@@ -1,33 +1,41 @@
-import { describe, it, expect, vi } from "vitest";
-import { render } from "@testing-library/react";
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { render, waitFor } from "@testing-library/react";
+
+// Hoisted so the vi.mock factories below can close over them.
+const { convertSpy, parseSpy } = vi.hoisted(() => ({
+  convertSpy: vi.fn((els: unknown[]) => els),
+  parseSpy: vi.fn(async (_src: string) => ({ elements: [] as unknown[], files: {} })),
+}));
 
 // Excalidraw is a heavy canvas/worker component jsdom cannot run. Mock it so the
 // board's mapping + wiring can be asserted: convertToExcalidrawElements passes
 // the skeletons through so we can count them, and Excalidraw records the props
 // it was handed.
 vi.mock("@excalidraw/excalidraw", () => ({
-  convertToExcalidrawElements: (els: unknown[]) => els,
+  convertToExcalidrawElements: convertSpy,
   Excalidraw: ({
     initialData,
     viewModeEnabled,
     theme,
   }: {
-    initialData?: { elements?: unknown[] };
+    initialData?: { elements?: { id?: string }[] };
     viewModeEnabled?: boolean;
     theme?: string;
   }) => (
     <div
       data-testid="excalidraw"
       data-count={initialData?.elements?.length ?? 0}
+      data-ids={(initialData?.elements ?? []).map((e) => e.id).join(",")}
       data-viewmode={String(!!viewModeEnabled)}
       data-theme={theme}
     />
   ),
 }));
 vi.mock("@excalidraw/excalidraw/index.css", () => ({}));
-// Keep the heavy mermaid parser out of jsdom; no test element is a diagram.
+// Keep the heavy mermaid parser out of jsdom; a test that needs a ready
+// diagram overrides the parse result.
 vi.mock("@excalidraw/mermaid-to-excalidraw", () => ({
-  parseMermaidToExcalidraw: vi.fn(async () => ({ elements: [], files: {} })),
+  parseMermaidToExcalidraw: parseSpy,
 }));
 
 import { ExcalidrawBoard } from "../canvas/ExcalidrawBoard";
@@ -41,7 +49,17 @@ function el(over: Partial<CanvasElement>): CanvasElement {
   };
 }
 
+function skeletonIds(call: unknown[]): string[] {
+  return (call[0] as { id: string }[]).map((s) => s.id);
+}
+
 describe("ExcalidrawBoard", () => {
+  beforeEach(() => {
+    // mockReset also restores the pass-through after a test overrides it.
+    convertSpy.mockReset();
+    parseSpy.mockClear();
+  });
+
   it("maps non-deleted elements into the scene and renders read-only", () => {
     const { getByTestId } = render(
       <ExcalidrawBoard
@@ -67,5 +85,67 @@ describe("ExcalidrawBoard", () => {
   it("renders an empty scene without crashing", () => {
     const { getByTestId } = render(<ExcalidrawBoard elements={[]} />);
     expect(getByTestId("excalidraw").getAttribute("data-count")).toBe("0");
+  });
+
+  it("mindmap_edge between two notes is converted in the same batch", () => {
+    // An arrow binds start/end by the target's id, and the converter can only
+    // resolve a binding to an element passed in the SAME call.
+    const rows = [
+      el({ id: "n1", kind: "note", z_index: 0, payload: { text: "a" } }),
+      el({ id: "n2", kind: "note", z_index: 1, payload: { text: "b" } }),
+      el({ id: "e1", kind: "mindmap_edge", z_index: 2, payload: { from: "n1", to: "n2" } }),
+    ];
+    const { rerender, getByTestId } = render(<ExcalidrawBoard elements={rows} />);
+    // Count the conversions for one scene build: a fresh elements array
+    // recomputes the scene exactly once.
+    convertSpy.mockClear();
+    rerender(<ExcalidrawBoard elements={[...rows]} />);
+    expect(convertSpy).toHaveBeenCalledTimes(1);
+    expect(skeletonIds(convertSpy.mock.calls[0])).toEqual(["n1", "n2", "e1"]);
+    expect(getByTestId("excalidraw").getAttribute("data-ids")).toBe("n1,n2,e1");
+  });
+
+  it("a ready diagram keeps its z_index position", async () => {
+    parseSpy.mockResolvedValueOnce({
+      elements: [{ id: "d1", type: "rectangle", x: 0, y: 0 }],
+      files: {},
+    });
+    const { getByTestId } = render(
+      <ExcalidrawBoard
+        elements={[
+          el({ id: "top", kind: "note", z_index: 2, payload: { text: "top" } }),
+          el({ id: "m1", kind: "mermaid", z_index: 1, payload: { source: "graph TD; A-->B" } }),
+          el({ id: "bottom", kind: "note", z_index: 0, payload: { text: "bottom" } }),
+        ]}
+      />,
+    );
+    await waitFor(() =>
+      expect(getByTestId("excalidraw").getAttribute("data-ids")).toBe("bottom,d1,top"),
+    );
+    // The ready diagram is spliced in after conversion: the last scene build
+    // converted only the two notes, together, in one call.
+    const last = convertSpy.mock.calls[convertSpy.mock.calls.length - 1];
+    expect(skeletonIds(last)).toEqual(["bottom", "top"]);
+  });
+
+  it("a bound label text follows its container whatever the converter's order", () => {
+    // A labelled skeleton converts to a container plus a text element that
+    // carries no customData, only containerId. Emit n2's text BEFORE its
+    // container: grouping must not depend on the converter's output order.
+    convertSpy.mockImplementation((skeletons: unknown[]) =>
+      (skeletons as { id: string; label?: { text: string } }[]).flatMap((s) => {
+        const text = { id: `t-${s.id}`, type: "text", containerId: s.id, text: s.label?.text };
+        return s.id === "n2" ? [text, s] : [s, text];
+      }),
+    );
+    const { getByTestId } = render(
+      <ExcalidrawBoard
+        elements={[
+          el({ id: "n1", kind: "note", z_index: 1, payload: { text: "a" } }),
+          el({ id: "n2", kind: "note", z_index: 0, payload: { text: "b" } }),
+        ]}
+      />,
+    );
+    expect(getByTestId("excalidraw").getAttribute("data-ids")).toBe("t-n2,n2,n1,t-n1");
   });
 });
