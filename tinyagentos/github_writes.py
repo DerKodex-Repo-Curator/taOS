@@ -23,6 +23,7 @@ Guardrails, all mechanical:
 """
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import re
 from dataclasses import dataclass
@@ -37,6 +38,10 @@ PR_BASE = "dev"
 
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,59}$")
 _TIMEOUT = 30.0
+# Forking is asynchronous: a new fork's git objects can 404 for a moment after
+# the 202. The parent-commit read is retried on 404 with these pauses (about a
+# minute in all) before the push gives up.
+_FORK_READY_PAUSES = (1.0, 2.0, 4.0, 8.0, 15.0, 30.0)
 
 
 class SecretScanRefused(Exception):
@@ -191,6 +196,17 @@ async def ensure_fork(gh: GitHubSession, upstream: str) -> str:
     return created.get("full_name", fork)
 
 
+async def _fork_commit(gh: GitHubSession, fork: str, sha: str) -> dict:
+    """Read *sha* from the fork, waiting (bounded) for a just-created fork."""
+    path = f"/repos/{fork}/git/commits/{sha}"
+    for pause in _FORK_READY_PAUSES:
+        commit = await _call(gh, "GET", path, ok_404=True)
+        if commit is not None:
+            return commit
+        await asyncio.sleep(pause)
+    return await _call(gh, "GET", path)
+
+
 async def push_branch(
     gh: GitHubSession, upstream: str, slug: str, files: dict[str, str], message: str
 ) -> str:
@@ -211,7 +227,7 @@ async def push_branch(
     else:
         base = await _call(gh, "GET", f"/repos/{upstream}/git/ref/heads/{PR_BASE}")
         parent = base["object"]["sha"]
-    parent_commit = await _call(gh, "GET", f"/repos/{fork}/git/commits/{parent}")
+    parent_commit = await _fork_commit(gh, fork, parent)
     tree = await _call(gh, "POST", f"/repos/{fork}/git/trees", json={
         "base_tree": parent_commit["tree"]["sha"],
         "tree": [
@@ -253,10 +269,12 @@ async def open_pr(gh: GitHubSession, upstream: str, slug: str, title: str, body:
     full_body = _with_attribution(body, gh.login)
     _refuse_if_secret(gh, [(None, title), (None, full_body)])
 
-    for pull in await _open_taos_agent_pulls(gh, upstream):
+    pulls = await _open_taos_agent_pulls(gh, upstream)
+    for pull in pulls:
         if pull["head"].get("ref") == branch:
             return {"url": pull["html_url"], "number": pull["number"]}
-        raise OpenPullRequestExists(pull["html_url"], pull["number"])
+    if pulls:
+        raise OpenPullRequestExists(pulls[0]["html_url"], pulls[0]["number"])
 
     created = await _call(gh, "POST", f"/repos/{upstream}/pulls", json={
         "title": title, "body": full_body,

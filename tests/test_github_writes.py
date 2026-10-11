@@ -34,6 +34,9 @@ class FakeGitHub:
         self.fork_exists = fork_exists
         self.open_pulls = open_pulls or []
         self.refs: dict[str, str] = {}
+        # A new fork's git objects show up a little after the 202: the first
+        # ``fork_lag`` commit reads after a fork is created answer 404.
+        self.fork_lag = 0
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.log.append(request)
@@ -48,6 +51,7 @@ class FakeGitHub:
             )
         if method == "POST" and path == f"/repos/{UPSTREAM}/forks":
             self.fork_exists = True
+            self.lagging = self.fork_lag
             return httpx.Response(202, json={"full_name": f"{LOGIN}/taOS"})
         if method == "GET" and path == f"/repos/{UPSTREAM}/git/ref/heads/dev":
             return httpx.Response(200, json={"object": {"sha": "basesha"}})
@@ -57,6 +61,9 @@ class FakeGitHub:
                 return httpx.Response(200, json={"object": {"sha": self.refs[ref]}})
             return httpx.Response(404, json={"message": "Not Found"})
         if method == "GET" and path.startswith(f"/repos/{LOGIN}/taOS/git/commits/"):
+            if getattr(self, "lagging", 0):
+                self.lagging -= 1
+                return httpx.Response(404, json={"message": "Not Found"})
             return httpx.Response(200, json={"tree": {"sha": "basetree"}})
         if method == "POST" and path == f"/repos/{LOGIN}/taOS/git/trees":
             return httpx.Response(201, json={"sha": "newtree"})
@@ -245,3 +252,55 @@ async def test_other_users_taos_agent_prs_do_not_count(fake):
         gh = _session(http, data_dir=None)
         pr = await gw.open_pr(gh, UPSTREAM, "fix-weather", "Fix", "body")
     assert pr["number"] == 9
+
+
+@pytest.mark.asyncio
+async def test_open_pr_finds_same_branch_pr_after_another(fake):
+    """Every open PR is checked for the same branch before refusing."""
+    fake.open_pulls = [
+        {
+            "html_url": f"https://github.com/{UPSTREAM}/pull/4", "number": 4,
+            "head": {"label": f"{LOGIN}:taos-agent/older-fix", "ref": "taos-agent/older-fix"},
+        },
+        {
+            "html_url": f"https://github.com/{UPSTREAM}/pull/5", "number": 5,
+            "head": {"label": f"{LOGIN}:taos-agent/fix-weather", "ref": "taos-agent/fix-weather"},
+        },
+    ]
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fake.handler)) as http:
+        gh = _session(http, data_dir=None)
+        pr = await gw.open_pr(gh, UPSTREAM, "fix-weather", "Fix", "body")
+    assert pr == {"url": f"https://github.com/{UPSTREAM}/pull/5", "number": 5}
+    assert fake.bodies("POST", f"/repos/{UPSTREAM}/pulls") == []
+
+
+@pytest.mark.asyncio
+async def test_push_waits_for_a_new_fork_to_be_git_ready(http, fake, monkeypatch):
+    """A just-created fork's commit read 404s for a moment; push retries, bounded."""
+    naps: list[float] = []
+
+    async def _nap(seconds: float) -> None:
+        naps.append(seconds)
+
+    monkeypatch.setattr("asyncio.sleep", _nap)
+    fake.fork_lag = 2
+    gh = _session(http, data_dir=None)
+    await gw.ensure_fork(gh, UPSTREAM)
+    branch = await gw.push_branch(gh, UPSTREAM, "fix-weather", {"a.py": "x\n"}, "Fix")
+    assert branch == "taos-agent/fix-weather"
+    assert len(naps) == 2
+    assert fake.refs == {"heads/taos-agent/fix-weather": "newcommit"}
+
+
+@pytest.mark.asyncio
+async def test_push_gives_up_when_the_fork_never_becomes_ready(http, fake, monkeypatch):
+    async def _nap(seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr("asyncio.sleep", _nap)
+    fake.fork_lag = 10_000
+    gh = _session(http, data_dir=None)
+    await gw.ensure_fork(gh, UPSTREAM)
+    with pytest.raises(httpx.HTTPStatusError):
+        await gw.push_branch(gh, UPSTREAM, "fix-weather", {"a.py": "x\n"}, "Fix")
+    assert fake.bodies("POST", "/git/trees") == []
