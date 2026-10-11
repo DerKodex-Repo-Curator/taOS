@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 from typing import Literal
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, Response
@@ -42,6 +43,36 @@ CAST_MEDIA_PREFIX = "/cast/media/"
 _MEDIA_HEADERS = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
 
 
+class CastTokenRedactFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            if isinstance(record.args, tuple) and len(record.args) >= 3:
+                path_str = str(record.args[2])
+                if path_str.startswith(CAST_MEDIA_PREFIX):
+                    parts = urlsplit(path_str)
+                    if parts.query:
+                        q = parse_qsl(parts.query, keep_blank_values=True)
+                        q = [(k, "REDACTED") if k == "token" else (k, v) for k, v in q]
+                        new_query = urlencode(q, doseq=True)
+                        new_path = urlunsplit(
+                            (parts.scheme, parts.netloc, parts.path, new_query, parts.fragment)
+                        )
+                        record.args = (
+                            record.args[0],
+                            record.args[1],
+                            new_path,
+                            *record.args[3:],
+                        )
+        except Exception:
+            pass
+        return True
+
+
+_uvicorn_access_logger = logging.getLogger("uvicorn.access")
+if not any(isinstance(f, CastTokenRedactFilter) for f in _uvicorn_access_logger.filters):
+    _uvicorn_access_logger.addFilter(CastTokenRedactFilter())
+
+
 class CastStartIn(BaseModel):
     view: str = Field(..., max_length=256)
     device_id: str = Field(..., min_length=1, max_length=256)
@@ -50,8 +81,6 @@ class CastStartIn(BaseModel):
     # serves only requests from that address (device binding where the
     # transport allows it).
     device_address: str | None = Field(default=None, max_length=64)
-
-
 def _grant_view(grant) -> dict:
     return {
         "cast_id": grant.cast_id,
