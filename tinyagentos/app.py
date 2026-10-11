@@ -171,6 +171,7 @@ _STARTUP_EXEMPT_PATHS = frozenset({"/api/health", "/api/version", "/setup"})
 _STARTUP_EXEMPT_PREFIXES = ("/static/", "/desktop/", "/chat-pwa/", "/ws/", "/auth/", "/setup/", "/shortcut/")
 
 from tinyagentos.task_utils import _create_supervised_task, cancel_and_wait  # noqa: E402
+from tinyagentos.routes import device_state  # noqa: E402
 
 
 def _resolve_browser_cookie_key(data_dir: "Path") -> str:
@@ -629,6 +630,15 @@ def create_app(data_dir: Path | None = None, catalog_dir: Path | None = None) ->
         await notif_push_store.init()
         await qmd_client.init()
         await secrets_store.init()
+        # The harness decision ran at create_app time, before the Secrets
+        # store was readable; claude_code needs its token secret, so re-decide
+        # now when that is the preferred harness.
+        _fw_decision = getattr(app.state, "taos_agent_framework_decision", None)
+        if _fw_decision is not None and _fw_decision.preference == "claude_code":
+            from tinyagentos.claude_code_runtime import claude_code_token_present
+            from tinyagentos.taos_agent_runtime import refresh_framework_decision
+            refresh_framework_decision(
+                app.state, claude_code_token_present=await claude_code_token_present(app.state))
         # -------------------------------------------------------------------
         # Migrate legacy github_app_private_key from config.yaml → SecretsStore.
         # The key was previously stored as plaintext in config and re-serialized
@@ -1754,6 +1764,7 @@ def create_app(data_dir: Path | None = None, catalog_dir: Path | None = None) ->
     app.state.config = config
     app.state.config_path = config_path
     app.state.data_dir = data_dir
+    device_state.seed_id_epoch(app.state.data_dir)
     app.state.agent_workspaces_dir = data_dir / "agent-workspaces"
     app.state.agent_memory_dir = data_dir / "agent-memory"
     app.state.agent_workspaces_dir.mkdir(parents=True, exist_ok=True)
@@ -1830,8 +1841,6 @@ def create_app(data_dir: Path | None = None, catalog_dir: Path | None = None) ->
     projects_root.mkdir(parents=True, exist_ok=True)
     app.state.projects_root = projects_root
     app.state.chat_hub = chat_hub
-    from tinyagentos.chat.unified_chat_bridge import ChatBusBridge
-    app.state.chat_bus_bridge = ChatBusBridge(app)
     # wants_reply and typing are initialised by the lifespan — do not create
     # duplicate instances here that would shadow the lifespan-created ones.
     app.state.wants_reply = None
@@ -2061,6 +2070,11 @@ def main():
     # the auth store directly (no running server needed).
     if len(sys.argv) > 1 and sys.argv[1] == "recover-password":
         raise SystemExit(_recover_password_cli(sys.argv[2:]))
+
+    # `taos reset --onboarding` -- offline re-arm of first-run onboarding.
+    if len(sys.argv) > 1 and sys.argv[1] == "reset":
+        from tinyagentos.reset_cli import reset_cli
+        raise SystemExit(reset_cli(sys.argv[2:]))
 
     import uvicorn
     config = load_config(PROJECT_DIR / "data" / "config.yaml")

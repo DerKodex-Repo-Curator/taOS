@@ -483,6 +483,21 @@ describe("MessageList", () => {
       expect(screen.getByText("General discussion")).toBeInTheDocument();
     });
 
+    it("shows channel topic in the header when set", () => {
+      renderWithMsg({
+        channel: channel({ topic: "Release planning", description: "old" }),
+      });
+      expect(screen.getByText("Release planning")).toBeInTheDocument();
+      expect(screen.queryByText("old")).not.toBeInTheDocument();
+    });
+
+    it("falls back to description when topic is empty", () => {
+      renderWithMsg({
+        channel: channel({ topic: "", description: "General discussion" }),
+      });
+      expect(screen.getByText("General discussion")).toBeInTheDocument();
+    });
+
     it("shows member count for group channels", () => {
       const { container } = renderWithMsg({
         channel: channel({ type: "group", members: ["user", "alice", "bob"] }),
