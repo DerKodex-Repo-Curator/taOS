@@ -249,3 +249,72 @@ async def test_native_taos_agent_token_lands_in_the_harness_secret(
         assert row["agents"] == [cid]
     finally:
         await registry.close()
+
+
+@pytest.mark.asyncio
+async def test_card_for_an_unowned_agent_goes_to_admins_never_a_broadcast(client, app):
+    # haiku-agent is a bound local-token agent with no registry row, so it has
+    # no owner. A user_id=None notification is a broadcast to every account.
+    rid = await _created_id(client, app)
+    rows = await app.state.notifications.list(limit=50)
+    hits = [r for r in rows if r.get("source") == "auth_broker" and r["data"]["request_id"] == rid]
+    assert hits, rows
+    assert all(r["user_id"] is not None for r in hits), hits
+    admin_ids = {u["id"] for u in app.state.auth.list_users() if u.get("is_admin")}
+    assert {r["user_id"] for r in hits} == admin_ids
+
+
+@pytest.mark.asyncio
+async def test_token_post_claims_the_request_before_writing_the_secret(client, app):
+    rid = await _created_id(client, app)
+    hdr = _bearer(app, "haiku-agent")
+    assert (await client.post(f"{BASE}/{rid}/code", json={"code": "abc#123"})).status_code == 200
+    assert (await client.get(f"{BASE}/{rid}", headers=hdr)).json()["code"] == "abc#123"
+
+    secrets_store = app.state.secrets
+    real_add = secrets_store.add
+    overlapping = {}
+
+    async def add_with_an_overlapping_post(*args, **kwargs):
+        # A second token post lands while the first one is writing the secret.
+        if not overlapping:
+            overlapping["started"] = True
+            overlapping["resp"] = await client.post(
+                f"{BASE}/{rid}/token", json={"token": "sk-ant-oat01-second"}, headers=hdr
+            )
+        return await real_add(*args, **kwargs)
+
+    secrets_store.add = add_with_an_overlapping_post
+    try:
+        first = await client.post(
+            f"{BASE}/{rid}/token", json={"token": "sk-ant-oat01-first"}, headers=hdr
+        )
+    finally:
+        secrets_store.add = real_add
+    assert first.status_code == 200, first.text
+    assert overlapping["resp"].status_code == 409, overlapping["resp"].text
+    row = await secrets_store.get("claude_code_oauth_token:haiku-agent")
+    assert row["value"] == "sk-ant-oat01-first"
+
+
+@pytest.mark.asyncio
+async def test_failed_secret_write_leaves_the_request_retryable(client, app):
+    rid = await _created_id(client, app)
+    hdr = _bearer(app, "haiku-agent")
+    assert (await client.post(f"{BASE}/{rid}/code", json={"code": "abc#123"})).status_code == 200
+    assert (await client.get(f"{BASE}/{rid}", headers=hdr)).json()["code"] == "abc#123"
+
+    secrets_store = app.state.secrets
+    real_add = secrets_store.add
+
+    async def failing_add(*args, **kwargs):
+        raise RuntimeError("secrets db unavailable")
+
+    secrets_store.add = failing_add
+    try:
+        with pytest.raises(RuntimeError):
+            await client.post(f"{BASE}/{rid}/token", json={"token": "sk-ant-oat01-x"}, headers=hdr)
+    finally:
+        secrets_store.add = real_add
+    retry = await client.post(f"{BASE}/{rid}/token", json={"token": "sk-ant-oat01-x"}, headers=hdr)
+    assert retry.status_code == 200, retry.text

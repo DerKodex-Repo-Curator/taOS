@@ -2021,7 +2021,10 @@ host and for an agent inside an incus container. Store:
    `console.anthropic.com`; no subdomain, userinfo or non-443 port), else `422`:
    a card the user taps must never open a site the agent chose. Returns
    `{id, kind, status, host, expires_in_seconds}` and raises an `auth_broker`
-   notification to the agent's owner.
+   notification to the agent's owner. An agent the registry cannot attribute (a
+   bound local-token agent with no registry row) gets its card sent to each
+   admin instead; the card is never a broadcast (`user_id` null). With no admin
+   to receive it, create is `409`.
 2. The desktop (bell, toast, Notifications app) renders that notification as a
    sign-in card: the agent's name, the host, an **Open** button (system browser;
    Firefox on taOSmobile) and a code field. The card re-checks the same host
@@ -2036,7 +2039,10 @@ host and for an agent inside an incus container. Store:
    Secrets under a fixed name with `secret_access` = that agent alone:
    `claude_code_oauth_token` for the native taOS Agent (the name the
    `claude_code` harness reads), `claude_code_oauth_token:<agent id>` for every
-   other agent. Never logged, never echoed back.
+   other agent. Never logged, never echoed back. The request is claimed under
+   the store lock before the secret is written, so an overlapping post gets
+   `409` and an expired request `410` without touching Secrets; a failed write
+   hands the claim back so the agent can retry.
 
 A request expires 10 minutes after it was created; once the agent has read the
 code it has another 10 minutes to post the token.

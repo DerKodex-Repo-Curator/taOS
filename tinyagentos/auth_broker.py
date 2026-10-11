@@ -193,3 +193,15 @@ class AuthBrokerStore(BaseStore):
             )
             await self._db.commit()
         return "ok"
+
+    async def release(self, request_id: str) -> None:
+        """Hand a claimed request back (``completed`` -> ``code_read``) after the
+        secret write failed, so the agent can post its token again."""
+        self._require_db()
+        async with self._lock:
+            await self._db.execute(
+                "UPDATE auth_broker_requests SET status = 'code_read', completed_at = NULL"
+                " WHERE id = ? AND status = 'completed'",
+                (request_id,),
+            )
+            await self._db.commit()

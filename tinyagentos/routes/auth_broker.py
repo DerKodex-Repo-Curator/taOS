@@ -104,6 +104,17 @@ async def create_request(request: Request, body: CreateBody):
             status_code=422,
             detail="url must be https on an allowed sign-in host: claude.ai, console.anthropic.com",
         )
+    # The card goes to the agent's owner. An agent the registry cannot attribute
+    # (a bound local-token agent with no registry row) goes to the admins, who
+    # are the only users allowed to answer it. Never user_id=None: that is a
+    # broadcast to every account.
+    owner = await resolve_agent_owner(request, requester)
+    if owner is not None:
+        recipients = [owner]
+    else:
+        recipients = [u["id"] for u in request.app.state.auth.list_users() if u.get("is_admin")]
+        if not recipients:
+            raise HTTPException(status_code=409, detail="no user to receive the sign-in card")
     try:
         rec = await _store(request).create(
             requester=requester, kind=body.kind, url=body.url, prompt=body.prompt.strip()
@@ -113,24 +124,24 @@ async def create_request(request: Request, body: CreateBody):
 
     notifs = getattr(request.app.state, "notifications", None)
     if notifs is not None:
-        try:
-            owner = await resolve_agent_owner(request, requester)
-            await notifs.add(
-                title="Sign-in request",
-                message=f"{label} asks you to sign in to Claude ({host}).",
-                level="info",
-                source="auth_broker",
-                data={
-                    "request_id": rec["id"],
-                    "agent": label,
-                    "url": rec["url"],
-                    "host": host,
-                    "prompt": rec["prompt"],
-                },
-                user_id=owner,
-            )
-        except Exception:
-            logger.warning("auth_broker: sign-in notification failed", exc_info=True)
+        for user_id in recipients:
+            try:
+                await notifs.add(
+                    title="Sign-in request",
+                    message=f"{label} asks you to sign in to Claude ({host}).",
+                    level="info",
+                    source="auth_broker",
+                    data={
+                        "request_id": rec["id"],
+                        "agent": label,
+                        "url": rec["url"],
+                        "host": host,
+                        "prompt": rec["prompt"],
+                    },
+                    user_id=user_id,
+                )
+            except Exception:
+                logger.warning("auth_broker: sign-in notification failed", exc_info=True)
     return _public(rec)
 
 
@@ -175,27 +186,30 @@ async def store_token(request: Request, request_id: str, body: TokenBody):
     rec = await store.get(request_id)
     if rec is None or rec["requester"] != requester:
         raise HTTPException(status_code=404, detail="sign-in request not found")
-    if rec["status"] != "code_read":
-        raise HTTPException(status_code=409, detail="the sign-in code has not been read, or a token was already stored")
-    if AuthBrokerStore.expired(rec):
-        raise HTTPException(status_code=410, detail="sign-in request expired")
-
     secrets_store = getattr(request.app.state, "secrets", None)
     if secrets_store is None:
         raise HTTPException(status_code=503, detail="secrets store not available")
-    name = _secret_name(requester, native)
-    description = "Claude subscription token, stored by the sign-in broker"
-    if await secrets_store.get(name) is None:
-        await secrets_store.add(
-            name, body.token, category="tokens", description=description, agents=[requester]
-        )
-    else:
-        await secrets_store.update(name, value=body.token, description=description, agents=[requester])
 
+    # Claim the request (under the store lock) before the secret is written, so
+    # an overlapping post or an expiry can never leave a stored token behind a
+    # 409 or 410. A failed write hands the claim back so the agent can retry.
     outcome = await store.complete(request_id)
     if outcome == "expired":
         raise HTTPException(status_code=410, detail="sign-in request expired")
     if outcome != "ok":
-        raise HTTPException(status_code=409, detail="a token was already stored for this request")
+        raise HTTPException(status_code=409, detail="the sign-in code has not been read, or a token was already stored")
+
+    name = _secret_name(requester, native)
+    description = "Claude subscription token, stored by the sign-in broker"
+    try:
+        if await secrets_store.get(name) is None:
+            await secrets_store.add(
+                name, body.token, category="tokens", description=description, agents=[requester]
+            )
+        else:
+            await secrets_store.update(name, value=body.token, description=description, agents=[requester])
+    except BaseException:
+        await store.release(request_id)
+        raise
     logger.info("auth_broker: stored a sign-in token for %s as secret %s", requester, name)
     return {"ok": True, "secret_name": name}
