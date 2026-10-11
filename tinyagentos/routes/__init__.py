@@ -98,6 +98,10 @@ def register_all_routers(app):
     from tinyagentos.routes.devices import router as devices_router
     app.include_router(devices_router, dependencies=_csrf)
 
+    # Cast (Chromecast/AirPlay) device discovery and paired device registry
+    from tinyagentos.routes.cast import router as cast_router
+    app.include_router(cast_router, dependencies=_csrf)
+
     # CSRF-exempt like peer_router: the pairing endpoints are called by an
     # external device that has no session cookie yet (the opaque
     # pair_request_id is the capability); CSRF is a cookie-auth defence.
