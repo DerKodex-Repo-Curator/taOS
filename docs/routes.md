@@ -176,12 +176,11 @@ See docs/project-invite-api.md (link + PIN redeem, auth-exempt endpoints).
 
 - **Global (null-project) grant**: null-project decisions, plus granted projects
 - **Exactly one granted scope**: those decisions, filtered in the store query
-- **Two or more scopes**: fetched by agent, filtered in Python
+- **Two or more scopes**: one store query per scope, merged newest first
 
 ### Limit interaction
 
-- The single-scope path pushes the project filter into the store query, so the 500 limit applies AFTER scoping (issue #2194)
-- The two-or-more-scope path still fetches up to 500 rows then filters in Python, so an agent with several grants and more than 500 decisions in total can still lose allowed-project rows to the limit (same shape as the original bug, narrower blast radius)
+- Every scope pushes the project filter into the store query, and the merged list is capped at 500, so the limit applies AFTER scoping (issue #2194)
 
 ---
 

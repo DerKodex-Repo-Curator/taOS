@@ -923,3 +923,26 @@ async def test_global_grant_project_filter_returns_granted_project(client):
     assert [d["project_id"] for d in resp_b.json()["items"]] == [pid_b]
     assert resp_a.status_code == 200, resp_a.text
     assert resp_a.json()["items"] == []
+
+
+@pytest.mark.asyncio
+async def test_multi_scope_list_applies_limit_after_scoping(client):
+    """With a global grant plus a grant on project B, an older project-B
+    decision is still listed when more than 500 newer decisions sit in an
+    ungranted project: each granted scope is queried on its own, so the row
+    limit applies after scoping (issue #2194)."""
+    app = client._transport.app
+    cid, token = await _mint_agent(app, None, ("decisions_write",), handle="@multi-limit")
+    await app.state.agent_grants.add_grant(cid, "decisions_write", project_id="proj-b")
+    store = app.state.decision_store
+    old_b = await store.create(
+        from_agent=cid, question="b q", type="approve_deny", project_id="proj-b"
+    )
+    for i in range(501):
+        await store.create(
+            from_agent=cid, question=f"c q {i}", type="approve_deny", project_id="proj-c"
+        )
+    async with _agent_client(app, token) as ac:
+        resp = await ac.get("/api/decisions/agent")
+    assert resp.status_code == 200, resp.text
+    assert [d["id"] for d in resp.json()["items"]] == [old_b["id"]]
