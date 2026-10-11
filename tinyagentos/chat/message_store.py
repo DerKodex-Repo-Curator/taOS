@@ -275,39 +275,33 @@ class ChatMessageStore(BaseStore):
         Returns {channel_id: {"text": <collapsed content, max 120 chars>,
                                "author_id": ..., "author_type": ..., "created_at": ...}}.
         Empty input returns {} without querying.
+
+        One indexed lookup per channel: ``idx_chat_messages_channel`` is
+        ``(channel_id, created_at)``, so ``ORDER BY created_at DESC LIMIT 1``
+        reads a handful of rows from the end of that channel's index range. A
+        window function ranking every message per channel would scan a
+        channel's whole history on each channel-list request (CR on #3674).
         """
         if not channel_ids:
             return {}
 
-        placeholders = ",".join("?" * len(channel_ids))
-        sql = f"""
-            WITH ranked AS (
-                SELECT
-                    channel_id,
-                    content,
-                    author_id,
-                    author_type,
-                    created_at,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY channel_id
-                        ORDER BY created_at DESC
-                    ) AS rn
-                FROM chat_messages
-                WHERE channel_id IN ({placeholders})
-                  AND deleted_at IS NULL
-                  AND thread_id IS NULL
-                  AND ephemeral = 0
-            )
+        sql = """
             SELECT channel_id, content, author_id, author_type, created_at
-            FROM ranked
-            WHERE rn = 1
+            FROM chat_messages
+            WHERE channel_id = ?
+              AND deleted_at IS NULL
+              AND thread_id IS NULL
+              AND ephemeral = 0
+            ORDER BY created_at DESC
+            LIMIT 1
         """
-        async with self._db.execute(sql, channel_ids) as cursor:
-            rows = await cursor.fetchall()
-            desc = cursor.description
-
         result: dict[str, dict] = {}
-        for row in rows:
+        for channel_id in channel_ids:
+            async with self._db.execute(sql, (channel_id,)) as cursor:
+                row = await cursor.fetchone()
+                desc = cursor.description
+            if row is None:
+                continue
             parsed = _parse(row, desc)
             # Collapse whitespace and truncate to 120 chars
             text = " ".join(parsed["content"].split())
