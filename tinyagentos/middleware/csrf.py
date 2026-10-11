@@ -26,6 +26,8 @@ Bearer-gated routes are left untouched.
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import secrets
 
 from fastapi import HTTPException, Request
@@ -36,6 +38,8 @@ from starlette.responses import Response
 _COOKIE_NAME = "csrf_token"
 _HEADER_NAME = "x-csrf-token"
 _TOKEN_BYTES = 32  # 256 bits
+_NONCE_BYTES = 16  # 128 bits; a bound token is "<nonce hex>.<hmac hex>"
+_HEX_DIGITS = frozenset("0123456789abcdef")
 
 # Routes that ESTABLISH a credential rather than act on one.
 #
@@ -73,6 +77,53 @@ _CREDENTIAL_PATHS = frozenset(
 # authoritative list of paths reachable with no credential, and a path can only
 # need this exemption if it is on it.  ``test_csrf_login_lockout.py`` asserts
 # the containment so the two lists cannot drift apart.
+
+
+def _bound_mac(secret: bytes, session_id: str, nonce: str) -> str:
+    return hmac.new(
+        secret, (session_id + nonce).encode("utf-8", "surrogatepass"), hashlib.sha256
+    ).hexdigest()
+
+
+def mint_csrf_token(secret: bytes, session_id: str) -> str:
+    """Mint a CSRF token bound to ``session_id``.
+
+    Shape: ``<nonce>.<hmac_sha256(secret, session_id + nonce)>``, both hex.
+    Only the holder of ``secret`` can mint a token that ``verify_bound``
+    accepts for a given session, so a cookie planted from a sibling subdomain
+    (``Domain=.taos.my``) no longer satisfies the double-submit check.
+    """
+    if not isinstance(secret, bytes) or not secret:
+        raise ValueError("secret must be non-empty bytes")
+    if not isinstance(session_id, str) or not session_id:
+        raise ValueError("session_id must be a non-empty string")
+    nonce = secrets.token_hex(_NONCE_BYTES)
+    return f"{nonce}.{_bound_mac(secret, session_id, nonce)}"
+
+
+def verify_bound(secret: bytes, token: object, session_id: object) -> bool:
+    """Return True only if ``token`` was minted for ``session_id`` under ``secret``.
+
+    Never raises: any malformed input (wrong type, wrong shape, non-hex,
+    empty secret or session) is simply ``False``.  The MAC comparison is
+    constant-time via ``hmac.compare_digest``.
+    """
+    if not isinstance(secret, bytes) or not secret:
+        return False
+    if not isinstance(session_id, str) or not session_id:
+        return False
+    if not isinstance(token, str):
+        return False
+    nonce, sep, mac = token.partition(".")
+    if (
+        not sep
+        or len(nonce) != _NONCE_BYTES * 2
+        or len(mac) != hashlib.sha256().digest_size * 2
+        or not _HEX_DIGITS.issuperset(nonce)
+        or not _HEX_DIGITS.issuperset(mac)
+    ):
+        return False
+    return hmac.compare_digest(mac, _bound_mac(secret, session_id, nonce))
 
 
 class CSRFMiddleware(BaseHTTPMiddleware):
