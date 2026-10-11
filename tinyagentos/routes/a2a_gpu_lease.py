@@ -46,6 +46,7 @@ import logging
 import os
 import socket
 import time
+import weakref
 from dataclasses import dataclass
 
 import httpx
@@ -86,20 +87,40 @@ _CHANNEL_LIMIT = 500
 # enough that a crashed holder stops blocking the node (issue: advisory keep-alive).
 _DEFAULT_TTL_SECONDS = 300.0
 
-# One lock per (holder, resource): a holder's claim and release on the same
-# resource must not interleave between their local lease step and their bus
-# post, or a release parked before its post can clear a newer [GPU CLAIM]
-# (CodeRabbit on #3626). Process-local, like the leases it orders.
-_HOLDER_LOCKS: dict[tuple[str, str], asyncio.Lock] = {}
+# One lock per (bus identity, resource): an identity's claim and release on the
+# same resource must not interleave between their local lease step and their
+# bus post, or a release parked before its post can clear a newer [GPU CLAIM]
+# (CodeRabbit on #3626). Process-local, like the leases it orders. Keyed on the
+# IDENTITY whose bus claim the line opens or closes, never the display handle:
+# the fold keys claims on identity, and an operator releasing an agent's lease
+# by id must queue behind that agent's re-claim (CR on #3675). Weak values: the
+# keys are caller-supplied text, and a lock held inside ``async with`` keeps its
+# own strong reference, so idle entries are collected instead of accumulating.
+_HOLDER_LOCKS: weakref.WeakValueDictionary[tuple[str, str], asyncio.Lock] = (
+    weakref.WeakValueDictionary()
+)
 
 
-def _holder_lock(holder: str, resource_id: str) -> asyncio.Lock:
-    """Return the lock serializing *holder*'s claim/release on *resource_id*."""
-    key = (holder, resource_id)
+def _holder_lock(identity: str, resource_id: str) -> asyncio.Lock:
+    """Return the lock serializing *identity*'s claim/release on *resource_id*."""
+    key = (identity, resource_id)
     lock = _HOLDER_LOCKS.get(key)
     if lock is None:
         lock = _HOLDER_LOCKS[key] = asyncio.Lock()
     return lock
+
+
+def _lock_resource(cluster, node: str, resource: str | None) -> str:
+    """The lock's resource component, built the same way on claim and release.
+
+    A cluster worker keys on its lease resource id; a node the cluster does not
+    know is bus-only and keys on the bare node label. Deriving a ``node:res`` id
+    for a non-worker on one route but not the other would hand the two routes
+    different locks and reopen the race the lock exists to close.
+    """
+    if cluster is not None and _match_worker(cluster, node) is not None:
+        return _resource_id(_canonical_node(cluster, node), resource)
+    return node
 
 # Upper bound on a caller-supplied TTL. Without it an authenticated agent could
 # take the shared GPU with `ttl_seconds: 1e9` and remove the auto-expiry the
@@ -651,7 +672,7 @@ async def gpu_claim(request: Request, body: ClaimBody):
         if lease_node and cluster is not None
         else None
     )
-    async with _holder_lock(actor.holder, resource_id or node):
+    async with _holder_lock(actor.identity, _lock_resource(cluster, node, body.resource)):
         existing = (
             cluster.find_existing_lease(resource_id)
             if cluster is not None and resource_id is not None
@@ -831,17 +852,18 @@ async def gpu_release(request: Request, body: ReleaseBody):
     channel = (body.channel or "").strip() or _channel()
 
     cluster = getattr(request.app.state, "cluster_manager", None)
-    # Serialize with this holder's claims on the same resource: the lease the id
-    # names (if any) owns the resource; a bus-only release keys on the request.
+    # Serialize with the claims this line closes, on the same resource: the lease
+    # the id names (if any) owns the resource and was taken under a bus identity
+    # (an operator's release by id queues behind THAT identity's re-claim); a
+    # node-scoped release keys on the request exactly as the claim did.
     _named = _find_lease(cluster, body.lease_id) if cluster is not None and body.lease_id is not None else None
     _rid = (
         _named.resource_id
         if _named is not None and getattr(_named, "resource_id", None)
-        else _resource_id(_canonical_node(cluster, node), body.resource)
-        if cluster is not None
-        else node
+        else _lock_resource(cluster, node, body.resource)
     )
-    async with _holder_lock(actor.holder, _rid):
+    _who = (_lease_bus_identity(_named) if _named is not None else None) or actor.identity
+    async with _holder_lock(_who, _rid):
         released_id = body.lease_id
         lease = None
         if cluster is not None:

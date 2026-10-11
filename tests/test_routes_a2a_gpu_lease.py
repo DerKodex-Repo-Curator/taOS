@@ -1422,6 +1422,70 @@ class TestClusterLeaseIntegration:
             lease.lease_id for lease in cluster.get_leases()
         ]
 
+    async def test_bus_only_node_claim_and_release_share_one_lock(
+        self, lease_client, bus, cluster, monkeypatch
+    ):
+        """A node the cluster does not know is coordinated over the bus alone. Its
+        claim and release must still key the same lock: with a cluster present the
+        release used to derive a ``node:resource`` key while the claim locked on
+        the bare node, so the two never serialized (CodeRabbit on #3675).
+        """
+        from tinyagentos.gpu_lease import claims_for_node, open_claims
+        from tinyagentos.routes import a2a_gpu_lease as mod
+
+        assert cluster.get_worker("orb") is None
+        claim_a = await lease_client.post(
+            "/api/a2a/gpu/claim", json={"node": "orb", "vram_mb": 4096}
+        )
+        assert claim_a.status_code == 200, claim_a.json()
+
+        release_parked = asyncio.Event()
+        release_gate = asyncio.Event()
+        claim_reached_post = asyncio.Event()
+        posted_lines: list[str] = []
+        original_post_line = mod._post_line
+
+        async def parked_post_line(channel, actor, text):
+            if text.startswith("[GPU RELEASE]"):
+                release_parked.set()
+                await release_gate.wait()
+            elif text.startswith("[GPU CLAIM]"):
+                claim_reached_post.set()
+            posted_lines.append(text.split("]")[0] + "]")
+            return await original_post_line(channel, actor, text)
+
+        monkeypatch.setattr(mod, "_post_line", parked_post_line)
+
+        release_task = asyncio.create_task(
+            lease_client.post("/api/a2a/gpu/release", json={"node": "orb"})
+        )
+        await asyncio.wait_for(release_parked.wait(), timeout=5.0)
+
+        claim_task = asyncio.create_task(
+            lease_client.post(
+                "/api/a2a/gpu/claim", json={"node": "orb", "vram_mb": 4096}
+            )
+        )
+        reached = asyncio.create_task(claim_reached_post.wait())
+        done, _pending = await asyncio.wait({reached}, timeout=2.0)
+        if not done:
+            reached.cancel()
+        assert not claim_reached_post.is_set(), (
+            "the bus-only claim posted while the same holder's release was still "
+            f"parked: {posted_lines}"
+        )
+
+        release_gate.set()
+        release_resp, claim_resp = await asyncio.gather(release_task, claim_task)
+        assert release_resp.status_code == 200, release_resp.json()
+        assert claim_resp.status_code == 200, claim_resp.json()
+        assert posted_lines == ["[GPU RELEASE]", "[GPU CLAIM]"]
+
+        folded = open_claims(bus.messages)
+        assert claims_for_node(folded, "orb"), (
+            f"the new claim must survive the earlier release: {bus.messages}"
+        )
+
 @pytest.mark.asyncio
 class TestRequest:
     async def test_request_posts_a_request_line(self, lease_client, bus):
