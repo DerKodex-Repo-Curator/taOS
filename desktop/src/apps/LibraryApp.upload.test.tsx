@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, act, within } from "@testing-library/react";
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { LibraryApp } from "./LibraryApp";
 
@@ -153,6 +153,14 @@ function createFetchMock(overrides: Record<string, Promise<Response>> = {}) {
   });
 }
 
+function parseFormData(formData: FormData): Record<string, string | File> {
+  const result: Record<string, string | File> = {};
+  for (const [key, value] of formData.entries()) {
+    result[key] = value;
+  }
+  return result;
+}
+
 describe("LibraryApp local file upload (tsk-6gtsvj)", () => {
   let fetchMock: ReturnType<typeof createFetchMock>;
 
@@ -171,22 +179,19 @@ describe("LibraryApp local file upload (tsk-6gtsvj)", () => {
 
     await waitFor(() => screen.getByText("YouTube Video"), { timeout: 5000 });
 
-    // The drop zone should be visible
     const dropZone = screen.getByLabelText(/drop files here or click to browse/i);
     expect(dropZone).toBeInTheDocument();
   });
 
-  it("uploads a file via drag-and-drop and calls /api/import/upload with the file", async () => {
+  it("uploads a file via drag-and-drop and calls /api/import/upload with the file and selected collection", async () => {
     render(<LibraryApp windowId="test-win" />);
 
     await waitFor(() => screen.getByText("YouTube Video"), { timeout: 5000 });
 
     const dropZone = screen.getByLabelText(/drop files here or click to browse/i);
 
-    // Create a test file
     const testFile = new File(["test content"], "test.txt", { type: "text/plain" });
 
-    // Simulate drag and drop
     const dataTransfer = {
       files: [testFile],
       types: ["Files"],
@@ -196,16 +201,26 @@ describe("LibraryApp local file upload (tsk-6gtsvj)", () => {
       fireEvent.drop(dropZone, { dataTransfer });
     });
 
-    // Should have called /api/import/upload
     await waitFor(() => {
       const uploadCalls = fetchMock.mock.calls.filter((call) =>
         String(call[0]).includes("/api/import/upload")
       );
       expect(uploadCalls.length).toBeGreaterThan(0);
+
+      const uploadCall = uploadCalls[0];
+      const body = uploadCall[1]?.body as FormData;
+      expect(body).toBeInstanceOf(FormData);
+
+      const formData = parseFormData(body);
+      expect(formData["file"]).toBeInstanceOf(File);
+      expect((formData["file"] as File).name).toBe("test.txt");
+      expect((formData["file"] as File).type).toBe("text/plain");
+      // No category selected by default, so category should not be present
+      expect(formData["category"]).toBeUndefined();
     });
   });
 
-  it("uploads a file via file picker (click) and calls /api/import/upload", async () => {
+  it("uploads a file via file picker (click) and calls /api/import/upload with the file and selected collection", async () => {
     render(<LibraryApp windowId="test-win" />);
 
     await waitFor(() => screen.getByText("YouTube Video"), { timeout: 5000 });
@@ -227,6 +242,55 @@ describe("LibraryApp local file upload (tsk-6gtsvj)", () => {
         String(call[0]).includes("/api/import/upload")
       );
       expect(uploadCalls.length).toBeGreaterThan(0);
+
+      const uploadCall = uploadCalls[0];
+      const body = uploadCall[1]?.body as FormData;
+      expect(body).toBeInstanceOf(FormData);
+
+      const formData = parseFormData(body);
+      expect(formData["file"]).toBeInstanceOf(File);
+      expect((formData["file"] as File).name).toBe("test.txt");
+      expect((formData["file"] as File).type).toBe("text/plain");
+      expect(formData["category"]).toBeUndefined();
+    });
+  });
+
+  it("uploads a file with selected category filter and includes category in FormData", async () => {
+    render(<LibraryApp windowId="test-win" />);
+
+    await waitFor(() => screen.getByText("YouTube Video"), { timeout: 5000 });
+
+    // Select a category filter - use the category button in the Categories section (has count badge)
+    const categoryButton = screen.getByRole("button", { name: /video\d/i });
+    fireEvent.click(categoryButton);
+
+    await waitFor(() => {
+      expect(categoryButton).toHaveAttribute("aria-pressed", "true");
+    });
+
+    const dropZone = screen.getByLabelText(/drop files here or click to browse/i);
+    const testFile = new File(["test content"], "test.txt", { type: "text/plain" });
+
+    const dataTransfer = {
+      files: [testFile],
+      types: ["Files"],
+    };
+
+    await act(async () => {
+      fireEvent.drop(dropZone, { dataTransfer });
+    });
+
+    await waitFor(() => {
+      const uploadCalls = fetchMock.mock.calls.filter((call) =>
+        String(call[0]).includes("/api/import/upload")
+      );
+      expect(uploadCalls.length).toBeGreaterThan(0);
+
+      const uploadCall = uploadCalls[0];
+      const body = uploadCall[1]?.body as FormData;
+      const formData = parseFormData(body);
+      expect(formData["file"]).toBeInstanceOf(File);
+      expect(formData["category"]).toBe("video");
     });
   });
 
@@ -237,18 +301,32 @@ describe("LibraryApp local file upload (tsk-6gtsvj)", () => {
 
     const dropZone = screen.getByLabelText(/drop files here or click to browse/i);
     expect(dropZone).toHaveAttribute("tabIndex", "0");
+    expect(dropZone).toHaveAttribute("role", "button");
+
+    const fileInput = dropZone.querySelector('input[type="file"]') as HTMLInputElement;
+    expect(fileInput).toBeInTheDocument();
+
+    const clickSpy = vi.spyOn(fileInput, "click");
 
     // Simulate Enter key
     await act(async () => {
       fireEvent.keyDown(dropZone, { key: "Enter" });
     });
 
-    // File input should be triggered (we can't easily test the click, but we verify the handler exists)
-    expect(dropZone).toHaveAttribute("role", "button");
+    // Verify the file input click was triggered (jsdom may fire keydown/keypress both)
+    expect(clickSpy).toHaveBeenCalled();
+    clickSpy.mockRestore();
+
+    // Simulate Space key
+    const clickSpy2 = vi.spyOn(fileInput, "click");
+    await act(async () => {
+      fireEvent.keyDown(dropZone, { key: " " });
+    });
+    expect(clickSpy2).toHaveBeenCalled();
+    clickSpy2.mockRestore();
   });
 
   it("shows embed-now action on uploaded item with agent picker", async () => {
-    // Mock an item that was just uploaded (source_type: "file")
     const mockUploadedItem = {
       ...MOCK_ITEMS[0],
       id: "uploaded-file-1",
@@ -259,7 +337,6 @@ describe("LibraryApp local file upload (tsk-6gtsvj)", () => {
     };
 
     const fetchMockWithUploaded = createFetchMock({
-      // More specific overrides first
       "/api/knowledge/items/uploaded-file-1": Promise.resolve({
         ok: true,
         status: 200,
@@ -280,8 +357,12 @@ describe("LibraryApp local file upload (tsk-6gtsvj)", () => {
 
     await waitFor(() => screen.getByText("uploaded-doc.txt"), { timeout: 5000 });
 
+    // Verify the "Open uploaded-doc.txt" button exists
+    const openButton = screen.getByRole("button", { name: /Open uploaded-doc.txt/i });
+    expect(openButton).toBeInTheDocument();
+
     // Click on the item to open detail view
-    fireEvent.click(screen.getByRole("button", { name: /Open uploaded-doc.txt/i }));
+    fireEvent.click(openButton);
 
     await waitFor(() => screen.getByText("Content 1"), { timeout: 5000 });
 
@@ -292,13 +373,16 @@ describe("LibraryApp local file upload (tsk-6gtsvj)", () => {
     // Click embed now - should open agent picker
     fireEvent.click(embedButton);
 
-    // Agent picker should show available agents
-    await waitFor(() => screen.getByText("Agent 1"), { timeout: 5000 });
-    expect(screen.getByText("Agent 1")).toBeInTheDocument();
-    expect(screen.getByText("Agent 2")).toBeInTheDocument();
+    // Agent picker should show available agents (scope to modal)
+    await waitFor(() => {
+      const modal = screen.getByRole("dialog", { name: /embed file into agent/i });
+      expect(within(modal).getByText("Agent 1")).toBeInTheDocument();
+      expect(within(modal).getByText("Agent 2")).toBeInTheDocument();
+    });
 
-    // Select an agent
-    fireEvent.click(screen.getByText("Agent 1"));
+    // Select an agent (within modal)
+    const modal = screen.getByRole("dialog", { name: /embed file into agent/i });
+    fireEvent.click(within(modal).getByText("Agent 1"));
 
     // Should call /api/import/embed with the chosen agent
     await waitFor(() => {

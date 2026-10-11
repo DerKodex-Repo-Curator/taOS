@@ -400,6 +400,9 @@ export function LibraryApp({ windowId: _windowId }: { windowId: string }) {
 
     const formData = new FormData();
     formData.append("file", file);
+    if (filters.category) {
+      formData.append("category", filters.category);
+    }
     // No agent specified - file lands in library, subscription/auto-ingest decides embedding
 
     try {
@@ -409,20 +412,29 @@ export function LibraryApp({ windowId: _windowId }: { windowId: string }) {
       });
       if (res.ok) {
         setUploadProgress(100);
+        // Keep 100% visible briefly before reset
+        await new Promise((r) => setTimeout(r, 500));
         // Refresh items to show the new file
         await fetchItems();
+      } else {
+        const errText = await res.text().catch(() => "");
+        console.error("Upload failed:", res.status, errText);
+        alert(`Upload failed: ${res.status} ${errText || res.statusText}`);
       }
-    } catch {
-      /* ignore */
+    } catch (err) {
+      console.error("Upload error:", err);
+      alert(`Upload error: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setUploading(false);
       setUploadProgress(0);
     }
-  }, [isValidFile, fetchItems]);
+  }, [isValidFile, fetchItems, filters.category]);
 
-  const handleFiles = useCallback((fileList: globalThis.File[]) => {
+  const handleFiles = useCallback(async (fileList: globalThis.File[]) => {
     const valid = Array.from(fileList).filter(isValidFile);
-    valid.forEach(handleFileUpload);
+    for (const file of valid) {
+      await handleFileUpload(file);
+    }
   }, [isValidFile, handleFileUpload]);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
