@@ -716,19 +716,26 @@ different project, and 403 when the agent lacks the `canvas_read` scope or the
   and the trash restore/purge/empty routes. NOTE: the files routes key on the
   project SLUG in the path, not the id.
 - **decisions_write**: `POST /api/decisions` (raise a human-in-the-loop
-  decision), `POST /api/decisions/{id}/answer/agent` (mirror an answer),
+  decision; a `metadata.kind` naming a server-owned gate, `execution_gate`,
+  `delegation_gate`, `device_pairing`, `app_grant`, `project_create` or
+  `collab_delegation_gate`, is refused with 400 for every caller, since only
+  the server's internal raisers may open a gate, tsk-mul5pa), `POST /api/decisions/{id}/answer/agent` (mirror an answer),
   `GET /api/decisions/{id}/agent` (read its own), `GET /api/decisions/agent`
   (list its own), `POST /api/decisions/{id}/withdraw` (withdraw its own pending
   decision as moot: body `{"reason": "..."}`, reason required (400), allowed
   only from `pending` (409 otherwise), the asking agent only (any other caller
   gets 404); the record stays in history as `status=withdrawn` with the reason,
   and the withdraw is audit-logged). The same withdraw route also serves the
-  session path for the decision's owner or an admin. The GENERAL routes stay
-  session-only -- `GET /api/decisions`,
-  `GET /api/decisions/{id}`, `GET /api/decisions/{id}/history` and
-  `POST /api/decisions/{id}/answer`. The agent set is a separate, narrower
-  allowlist distinguished by the `/agent` suffix, except withdraw, which is one
-  route serving both callers (`_is_agent_decisions_path` in
+  session path for the decision's owner or an admin. `GET /api/decisions`
+  also accepts the registry JWT (tsk-f75p3z): with a registry JWT it returns ONLY
+  the decisions this agent raised in its granted projects (the same set as
+  `GET /api/decisions/agent`, honouring the `status`, `project_id` and `limit`
+  query params), never the user's inbox; with a session it is unchanged. The
+  other GENERAL routes stay session-only -- `GET /api/decisions/{id}`,
+  `GET /api/decisions/{id}/history` and `POST /api/decisions/{id}/answer`.
+  The agent set is a separate, narrower allowlist distinguished by the
+  `/agent` suffix, except withdraw and the list, which are one route serving
+  both callers (`_is_agent_decisions_path` in
   `tinyagentos/auth_middleware.py`).
   A `shell_command` decision (raised by taOS, never by an agent, when the
   taOS Agent's Claude Code shell hits a command the user has not decided) is a

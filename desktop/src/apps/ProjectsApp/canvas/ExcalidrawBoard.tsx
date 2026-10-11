@@ -82,13 +82,47 @@ export function ExcalidrawBoard({ elements, theme = "light" }: ExcalidrawBoardPr
     // that has a higher z_index. A ready diagram contributes its converted
     // elements; everything else (regular kinds, and a diagram still converting)
     // maps through the base skeleton.
-    return live(elements).flatMap((el) => {
-      if (DIAGRAM_KINDS.has(el.kind)) {
-        const ready = diagrams[el.id];
-        if (ready && ready.length > 0) return ready;
-      }
-      return convertToExcalidrawElements([elementToSkeleton(el, { rows: elements })] as unknown as SkeletonInput);
-    });
+    const ordered = live(elements);
+    const readyDiagram = (el: CanvasElement): ExcalidrawElements | null => {
+      const ready = DIAGRAM_KINDS.has(el.kind) ? diagrams[el.id] : undefined;
+      return ready && ready.length > 0 ? ready : null;
+    };
+    // Every skeleton goes through ONE convertToExcalidrawElements call: an
+    // arrow skeleton (mindmap_edge) binds start/end by its target's id, and the
+    // converter only resolves a binding to an element in the same call, so a
+    // per-element conversion leaves every edge unbound. Ready diagrams are
+    // already converted and are spliced back in below.
+    const skeletons = ordered
+      .filter((el) => !readyDiagram(el))
+      .map((el) => elementToSkeleton(el, { rows: elements }));
+    const converted =
+      skeletons.length > 0 ? convertToExcalidrawElements(skeletons as unknown as SkeletonInput) : [];
+    // One skeleton can convert to several elements (a container plus its bound
+    // label text), so group by the row id elementToSkeleton stamps into
+    // customData; a label text carries no customData and follows its container.
+    // Map every stamped element first so a label emitted before its container
+    // still finds its row.
+    const taosIdOf = (x: ExcalidrawElements[number]): string | undefined => {
+      const taosId = (x.customData as { taos_id?: unknown } | undefined)?.taos_id;
+      return typeof taosId === "string" ? taosId : undefined;
+    };
+    const rowOf = new Map<string, string>();
+    for (const x of converted) {
+      const taosId = taosIdOf(x);
+      if (taosId) rowOf.set(x.id, taosId);
+    }
+    const byRow = new Map<string, ExcalidrawElements[number][]>();
+    let lastRow: string | undefined;
+    for (const x of converted) {
+      const containerId = "containerId" in x ? x.containerId : null;
+      const row = taosIdOf(x) ?? (containerId && rowOf.get(containerId)) ?? lastRow;
+      if (!row) continue;
+      lastRow = row;
+      const group = byRow.get(row);
+      if (group) group.push(x);
+      else byRow.set(row, [x]);
+    }
+    return ordered.flatMap((el) => readyDiagram(el) ?? byRow.get(el.id) ?? []);
   }, [elements, diagrams]);
 
   // Excalidraw reads initialData once at mount; push later scenes (async
