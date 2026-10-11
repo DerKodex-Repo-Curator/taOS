@@ -16,7 +16,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from tinyagentos.trace_store import SCHEMA_VERSION, VALID_KINDS
+from tinyagentos.trace_store import SCHEMA_VERSION, SERVER_ONLY_KINDS, VALID_KINDS
 from tinyagentos.otel.span_store import _safe_slug
 
 logger = logging.getLogger(__name__)
@@ -50,6 +50,8 @@ async def post_trace(request: Request, body: TraceIn):
         return JSONResponse({"error": "trace registry not configured"}, status_code=503)
     if body.kind not in VALID_KINDS:
         return JSONResponse({"error": f"unknown kind {body.kind!r}"}, status_code=400)
+    if body.kind in SERVER_ONLY_KINDS:
+        return JSONResponse({"error": f"kind {body.kind!r} is written by taOS only"}, status_code=400)
     agent_name = getattr(request.state, "agent_name", None) or body.agent_name
     safe_slug = _safe_slug(agent_name)
     if not agent_name or safe_slug == "_system":

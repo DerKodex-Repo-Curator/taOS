@@ -12,6 +12,9 @@ A new action under the default ``ask`` policy is stored pending and a
 ``confirmed_by=auto`` and no card is shown. The policy lives in the
 ``taos_agent`` preference blob as ``action_policy[kind]``.
 
+Every request and every outcome (executed, declined, failed) is recorded as
+an ``external_write`` row on the ``taos-agent`` trace (spec section 4).
+
 Confirm, decline and the policy are refused (403) for anything but a signed-in
 browser session: an agent credential can ask, it can never answer for the user
 or change its own policy.
@@ -19,6 +22,7 @@ or change its own policy.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Literal
 
 from fastapi import APIRouter, Request
@@ -37,6 +41,7 @@ router = APIRouter()
 
 _PREF_NAMESPACE = "taos_agent"
 _KIND_PATTERN = r"^[a-z][a-z0-9_.-]{0,63}$"
+_AUDIT_SLUG = "taos-agent"
 
 
 class ActionCreate(BaseModel):
@@ -73,6 +78,35 @@ def _require_human(request: Request) -> str | JSONResponse:
     return uid
 
 
+async def _audit(
+    request: Request, row: dict, state: str, confirmed_by: str, *, url: str = "",
+) -> None:
+    """Best-effort ``external_write`` audit row; a trace failure never blocks the gate."""
+    registry = getattr(request.app.state, "trace_registry", None)
+    if registry is None:
+        return
+    payload = row.get("payload") or {}
+    latency_ms = 0 if state in ("pending", STATE_CONFIRMED) else int(
+        max(0.0, time.time() - row["created_at"]) * 1000
+    )
+    try:
+        store = await registry.get(_AUDIT_SLUG)
+        await store.record("external_write", payload={
+            "target": row["kind"],
+            "action": row["summary"],
+            "user_id": row["user_id"],
+            "repo": str(payload.get("repo", "")),
+            "url": url,
+            "diff_sha256": str(payload.get("diff_sha256", "")),
+            "confirmed_by": confirmed_by,
+            "action_id": row["id"],
+            "latency_ms": latency_ms,
+            "state": state,
+        })
+    except Exception:
+        logger.exception("taos-agent action %s: audit row failed", row["id"])
+
+
 async def _owned(request: Request, action_id: str, uid: str) -> dict | None:
     row = await request.app.state.taos_agent_actions.get(action_id)
     if row is None or row["user_id"] != uid:
@@ -95,6 +129,7 @@ async def create_action(request: Request, body: ActionCreate):
     row = await request.app.state.taos_agent_actions.create(
         user_id=uid, kind=body.kind, summary=body.summary, payload=body.payload, auto=auto,
     )
+    await _audit(request, row, row["state"], row["confirmed_by"] or "pending")
     if not auto:
         event = SystemEvent(
             kind="taos_agent.action_pending",
@@ -118,6 +153,8 @@ async def _decide(request: Request, action_id: str, *, confirm: bool):
     row = await request.app.state.taos_agent_actions.decide(action_id, confirm=confirm)
     if row is None:
         return _error(409, "action is not pending")
+    if not confirm:
+        await _audit(request, row, "declined", "declined")
     return _view(row)
 
 
@@ -153,7 +190,10 @@ async def execute_action(request: Request, action_id: str):
     except Exception as exc:
         logger.exception("taos-agent action %s: executor failed", action_id)
         await store.mark_failed(action_id, f"{type(exc).__name__}: {exc}")
+        await _audit(request, claimed, "failed", claimed["confirmed_by"])
         return _error(502, "action failed")
+    url = result.get("url", "") if isinstance(result, dict) else ""
+    await _audit(request, claimed, "executed", claimed["confirmed_by"], url=str(url or ""))
     return {**_view(claimed), "result": result}
 
 
