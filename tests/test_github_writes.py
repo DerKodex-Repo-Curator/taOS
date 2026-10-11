@@ -18,16 +18,11 @@ import pytest
 import pytest_asyncio
 
 from tinyagentos import __version__
-from tinyagentos.github_writes import (
-    GitHubSession,
-    OpenPullRequestExists,
-    SecretScanRefused,
-    create_issue,
-    ensure_fork,
-    open_pr,
-    push_branch,
-    secret_scan,
-)
+
+try:
+    from tinyagentos import github_writes as gw
+except ImportError:  # red-first run on a base without the helper: each test FAILS
+    gw = None
 
 UPSTREAM = "jaylfc/taOS"
 LOGIN = "alice"
@@ -98,9 +93,13 @@ def fake():
 
 
 @pytest_asyncio.fixture
-async def gh(fake):
-    async with httpx.AsyncClient(transport=httpx.MockTransport(fake.handler)) as http:
-        yield GitHubSession(token="gho_test", login=LOGIN, http=http, data_dir="/var/lib/taos-data")
+async def http(fake):
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fake.handler)) as client:
+        yield client
+
+
+def _session(http: httpx.AsyncClient, data_dir: str | None = "/var/lib/taos-data"):
+    return gw.GitHubSession(token="gho_test", login=LOGIN, http=http, data_dir=data_dir)
 
 
 ATTRIBUTION = f"Filed by the taOS Agent on behalf of {LOGIN} (taOS {__version__})"
@@ -120,9 +119,10 @@ ATTRIBUTION = f"Filed by the taOS Agent on behalf of {LOGIN} (taOS {__version__}
         ("path = /var/lib/taos-data/secrets.db\n", "data_dir_path"),
     ],
 )
-async def test_push_refuses_secret_before_network(gh, fake, content, kind):
-    with pytest.raises(SecretScanRefused) as exc:
-        await push_branch(gh, UPSTREAM, "fix-weather", {"app/x.py": content}, "fix")
+async def test_push_refuses_secret_before_network(http, fake, content, kind):
+    gh = _session(http)
+    with pytest.raises(gw.SecretScanRefused) as exc:
+        await gw.push_branch(gh, UPSTREAM, "fix-weather", {"app/x.py": content}, "fix")
     assert kind in exc.value.kinds
     assert fake.log == []
     # The refusal names the kind, never the matched value.
@@ -130,26 +130,28 @@ async def test_push_refuses_secret_before_network(gh, fake, content, kind):
 
 
 @pytest.mark.asyncio
-async def test_pr_and_issue_bodies_are_scanned(gh, fake):
-    with pytest.raises(SecretScanRefused):
-        await open_pr(gh, UPSTREAM, "fix-weather", "Fix", "token sk-abcdefghijklmnopqrstuvwx")
-    with pytest.raises(SecretScanRefused):
-        await create_issue(gh, UPSTREAM, "Crash", "my box is 100.64.0.3")
+async def test_pr_and_issue_bodies_are_scanned(http, fake):
+    gh = _session(http)
+    with pytest.raises(gw.SecretScanRefused):
+        await gw.open_pr(gh, UPSTREAM, "fix-weather", "Fix", "token sk-abcdefghijklmnopqrstuvwx")
+    with pytest.raises(gw.SecretScanRefused):
+        await gw.create_issue(gh, UPSTREAM, "Crash", "my box is 100.64.0.3")
     assert fake.log == []
 
 
 def test_env_file_is_refused():
-    assert "env_file" in secret_scan("DB_PASSWORD=hunter2\n", path=".env")
-    assert secret_scan("version = 1.0.0\nhost = 127.0.0.1\n") == []
+    assert "env_file" in gw.secret_scan("DB_PASSWORD=hunter2\n", path=".env")
+    assert gw.secret_scan("version = 1.0.0\nhost = 127.0.0.1\n") == []
 
 
 # -- branch name, PR shape, attribution -------------------------------------
 
 @pytest.mark.asyncio
-async def test_full_flow_branch_pr_and_attribution(gh, fake):
-    fork = await ensure_fork(gh, UPSTREAM)
+async def test_full_flow_branch_pr_and_attribution(http, fake):
+    gh = _session(http)
+    fork = await gw.ensure_fork(gh, UPSTREAM)
     assert fork == f"{LOGIN}/taOS"
-    branch = await push_branch(
+    branch = await gw.push_branch(
         gh, UPSTREAM, "fix-weather", {"app/weather.py": "x = 1\n"}, "Fix weather crash"
     )
     assert branch == "taos-agent/fix-weather"
@@ -157,14 +159,14 @@ async def test_full_flow_branch_pr_and_attribution(gh, fake):
         {"ref": "refs/heads/taos-agent/fix-weather", "sha": "newcommit"}
     ]
 
-    pr = await open_pr(gh, UPSTREAM, "fix-weather", "Fix weather crash", "It crashed.")
+    pr = await gw.open_pr(gh, UPSTREAM, "fix-weather", "Fix weather crash", "It crashed.")
     assert pr == {"url": f"https://github.com/{UPSTREAM}/pull/9", "number": 9}
     (sent,) = fake.bodies("POST", f"/repos/{UPSTREAM}/pulls")
     assert sent["head"] == f"{LOGIN}:taos-agent/fix-weather"
     assert sent["base"] == "dev"
     assert sent["body"].rstrip().splitlines()[-1] == ATTRIBUTION
 
-    issue = await create_issue(gh, UPSTREAM, "Weather crash", "Steps: open it.")
+    issue = await gw.create_issue(gh, UPSTREAM, "Weather crash", "Steps: open it.")
     assert issue["number"] == 8
     (sent,) = fake.bodies("POST", f"/repos/{UPSTREAM}/issues")
     assert sent["body"].rstrip().splitlines()[-1] == ATTRIBUTION
@@ -175,10 +177,11 @@ async def test_full_flow_branch_pr_and_attribution(gh, fake):
 
 
 @pytest.mark.asyncio
-async def test_existing_branch_is_fast_forwarded_never_forced(gh, fake):
+async def test_existing_branch_is_fast_forwarded_never_forced(http, fake):
+    gh = _session(http)
     fake.fork_exists = True
     fake.refs["heads/taos-agent/fix-weather"] = "oldhead"
-    await push_branch(gh, UPSTREAM, "fix-weather", {"a.py": "y = 2\n"}, "more")
+    await gw.push_branch(gh, UPSTREAM, "fix-weather", {"a.py": "y = 2\n"}, "more")
     (commit,) = fake.bodies("POST", "/git/commits")
     assert commit["parents"] == ["oldhead"]
     (patch,) = fake.bodies("PATCH", "/git/refs/heads/taos-agent/fix-weather")
@@ -196,9 +199,10 @@ def _assert_no_destructive_calls(log: list[httpx.Request]) -> None:
 
 @pytest.mark.parametrize("bad", ["", "Fix", "a/b", "../x", "-x", "x" * 61])
 @pytest.mark.asyncio
-async def test_bad_slug_is_refused(gh, fake, bad):
+async def test_bad_slug_is_refused(http, fake, bad):
+    gh = _session(http)
     with pytest.raises(ValueError):
-        await push_branch(gh, UPSTREAM, bad, {"a.py": "x\n"}, "m")
+        await gw.push_branch(gh, UPSTREAM, bad, {"a.py": "x\n"}, "m")
     assert fake.log == []
 
 
@@ -211,9 +215,9 @@ async def test_second_open_pr_is_refused(fake):
         "head": {"label": f"{LOGIN}:taos-agent/older-fix", "ref": "taos-agent/older-fix"},
     }]
     async with httpx.AsyncClient(transport=httpx.MockTransport(fake.handler)) as http:
-        gh = GitHubSession(token="gho_test", login=LOGIN, http=http)
-        with pytest.raises(OpenPullRequestExists) as exc:
-            await open_pr(gh, UPSTREAM, "fix-weather", "Fix", "body")
+        gh = _session(http, data_dir=None)
+        with pytest.raises(gw.OpenPullRequestExists) as exc:
+            await gw.open_pr(gh, UPSTREAM, "fix-weather", "Fix", "body")
     assert exc.value.url == f"https://github.com/{UPSTREAM}/pull/5"
     assert fake.bodies("POST", f"/repos/{UPSTREAM}/pulls") == []
 
@@ -225,8 +229,8 @@ async def test_same_branch_open_pr_is_returned_not_duplicated(fake):
         "head": {"label": f"{LOGIN}:taos-agent/fix-weather", "ref": "taos-agent/fix-weather"},
     }]
     async with httpx.AsyncClient(transport=httpx.MockTransport(fake.handler)) as http:
-        gh = GitHubSession(token="gho_test", login=LOGIN, http=http)
-        pr = await open_pr(gh, UPSTREAM, "fix-weather", "Fix", "body")
+        gh = _session(http, data_dir=None)
+        pr = await gw.open_pr(gh, UPSTREAM, "fix-weather", "Fix", "body")
     assert pr == {"url": f"https://github.com/{UPSTREAM}/pull/5", "number": 5}
     assert fake.bodies("POST", f"/repos/{UPSTREAM}/pulls") == []
 
@@ -238,6 +242,6 @@ async def test_other_users_taos_agent_prs_do_not_count(fake):
         "head": {"label": "bob:taos-agent/older-fix", "ref": "taos-agent/older-fix"},
     }]
     async with httpx.AsyncClient(transport=httpx.MockTransport(fake.handler)) as http:
-        gh = GitHubSession(token="gho_test", login=LOGIN, http=http)
-        pr = await open_pr(gh, UPSTREAM, "fix-weather", "Fix", "body")
+        gh = _session(http, data_dir=None)
+        pr = await gw.open_pr(gh, UPSTREAM, "fix-weather", "Fix", "body")
     assert pr["number"] == 9
