@@ -716,7 +716,10 @@ different project, and 403 when the agent lacks the `canvas_read` scope or the
   and the trash restore/purge/empty routes. NOTE: the files routes key on the
   project SLUG in the path, not the id.
 - **decisions_write**: `POST /api/decisions` (raise a human-in-the-loop
-  decision), `POST /api/decisions/{id}/answer/agent` (mirror an answer),
+  decision; a `metadata.kind` naming a server-owned gate, `execution_gate`,
+  `delegation_gate`, `device_pairing`, `app_grant`, `project_create` or
+  `collab_delegation_gate`, is refused with 400 for every caller, since only
+  the server's internal raisers may open a gate, tsk-mul5pa), `POST /api/decisions/{id}/answer/agent` (mirror an answer),
   `GET /api/decisions/{id}/agent` (read its own), `GET /api/decisions/agent`
   (list its own), `POST /api/decisions/{id}/withdraw` (withdraw its own pending
   decision as moot: body `{"reason": "..."}`, reason required (400), allowed
