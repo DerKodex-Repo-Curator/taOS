@@ -229,3 +229,46 @@ def test_cast_media_exemption_is_one_prefix_read_only():
     assert _is_exempt("GET", "/cast/other") is False
     assert _is_exempt("POST", "/api/cast/sessions") is False
     assert _is_exempt("GET", "/api/cast/sessions") is False
+
+
+@pytest.mark.asyncio
+async def test_cast_token_not_written_to_access_log(client, canvas_ready, tv):
+    """uvicorn's access log records the full request line, query string included.
+
+    A refreshed token stays live, so a token in the log is a live media
+    credential for anyone who can read the journal. The line uvicorn writes
+    must carry the path but never the token.
+    """
+    import logging
+
+    pid = await _project(canvas_ready, "cast-accesslog")
+    cast = await _start_cast(client, pid)
+    lines: list[str] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):
+            lines.append(record.getMessage())
+
+    import uvicorn
+
+    # uvicorn applies its own logging dictConfig when the server is configured,
+    # after create_app; the redaction must survive it.
+    uvicorn.Config(canvas_ready)
+    access = logging.getLogger("uvicorn.access")
+    handler = _Capture()
+    access.addHandler(handler)
+    old_level = access.level
+    access.setLevel(logging.INFO)
+    try:
+        # The exact call uvicorn's protocol makes for every response.
+        access.info(
+            '%s - "%s %s HTTP/%s" %d',
+            "192.168.1.50:51234", "GET", _media(pid, cast["token"]), "1.1", 200,
+        )
+    finally:
+        access.removeHandler(handler)
+        access.setLevel(old_level)
+    assert len(lines) == 1
+    assert f"/cast/media/canvas/{pid}/still.png" in lines[0]
+    assert cast["token"] not in lines[0]
+    assert "tcast_" not in lines[0].replace("tcast_[redacted]", "")

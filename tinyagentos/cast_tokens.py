@@ -23,6 +23,8 @@ closed. Casts are minutes long and the sender re-mints on restart.
 from __future__ import annotations
 
 import hashlib
+import logging
+import re
 import secrets
 import threading
 import time
@@ -32,6 +34,7 @@ from typing import Callable
 
 CAST_TOKEN_PREFIX = "tcast_"
 DEFAULT_TTL_SECONDS = 300
+_TOKEN_IN_TEXT = re.compile(re.escape(CAST_TOKEN_PREFIX) + r"[A-Za-z0-9_-]+")
 
 
 def hash_cast_token(token: str) -> str:
@@ -166,3 +169,36 @@ class CastTokenStore:
         for h in stale:
             grant = self._by_hash.pop(h)
             self._hash_by_cast.pop(grant.cast_id, None)
+
+
+def _redact(value):
+    if isinstance(value, str):
+        return _TOKEN_IN_TEXT.sub(CAST_TOKEN_PREFIX + "[redacted]", value)
+    return value
+
+
+class CastTokenLogRedactor(logging.Filter):
+    """Strip cast tokens from log records before any handler formats them.
+
+    A TV cannot send headers, so the token rides in ``?token=`` and uvicorn's
+    access log would otherwise record it with the request line. A refreshed
+    token stays live, so a logged one is a live media credential.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.msg = _redact(record.msg)
+        if isinstance(record.args, tuple):
+            record.args = tuple(_redact(a) for a in record.args)
+        return True
+
+
+_ACCESS_LOG_REDACTOR = CastTokenLogRedactor()
+
+
+def install_access_log_redaction() -> None:
+    """Attach the redactor to uvicorn's access logger (idempotent).
+
+    A logger-level filter survives uvicorn's own dictConfig, which replaces
+    handlers but never removes filters it did not configure.
+    """
+    logging.getLogger("uvicorn.access").addFilter(_ACCESS_LOG_REDACTOR)

@@ -1943,11 +1943,15 @@ session, cookie or bearer. So casting never hands a TV an ordinary taOS URL:
   GET/HEAD; the route is gated solely by the cast token: unknown, expired or
   revoked -> 401, a token for another view -> 403, a token bound to a
   `device_address` fetched from another address -> 403.
+  The address check reads the TCP peer, so it holds only on a direct LAN
+  listener: behind a local reverse proxy (tailscale serve, the gateway
+  listener) the peer is the proxy and a bound cast always answers 403.
 
 The token (`tcast_...`) is a separate random secret stored only as a SHA-256
 hash, in memory (a restart revokes every cast). It is never a session token or
-a registry JWT and is accepted by nothing but the cast media route. The
-paired-device registry's unpair MUST call
+a registry JWT and is accepted by nothing but the cast media route. It rides
+in `?token=` because a TV cannot send headers, so the uvicorn access log
+redacts it to `tcast_[redacted]`. The paired-device registry's unpair MUST call
 `app.state.cast_tokens.revoke_for_device(device_id)`; cast-end revocation alone
 does not cover a device unpaired mid-cast.
 
