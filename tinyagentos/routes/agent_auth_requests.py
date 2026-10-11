@@ -1212,7 +1212,9 @@ async def add_agent_to_project(
     live = [g for g in candidates if datetime.fromisoformat(g["expires_at"]) > now_dt]
     deferred_grant_with_expiry = None
     if candidates and not live:
-        latest_expired = max(g["expires_at"] for g in candidates)
+        latest_expired = max(
+            candidates, key=lambda g: datetime.fromisoformat(g["expires_at"])
+        )["expires_at"]
         raise HTTPException(
             status_code=400,
             detail=f"cannot bind agent {canonical_id} to project {project_id}: "
