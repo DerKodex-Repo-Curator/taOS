@@ -12,6 +12,8 @@ import {
   Activity,
   Clock,
   AlertCircle,
+  Upload,
+  Brain,
 } from "lucide-react";
 import { MobileSplitView } from "@/components/mobile/MobileSplitView";
 import { useIsMobile } from "@/hooks/use-is-mobile";
@@ -97,6 +99,16 @@ const SOURCE_LABELS: Record<string, string> = {
   file: "Files",
   manual: "Manual",
 };
+
+const ACCEPTED_TYPES = [".txt", ".md", ".pdf", ".html", ".json", ".csv"];
+const ACCEPTED_MIME = [
+  "text/plain",
+  "text/markdown",
+  "application/pdf",
+  "text/html",
+  "application/json",
+  "text/csv",
+];
 
 interface SourceStorage {
   source_type: string;
@@ -344,7 +356,7 @@ export function LibraryApp({ windowId: _windowId }: { windowId: string }) {
   const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
 
   /* ---------------------------------------------------------------- */
-  /*  Data fetching                                                    */
+  /*  Data fetching (forward-declared for file upload handlers)       */
   /* ---------------------------------------------------------------- */
 
   const fetchItems = useCallback(async () => {
@@ -366,6 +378,96 @@ export function LibraryApp({ windowId: _windowId }: { windowId: string }) {
     }
     setLoading(false);
   }, [filters, search, searchMode, offset]);
+
+  /* ---------- file upload ---------- */
+  const [dragOver, setDragOver] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [embedding, setEmbedding] = useState(false);
+  const [embedAgentPickerOpen, setEmbedAgentPickerOpen] = useState(false);
+  const [embedTargetItem, setEmbedTargetItem] = useState<KnowledgeItem | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const isValidFile = useCallback((file: globalThis.File) => {
+    const ext = "." + file.name.split(".").pop()?.toLowerCase();
+    return ACCEPTED_TYPES.includes(ext) || ACCEPTED_MIME.includes(file.type);
+  }, []);
+
+  const handleFileUpload = useCallback(async (file: globalThis.File) => {
+    if (!isValidFile(file)) return;
+    setUploading(true);
+    setUploadProgress(0);
+
+    const formData = new FormData();
+    formData.append("file", file);
+    // No agent specified - file lands in library, subscription/auto-ingest decides embedding
+
+    try {
+      const res = await fetch("/api/import/upload", {
+        method: "POST",
+        body: formData,
+      });
+      if (res.ok) {
+        setUploadProgress(100);
+        // Refresh items to show the new file
+        await fetchItems();
+      }
+    } catch {
+      /* ignore */
+    } finally {
+      setUploading(false);
+      setUploadProgress(0);
+    }
+  }, [isValidFile, fetchItems]);
+
+  const handleFiles = useCallback((fileList: globalThis.File[]) => {
+    const valid = Array.from(fileList).filter(isValidFile);
+    valid.forEach(handleFileUpload);
+  }, [isValidFile, handleFileUpload]);
+
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setDragOver(false);
+    const dropped = Array.from(e.dataTransfer.files);
+    handleFiles(dropped);
+  }, [handleFiles]);
+
+  const handleFileInput = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files) {
+      handleFiles(Array.from(e.target.files));
+    }
+    e.target.value = "";
+  }, [handleFiles]);
+
+  const handleEmbedNow = useCallback(async (item: KnowledgeItem) => {
+    setEmbedTargetItem(item);
+    setEmbedAgentPickerOpen(true);
+  }, []);
+
+  const handleEmbedConfirm = useCallback(async (agentName: string) => {
+    if (!embedTargetItem) return;
+    setEmbedding(true);
+    try {
+      const res = await fetch("/api/import/embed", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agent: agentName }),
+      });
+      if (res.ok) {
+        // Could show success toast here
+      }
+    } catch {
+      /* ignore */
+    } finally {
+      setEmbedding(false);
+      setEmbedAgentPickerOpen(false);
+      setEmbedTargetItem(null);
+    }
+  }, [embedTargetItem]);
+
+  /* ---------------------------------------------------------------- */
+  /*  Data fetching (remaining)                                        */
+  /* ---------------------------------------------------------------- */
 
   useEffect(() => {
     fetchItems();
@@ -1024,6 +1126,78 @@ export function LibraryApp({ windowId: _windowId }: { windowId: string }) {
             ))}
           </div>
         </div>
+      </div>
+
+      {/* File drop zone */}
+      <div className="px-4 pb-3 shrink-0">
+        <Card
+          onDragOver={(e) => {
+            e.preventDefault();
+            setDragOver(true);
+          }}
+          onDragLeave={() => setDragOver(false)}
+          onDrop={handleDrop}
+          onClick={() => fileInputRef.current?.click()}
+          className={`border-2 border-dashed transition-colors cursor-pointer ${
+            dragOver
+              ? "border-accent bg-accent/5"
+              : "border-white/10 hover:border-white/20"
+          }`}
+          role="button"
+          aria-label="Drop files here or click to browse"
+          tabIndex={0}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              fileInputRef.current?.click();
+            }
+          }}
+        >
+          <CardContent className="flex flex-col items-center justify-center gap-3 p-6">
+            <Upload size={32} className="text-shell-text-tertiary" />
+            <div className="text-center">
+              <p className="text-sm text-shell-text-secondary">
+                Drag and drop files here
+              </p>
+              <p className="text-xs text-shell-text-tertiary mt-1">
+                {ACCEPTED_TYPES.join(", ")}
+              </p>
+            </div>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={(e) => {
+                e.stopPropagation();
+                fileInputRef.current?.click();
+              }}
+            >
+              Browse
+            </Button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              accept={ACCEPTED_TYPES.join(",")}
+              onChange={handleFileInput}
+              className="hidden"
+              aria-label="Select files to import"
+            />
+            {uploading && (
+              <div className="w-full space-y-1.5">
+                <div className="flex items-center justify-between text-xs text-shell-text-secondary">
+                  <span>Uploading...</span>
+                  <span className="tabular-nums">{uploadProgress}%</span>
+                </div>
+                <div className="h-2 w-full rounded-full bg-white/5" role="progressbar" aria-valuenow={uploadProgress} aria-valuemin={0} aria-valuemax={100}>
+                  <div
+                    className="h-full rounded-full bg-accent transition-all"
+                    style={{ width: `${uploadProgress}%` }}
+                  />
+                </div>
+              </div>
+            )}
+          </CardContent>
+        </Card>
       </div>
 
       {/* Items */}
@@ -1803,7 +1977,7 @@ export function LibraryApp({ windowId: _windowId }: { windowId: string }) {
       </div>
 
       {/* Action bar */}
-      <div className="border-t border-white/5 px-5 py-2.5 flex items-center gap-2 shrink-0">
+      <div data-testid="detail-action-bar" className="border-t border-white/5 px-5 py-2.5 flex items-center gap-2 shrink-0">
         {selectedItem.source_url && (
           <Button
             variant="outline"
@@ -1826,6 +2000,19 @@ export function LibraryApp({ windowId: _windowId }: { windowId: string }) {
           <RefreshCw size={12} />
           Re-ingest
         </Button>
+        {selectedItem.source_type === "file" && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="text-xs gap-1.5 bg-cyan-600 text-white hover:bg-cyan-500 border-cyan-600"
+            onClick={() => handleEmbedNow(selectedItem)}
+            disabled={embedding}
+            aria-label="Embed this file into an agent now"
+          >
+            <Brain size={12} />
+            {embedding ? "Embedding..." : "Embed now"}
+          </Button>
+        )}
         {selectedItem.media_path && (
           <Button
             variant="outline"
@@ -2100,6 +2287,93 @@ export function LibraryApp({ windowId: _windowId }: { windowId: string }) {
   ) : null;
 
   /* ---------------------------------------------------------------- */
+  /*  Embed Agent Picker Modal                                         */
+  /* ---------------------------------------------------------------- */
+
+  const embedAgentPickerUI = embedAgentPickerOpen && embedTargetItem ? (
+    <div
+      className={
+        isMobile
+          ? "fixed inset-0 z-50 flex items-end bg-black/50 backdrop-blur-sm"
+          : "fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+      }
+      role="dialog"
+      aria-modal="true"
+      aria-label="Embed file into agent"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) {
+          setEmbedAgentPickerOpen(false);
+          setEmbedTargetItem(null);
+        }
+      }}
+    >
+      <div
+        className="bg-shell-surface border border-white/10 shadow-2xl flex flex-col"
+        style={
+          isMobile
+            ? { borderRadius: "20px 20px 0 0", width: "100%", maxHeight: "92%", overflowY: "auto" }
+            : { borderRadius: 12, width: 420, maxWidth: "90vw", maxHeight: "80vh" }
+        }
+      >
+        {/* Dialog header */}
+        <div className="flex items-center justify-between px-5 py-4 border-b border-white/5">
+          <div className="flex items-center gap-2">
+            <Brain size={15} className="text-cyan-400" />
+            <h2 className="text-sm font-semibold">Embed into Agent</h2>
+          </div>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => {
+              setEmbedAgentPickerOpen(false);
+              setEmbedTargetItem(null);
+            }}
+            aria-label="Close embed picker"
+            className="text-xs"
+          >
+            Close
+          </Button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-5 space-y-4">
+          <p className="text-xs text-shell-text-secondary">
+            Select an agent to embed <span className="font-medium">{embedTargetItem.title}</span> into:
+          </p>
+          {agents.length === 0 ? (
+            <p className="text-xs text-shell-text-tertiary italic">No agents available</p>
+          ) : (
+            <div className="space-y-1">
+              {agents.map((ag) => (
+                <button
+                  key={ag.name}
+                  className="w-full flex items-center gap-2 px-3 py-2 rounded-lg bg-white/[0.03] border border-white/5 hover:bg-white/5 hover:border-cyan-500/40 transition-colors text-left"
+                  onClick={() => handleEmbedConfirm(ag.name)}
+                  disabled={embedding}
+                  role="option"
+                  aria-selected={false}
+                >
+                  <span
+                    className="w-2.5 h-2.5 rounded-full shrink-0"
+                    style={{ backgroundColor: ag.color }}
+                    aria-hidden="true"
+                  />
+                  <span className="text-xs font-medium">{ag.name}</span>
+                </button>
+              ))}
+            </div>
+          )}
+          {embedding && (
+            <div className="flex items-center gap-2 text-xs text-cyan-400">
+              <div className="w-4 h-4 border-2 border-cyan-400 border-t-transparent rounded-full animate-spin" />
+              Embedding into agent...
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  ) : null;
+
+  /* ---------------------------------------------------------------- */
   /*  Root render                                                      */
   /* ---------------------------------------------------------------- */
 
@@ -2141,6 +2415,7 @@ export function LibraryApp({ windowId: _windowId }: { windowId: string }) {
         }
       />
       {categoryManagerUI}
+      {embedAgentPickerUI}
     </div>
   );
 }
