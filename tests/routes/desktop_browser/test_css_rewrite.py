@@ -45,27 +45,24 @@ def test_data_uri_with_parentheses_survives():
     assert svg.encode() in out
 
 
-def test_pathological_url_input_is_bounded():
-    """Pathological inputs must complete within 2 seconds."""
-    from tinyagentos.routes.desktop_browser.rewriter import rewrite_css
+@pytest.mark.parametrize(
+    "name, css_bytes",
+    [
+        pytest.param("url_repeated", b"url(" * 20000, id="url_repeated"),
+        pytest.param("spaces_4k", b"url(" + b" " * 4096, id="spaces_4k"),
+        pytest.param("nested", b"a{b:url(x" * 20000, id="nested"),
+    ],
+)
+def test_pathological_url_input_is_bounded(name, css_bytes):
+    """Hostile stylesheets must not stall the event loop: each input finishes under 2s."""
     import time
-    
-    # Build pathological patterns as described in the issue
-    # 1. "url(" repeated many times - cause catastrophic backtracking
-    pattern1 = '"url(" * 20000'
-    # 2. "url(" + 4KB of spaces - cubic backtracking  
-    pattern2 = '"url(" + " " * 4096'
-    # 3. "a{b:url(x" repeated to 180KB - nested quantifier issues
-    pattern3 = '"a{b:url(x" * 20000'
-    
-    # Test each pattern under timeout
-    for name, css_bytes in [("url_repeated", pattern1.encode()),
-                           ("spaces_many", pattern2.encode()),
-                           ("nested", pattern3.encode())]:
-        start = time.perf_counter()
-        out = rewrite_css(css_bytes, base_url="https://example.com/", proxy=_proxy)
-        elapsed = time.perf_counter() - start
-        assert elapsed < 2.0, f"{name} took {elapsed}s (must be <2.0s)"
+
+    from tinyagentos.routes.desktop_browser.rewriter import rewrite_css
+
+    start = time.perf_counter()
+    rewrite_css(css_bytes, base_url="https://example.com/", proxy=_proxy)
+    elapsed = time.perf_counter() - start
+    assert elapsed < 2.0, f"{name} ({len(css_bytes)} bytes) took {elapsed:.1f}s (must be <2.0s)"
 
 
 @pytest.mark.asyncio
@@ -95,7 +92,7 @@ class TestProxyRewritesCssResponse:
     @respx.mock
     async def test_oversized_css_body_is_served_unrewritten(self, client):
         """CSS >512 KiB is served unchanged to avoid catastrophic backtracking."""
-        # Create CSS content larger than 512 KiB (536,870,912 bytes)
+        # Create CSS content larger than 512 KiB (524,288 bytes)
         oversized_content = b".class {" + b"url(x)" * 200000 + b"}"
         respx.get("http://example.com/oversized.css").mock(
             return_value=Response(

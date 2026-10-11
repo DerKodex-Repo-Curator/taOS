@@ -66,7 +66,7 @@ _FETCH_TIMEOUT = 15.0   # seconds — total deadline including all redirect hops
 _HOP_TIMEOUT = 5.0      # seconds — per-operation (connect + read) limit per hop
 _MAX_RESPONSE_BYTES = 10 * 1024 * 1024  # 10 MB hard cap
 _MAX_REQUEST_BYTES = 10 * 1024 * 1024   # 10 MB cap on forwarded request bodies (POST forms/uploads)
-# CSS rewriting limit — larger bodies are served unchanged to avoid catastrophic backtracking
+# CSS rewriting limit: larger bodies are served unchanged to avoid catastrophic backtracking
 _CSS_REWRITE_MAX_BYTES = 512 * 1024  # 512 KiB
 # Request headers we forward to upstream for non-GET methods. Only the content
 # framing — never the client's cookies (we use the server-side jar), Host,
