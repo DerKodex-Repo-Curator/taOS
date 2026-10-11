@@ -67,6 +67,21 @@ describe("CardSwitcher shell windows", () => {
     expect(props.onSelectApp).not.toHaveBeenCalled();
   });
 
+  it.each(["Enter", " "])("keyboard %j on a card focuses the window", async (key) => {
+    const props = setup();
+    await flush();
+    fireEvent.keyDown(screen.getByRole("button", { name: "Switch to Browser" }), { key });
+    expect(focus).toHaveBeenCalledWith(12);
+    expect(props.onClose).toHaveBeenCalled();
+  });
+
+  it("Enter on the X button does not also switch to the card", async () => {
+    setup();
+    await flush();
+    fireEvent.keyDown(screen.getByRole("button", { name: "Close Browser" }), { key: "Enter" });
+    expect(focus).not.toHaveBeenCalled();
+  });
+
   it("the X button closes the window and refreshes the list", async () => {
     setup();
     await flush();

@@ -144,6 +144,14 @@ export function CardSwitcher({ open, onClose, onSelectApp, onLaunchpad }: Props)
           e.stopPropagation();
           onSelect();
         }}
+        onKeyDown={(e) => {
+          // Only the card itself: Enter on the X button must not also switch.
+          if (e.target !== e.currentTarget) return;
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onSelect();
+          }
+        }}
         role="button"
         aria-label={`Switch to ${name}`}
         tabIndex={0}
