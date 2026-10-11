@@ -47,6 +47,20 @@ GATE_DECISION_KINDS = ("execution_gate", "delegation_gate", "app_grant")
 # metadata.kind can never mint a grant on approval.
 SERVER_RAISED_KEY = "_server_raised"
 
+# Server-owned metadata kinds (tsk-mul5pa, Jay ruling 2026-09-02).  Only the
+# internal raisers may create a decision carrying one of these; the public
+# create path answers HTTP 400 whoever the caller is.  The human approving a
+# card sees the caller's free-text question, not the metadata that drives the
+# grant, so a privileged kind supplied over the wire is refused outright.
+SERVER_OWNED_KINDS = (
+    "execution_gate",
+    "delegation_gate",
+    "device_pairing",
+    "app_grant",
+    "project_create",
+    "collab_delegation_gate",
+)
+
 
 def _bus_url() -> str:
     return os.environ.get("TAOS_A2A_BUS_URL", _DEFAULT_BUS_URL).rstrip("/")
@@ -333,6 +347,11 @@ async def create_decision(
         return JSONResponse({"error": f"priority must be one of {PRIORITIES}"}, status_code=400)
     if body.type in ("single_select", "multi_select") and not body.options:
         return JSONResponse({"error": "select types require options"}, status_code=400)
+    if isinstance(body.metadata, dict) and body.metadata.get("kind") in SERVER_OWNED_KINDS:
+        return JSONResponse(
+            {"error": f"metadata.kind {body.metadata['kind']!r} is server-owned and cannot be set via the API"},
+            status_code=400,
+        )
 
     actor = await _resolve_decision_actor(request, body.project_id, agent_cid)
     # Agent identity is authoritative; a human may set from_agent in the body.

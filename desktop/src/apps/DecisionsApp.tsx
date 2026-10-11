@@ -16,6 +16,7 @@ import { Button, Textarea } from "@/components/ui";
 import { ConsentActions } from "@/components/ConsentActions";
 import { useRefreshOnFocus } from "@/hooks/use-refresh-on-focus";
 import { useOsEvents } from "@/hooks/use-os-events";
+import { GateGrantDetails } from "@/components/GateGrantDetails";
 
 type DecisionType =
   | "single_select"
@@ -71,6 +72,8 @@ interface Decision {
   withdraw_reason?: string | null;
   withdrawn_at?: number | null;
   withdrawn_by?: string | null;
+  // Grant-bearing metadata for a server-raised gate decision (tsk-mul5pa).
+  metadata?: Record<string, unknown> | null;
 }
 
 // A pending external-agent access request (consent loop). Surfaced here as an
@@ -272,6 +275,7 @@ function DecisionCard({
 
       <div className="flex flex-col gap-1">
         <p className="text-sm font-semibold text-shell-text">{decision.question}</p>
+      <GateGrantDetails metadata={decision.metadata} />
       {decision.context && (
         <p className="text-xs leading-relaxed text-shell-text-secondary">
           {decision.context}
