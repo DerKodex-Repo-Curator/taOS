@@ -13,14 +13,13 @@ import pytest
 from tinyagentos.scheduler.backend_catalog import BackendCatalog
 
 
-
 async def _until(pred, timeout=5.0):
     """Wait until predicate is True, polling with 5ms sleeps."""
     start = asyncio.get_event_loop().time()
     while not pred():
         await asyncio.sleep(0.005)
         if asyncio.get_event_loop().time() - start > timeout:
-            raise asyncio.TimeoutError(f"Predicate did not become true within {timeout}s")
+            raise TimeoutError(f"Predicate did not become true within {timeout}s")
 
 
 @pytest.mark.asyncio
