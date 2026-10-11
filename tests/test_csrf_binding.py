@@ -94,13 +94,25 @@ def test_malformed_inputs_rejected_without_raising():
 # ---------------------------------------------------------------------------
 
 
+def _csrf_cookie_lines(resp) -> list[str]:
+    return [
+        line
+        for line in resp.headers.get_list("set-cookie")
+        if line.partition("=")[0].strip() == "csrf_token"
+    ]
+
+
+def _is_deletion(line: str) -> bool:
+    return "max-age=0" in line.lower().replace(" ", "")
+
+
 def _csrf_cookie_values(resp) -> list[str]:
-    values = []
-    for line in resp.headers.get_list("set-cookie"):
-        name, _, rest = line.partition("=")
-        if name.strip() == "csrf_token":
-            values.append(rest.split(";", 1)[0].strip())
-    return values
+    """Values of the csrf_token cookies set (deletions skipped)."""
+    return [
+        line.partition("=")[2].split(";", 1)[0].strip()
+        for line in _csrf_cookie_lines(resp)
+        if not _is_deletion(line)
+    ]
 
 
 def _two_sessions(app, username):
@@ -186,6 +198,23 @@ async def test_unsafe_request_with_unbound_cookie_403_then_retry_succeeds(app):
             "/auth/logout", headers={"X-CSRF-Token": issued[0]}, follow_redirects=False
         )
     assert retry.status_code == 303
+
+
+@pytest.mark.asyncio
+async def test_reissue_deletes_host_cookie_before_setting_the_bound_one(app):
+    # A replaced cookie keeps its creation time, so a newer parent-Domain
+    # cookie planted from a sibling subdomain would stay last in the Cookie
+    # header (the one the server reads) and lock the session into 403s.
+    # Deleting first makes the re-issued cookie the newest, so it sorts last.
+    session, _ = _two_sessions(app, "bindorder")
+    async with _client(app, {"taos_session": session, "csrf_token": "ab" * 32}) as c:
+        resp = await c.get("/auth/status")
+    lines = _csrf_cookie_lines(resp)
+    assert len(lines) == 2, lines
+    assert _is_deletion(lines[0]) and "domain=" not in lines[0].lower()
+    assert not _is_deletion(lines[1])
+    issued = _csrf_cookie_values(resp)
+    assert csrf.verify_bound(csrf.get_csrf_secret(app), issued[0], session) is True
 
 
 @pytest.mark.asyncio

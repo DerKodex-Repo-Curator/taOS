@@ -206,6 +206,7 @@ class CSRFMiddleware(BaseHTTPMiddleware):
         else:
             bind_to = None
         token = None
+        replace_host_cookie = False
         if bind_to:
             # Re-issue whenever the cookie does not verify for this session:
             # a pre-login unbound token, a pre-change cookie, or one planted
@@ -213,9 +214,16 @@ class CSRFMiddleware(BaseHTTPMiddleware):
             secret = get_csrf_secret(request.app)
             if issued_session or not verify_bound(secret, existing, bind_to):
                 token = mint_csrf_token(secret, bind_to)
+                replace_host_cookie = True
         elif not existing:
             # No session yet (sign-in page): today's unbound token.
             token = secrets.token_hex(_TOKEN_BYTES)
+        if replace_host_cookie:
+            # Delete before setting: a replaced cookie keeps its creation time,
+            # so a newer parent-Domain csrf_token planted from a sibling
+            # subdomain would stay last in the Cookie header (the value read
+            # here) and every retry would 403. A fresh cookie sorts last.
+            response.delete_cookie(_COOKIE_NAME, samesite="strict", path="/")
         if token:
             response.set_cookie(
                 _COOKIE_NAME,
