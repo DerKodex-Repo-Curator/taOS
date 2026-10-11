@@ -1635,23 +1635,22 @@ Which of its own decisions come back depends on the shape of the grant:
 
 | grant | returns |
 |---|---|
-| global (null-project) | **null-project decisions ONLY** |
+| global (null-project) only | **null-project decisions ONLY** |
 | exactly one project | that project's decisions, filtered in the store query |
-| two or more projects | fetched by agent, then filtered in Python |
+| two or more scopes (global counts as one) | the union, one store query per scope, merged newest first |
 
 **A global grant does NOT mean "see everything".** It means null-project
 decisions, matching the rule `_resolve_decision_actor` already applies when the
 agent POSTS a decision: an agent with a global grant raises null-project
-decisions, so that is what it reads back. Anything relying on a global grant
-returning every project's decisions is relying on the older, wider behaviour.
+decisions, so that is what it reads back. An agent that also holds a grant on
+project B can post there too, so it also reads back its project-B decisions;
+projects it holds no grant for stay hidden. The registry-JWT path of
+`GET /api/decisions` returns the same set.
 
-**The `limit` interacts with scoping and only two of the three paths are safe.**
-The global and single-project paths push the project filter into the store query,
-so the 500 limit applies AFTER scoping (issue #2194). The **two-or-more-project
-path still fetches up to 500 rows for the agent and filters afterwards in
-Python**, so an agent holding grants on several projects and carrying more than
-500 decisions in total can still lose allowed-project rows to the limit. Same
-shape as the original bug, narrower blast radius.
+**The `limit` applies AFTER scoping (issue #2194).** Each granted scope
+(global, or one project) is its own store query with the project filter inside
+it, and the merged result is capped at 500 newest first, so decisions in
+ungranted projects can never crowd allowed ones out of the list.
 
 ## MCP tool calls (`POST /api/mcp/call`)
 
