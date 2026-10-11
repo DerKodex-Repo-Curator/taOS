@@ -1,9 +1,10 @@
 """Tests for the store verification check runner."""
 
-import pytest
 from pathlib import Path
 
-import tinyagentos.store_verification as store_verification
+import pytest
+
+from tinyagentos import store_verification
 from tinyagentos.store_verification import run_checks
 
 
@@ -228,3 +229,34 @@ class TestRunChecks:
         builds_check = next(c for c in result["checks"] if c["name"] == "builds")
         assert builds_check["status"] == "fail"
         assert "escapes package dir" in builds_check["detail"]
+
+    @pytest.mark.asyncio
+    async def test_container_ports_checked_even_with_top_level_ports(self, tmp_path: Path):
+        """Port hygiene must check container.ports even when top-level ports exists."""
+        p = tmp_path / "container-app"
+        p.mkdir()
+        _make_manifest_yaml(
+            "id: container-app\nname: ContainerApp\nversion: 1.0.0\napp_type: container\n"
+            "ports: []\ncontainer:\n  ports: [6969]\n",
+            p,
+        )
+        result = await run_checks(p)
+        assert result["ok"] is False
+        port_check = next(c for c in result["checks"] if c["name"] == "port_hygiene")
+        assert port_check["status"] == "fail"
+        assert "6969" in port_check["detail"]
+
+    @pytest.mark.asyncio
+    async def test_unresolvable_app_dir_returns_runner_error(self, tmp_path: Path):
+        """run_checks must not raise on an app_dir that Path.resolve() rejects.
+
+        A self-referencing symlink does not make resolve() raise on Python 3.13,
+        so the unresolvable path is an embedded NUL byte (ValueError).
+        """
+        p = tmp_path / "test\0null"
+        result = await run_checks(p)
+        assert result["ok"] is False
+        runner_error_checks = [c for c in result["checks"] if c["name"] == "runner_error"]
+        assert len(runner_error_checks) > 0
+        assert all(c["status"] == "fail" for c in runner_error_checks)
+        assert any("app_dir could not be resolved" in c["detail"] for c in runner_error_checks)
