@@ -1,12 +1,21 @@
+import { Suspense, lazy } from "react";
 import { useEffect, useId, useRef, useState } from "react";
 import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent } from "react";
 import { Download } from "lucide-react";
-import { CanvasBoard } from "./CanvasBoard";
-import { canvasApi } from "./canvas-api";
 import { AppErrorBoundary } from "@/components/AppErrorBoundary";
+import { getCanvasEngine } from "./canvas-engine";
+
+const CanvasBoard = lazy(() =>
+  import("./CanvasBoard").then((m) => ({ default: m.CanvasBoard }))
+);
+const ExcalidrawCanvas = lazy(() =>
+  import("./ExcalidrawCanvas").then((m) => ({ default: m.default }))
+);
 
 export function CanvasView({
-  projectId, projectSlug, elementId,
+  projectId,
+  projectSlug,
+  elementId,
 }: { projectId: string; projectSlug: string; elementId?: string | null }) {
   return (
     <div style={{ position: "relative", height: "100%", padding: 0 }}>
@@ -14,7 +23,13 @@ export function CanvasView({
           down the whole Projects app. Keyed by project so switching projects
           gives a fresh boundary. */}
       <AppErrorBoundary key={projectId}>
-        <CanvasBoard projectId={projectId} projectSlug={projectSlug} elementId={elementId} />
+        <Suspense fallback={null}>
+          {getCanvasEngine() === "excalidraw" ? (
+            <ExcalidrawCanvas projectId={projectId} elementId={elementId} />
+          ) : (
+            <CanvasBoard projectId={projectId} projectSlug={projectSlug} elementId={elementId} />
+          )}
+        </Suspense>
       </AppErrorBoundary>
       {/* Deliberately a sibling of the engine, not inside it: the recovery
           downloads must survive the drawing-engine swap, the tldraw removal,
@@ -80,7 +95,7 @@ function CanvasBackupMenu({ projectId, projectSlug }: { projectId: string; proje
           }}
         >
           <a
-            href={canvasApi.snapshotTldrUrl(projectId)}
+            href={`/api/projects/${projectId}/canvas/snapshot.tldr`}
             download={`${projectSlug}-canvas.tldr`}
             onClick={() => setOpen(false)}
             style={linkStyle}
@@ -88,7 +103,7 @@ function CanvasBackupMenu({ projectId, projectSlug }: { projectId: string; proje
             Download .tldr (open in tldraw)
           </a>
           <a
-            href={canvasApi.elementsJsonUrl(projectId)}
+            href={`/api/projects/${projectId}/canvas/elements?include_deleted=true`}
             download={`${projectSlug}-canvas.json`}
             onClick={() => setOpen(false)}
             style={linkStyle}
