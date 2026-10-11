@@ -10,7 +10,9 @@ A new action under the default ``ask`` policy is stored pending and a
 ``taos_agent.action_pending`` event goes to the owner's ``user:<id>`` channel
 (the chat confirm card). Under ``auto`` it is stored confirmed with
 ``confirmed_by=auto`` and no card is shown. The policy lives in the
-``taos_agent`` preference blob as ``action_policy[kind]``.
+``taos_agent`` preference blob of the signed-in user (keyed by their user
+id, not the shared ``"user"`` key) as ``action_policy[kind]``, so one
+account's ``auto`` never skips the card for another account.
 
 Every request and every outcome (executed, declined, failed) is recorded as
 an ``external_write`` row on the ``taos-agent`` trace (spec section 4).
@@ -114,8 +116,8 @@ async def _owned(request: Request, action_id: str, uid: str) -> dict | None:
     return row
 
 
-async def _policy_for(request: Request, kind: str) -> str:
-    prefs = await request.app.state.desktop_settings.get_preference("user", _PREF_NAMESPACE)
+async def _policy_for(request: Request, uid: str, kind: str) -> str:
+    prefs = await request.app.state.desktop_settings.get_preference(uid, _PREF_NAMESPACE)
     policy = (prefs.get("action_policy") or {}).get(kind, POLICY_ASK)
     return policy if policy == POLICY_AUTO else POLICY_ASK
 
@@ -125,7 +127,7 @@ async def create_action(request: Request, body: ActionCreate):
     uid = getattr(request.state, "user_id", None)
     if not uid:
         return _error(401, "authentication required")
-    auto = await _policy_for(request, body.kind) == POLICY_AUTO
+    auto = await _policy_for(request, uid, body.kind) == POLICY_AUTO
     row = await request.app.state.taos_agent_actions.create(
         user_id=uid, kind=body.kind, summary=body.summary, payload=body.payload, auto=auto,
     )
@@ -203,9 +205,9 @@ async def put_policy(request: Request, body: PolicyUpdate):
     if isinstance(uid, JSONResponse):
         return uid
     store = request.app.state.desktop_settings
-    prefs = await store.get_preference("user", _PREF_NAMESPACE)
+    prefs = await store.get_preference(uid, _PREF_NAMESPACE)
     policy = dict(prefs.get("action_policy") or {})
     policy[body.kind] = body.policy
     prefs["action_policy"] = policy
-    await store.save_preference("user", _PREF_NAMESPACE, prefs)
+    await store.save_preference(uid, _PREF_NAMESPACE, prefs)
     return {"action_policy": policy}
