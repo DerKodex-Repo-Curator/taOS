@@ -1,11 +1,14 @@
-"""taOS Agent action gate: pending -> confirmed | declined -> executed.
+"""taOS Agent action gate: pending -> confirmed | declined -> executing -> executed | failed.
 
 Spec (taOS Agent full authority) section 3.1. Every tier-B operation the
 agent wants to perform (an external write, an irreversible local change) is
 first recorded here as a PENDING action. Only a confirmed action can be
 executed, and only once: ``claim_for_execution`` flips ``confirmed`` to
-``executed`` in a single conditional UPDATE, so two concurrent execute calls
-cannot both win.
+``executing`` in a single conditional UPDATE, so two concurrent execute calls
+cannot both win. The row becomes ``executed`` only after the executor returns
+(``mark_executed``) or ``failed`` when it raises. A row left ``executing`` (the
+process stopped mid-write) is never replayed: the external write may already
+have happened, so the user sees it in the action list and decides.
 
 Executors are plain async callables registered per kind on
 ``app.state.taos_agent_action_executors`` (``{kind: async fn(action) -> dict}``);
@@ -22,6 +25,7 @@ from tinyagentos.base_store import BaseStore
 STATE_PENDING = "pending"
 STATE_CONFIRMED = "confirmed"
 STATE_DECLINED = "declined"
+STATE_EXECUTING = "executing"
 STATE_EXECUTED = "executed"
 STATE_FAILED = "failed"
 
@@ -106,17 +110,37 @@ class TaosAgentActionStore(BaseStore):
             return None
         return await self.get(action_id)
 
+    async def list_for_user(self, user_id: str, *, state: str | None = None) -> list[dict]:
+        """The owner's actions, oldest first, optionally filtered by state."""
+        assert self._db is not None
+        sql = "SELECT * FROM taos_agent_actions WHERE user_id = ?"
+        args: tuple = (user_id,)
+        if state is not None:
+            sql += " AND state = ?"
+            args += (state,)
+        cursor = await self._db.execute(sql + " ORDER BY created_at LIMIT 200", args)
+        return [self._row(cursor, row) for row in await cursor.fetchall()]
+
     async def claim_for_execution(self, action_id: str) -> dict | None:
-        """Atomically flip confirmed -> executed. None unless this call won."""
+        """Atomically flip confirmed -> executing. None unless this call won."""
         assert self._db is not None
         cursor = await self._db.execute(
-            "UPDATE taos_agent_actions SET state = ?, executed_at = ? "
-            "WHERE id = ? AND state = ?",
-            (STATE_EXECUTED, time.time(), action_id, STATE_CONFIRMED),
+            "UPDATE taos_agent_actions SET state = ? WHERE id = ? AND state = ?",
+            (STATE_EXECUTING, action_id, STATE_CONFIRMED),
         )
         await self._db.commit()
         if cursor.rowcount != 1:
             return None
+        return await self.get(action_id)
+
+    async def mark_executed(self, action_id: str) -> dict | None:
+        """Record that the executor finished: executing -> executed."""
+        assert self._db is not None
+        await self._db.execute(
+            "UPDATE taos_agent_actions SET state = ?, executed_at = ? WHERE id = ? AND state = ?",
+            (STATE_EXECUTED, time.time(), action_id, STATE_EXECUTING),
+        )
+        await self._db.commit()
         return await self.get(action_id)
 
     async def mark_failed(self, action_id: str, error: str) -> None:
