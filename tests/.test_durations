@@ -1,0 +1,6 @@
+{
+    "tests/integration/test_convert_flat_to_lxc.py::test_convert_flat_to_lxc": 0.00046989135444164276,
+    "tests/integration/test_disk_quota_enforcement.py::test_dedup_increases_bytes_deduped": 0.0005253655835986137,
+    "tests/integration/test_disk_quota_enforcement.py::test_quota_enforced_and_isolated": 0.000509324949234724,
+    "tests/integration/test_worker_lxc_install.py::test_worker_lxc_install_full_flow": 0.0004625404253602028
+}
