@@ -1625,6 +1625,23 @@ A Civitai URL added to the Library takes the same path: `detect_kind` tags it
 `url:civitai` and `CivitaiProcessor` runs the identical ingest job, linking the
 resulting `lora_id` back onto the library item.
 
+## Cast discovery status (`GET /api/cast/discovery/status`, session-only)
+
+Route module `tinyagentos/routes/cast_discovery.py`. Session cookie only; no
+registry scope reaches it. It reports whether the opt-in mDNS reflector
+(`mdns_reflector.enabled` in config.yaml, off by default) is actually bridging
+cast discovery across a container boundary.
+
+- `{"state": "ok"}` -- running, bridging at least two interfaces, traffic seen.
+- `{"state": "unavailable", "reason": ...}` -- enabled but not bridging.
+  `reason` is `not_running`, `single_interface`, `bind_failed`, `send_failed`,
+  `no_traffic`, or `start_failed` (enabled in config but the reflector raised
+  during startup; `error` carries the message).
+- `{"state": "disabled"}` -- not enabled; it makes no claim either way.
+
+The cast device list must treat `unavailable` as "discovery is not working",
+never as an empty network.
+
 ## What `GET /api/decisions/agent` returns (grant scoping)
 
 Route module `tinyagentos/routes/decisions.py`, scope `decisions_write`. Lists
