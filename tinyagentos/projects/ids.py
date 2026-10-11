@@ -17,12 +17,12 @@ def new_id(prefix: str) -> str:
 
 def friendly_project_id(slug: str, now: float | None = None) -> str:
     """Generate a human-readable project ID from a slug and current month.
-    
+
     Returns prj-{stem}-{yymm} where:
     - stem is the slug lower-cased, keeping only [a-z0-9-], trimmed of
       leading/trailing hyphens, cut to 20 chars.
     - yymm is the current year/month as two-digit strings (e.g., 2510 for Oct 2025)
-    
+
     If the stem is empty, falls back to a random ID.
     """
     if now is None:
