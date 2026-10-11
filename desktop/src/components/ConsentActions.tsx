@@ -180,6 +180,9 @@ export function ConsentActions({
     needsProject &&
     granted.some((s) => s === "project_tasks" || s.startsWith("canvas_"));
   const [makeLead, setMakeLead] = useState(false);
+  // The request was accepted but the lead assignment is unconfirmed. Terminal:
+  // Allow/Deny never come back, because a second approve would 409.
+  const [leadUnconfirmed, setLeadUnconfirmed] = useState(false);
   const [newName, setNewName] = useState("");
 
   useEffect(() => {
@@ -399,10 +402,8 @@ export function ConsentActions({
         const data = (await res.json().catch(() => ({}))) as {
           lead_assigned?: boolean;
         };
-        if (data.lead_assigned === false) {
-          setError(
-            "Approved, but the project lead could not be set. Make the agent lead from the project's Members.",
-          );
+        if (data.lead_assigned !== true) {
+          setLeadUnconfirmed(true);
           setBusy(false);
           return;
         }
@@ -595,32 +596,50 @@ export function ConsentActions({
             )}
           </div>
         )}
-        <div className="flex flex-wrap gap-1.5">
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              decide(true);
-            }}
-            disabled={allowDisabled}
-            className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-400 border border-emerald-500/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            <CheckCircle size={11} />
-            Allow
-          </button>
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              decide(false);
-            }}
-            disabled={busy}
-            className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium bg-white/5 hover:bg-red-500/15 hover:text-red-300 text-shell-text-secondary border border-white/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            <XCircle size={11} />
-            Deny
-          </button>
-        </div>
+        {leadUnconfirmed ? (
+          <div className="flex flex-wrap items-center gap-1.5">
+            <p role="alert" className="text-[11px] text-amber-300">
+              Approved, but the project lead could not be set. Make the agent lead from the project&apos;s Members.
+            </p>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onResolved?.();
+              }}
+              className="px-2 py-1 rounded-md text-[11px] font-medium bg-white/5 hover:bg-white/10 text-shell-text-secondary border border-white/10 transition-colors"
+            >
+              Dismiss
+            </button>
+          </div>
+        ) : (
+          <div className="flex flex-wrap gap-1.5">
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                decide(true);
+              }}
+              disabled={allowDisabled}
+              className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-400 border border-emerald-500/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <CheckCircle size={11} />
+              Allow
+            </button>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                decide(false);
+              }}
+              disabled={busy}
+              className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium bg-white/5 hover:bg-red-500/15 hover:text-red-300 text-shell-text-secondary border border-white/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <XCircle size={11} />
+              Deny
+            </button>
+          </div>
+        )}
         {error && (
           <p role="alert" className="mt-1.5 text-[11px] text-red-300">
             {error}

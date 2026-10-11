@@ -536,6 +536,14 @@ async def list_channels(
 ):
     ch_store = request.app.state.chat_channels
     channels = await ch_store.list_channels(member_id=member, archived=archived, project_id=project_id)
+    if channels:
+        msg_store = request.app.state.chat_messages
+        previews = await msg_store.latest_previews([c["id"] for c in channels])
+        for c in channels:
+            p = previews.get(c["id"])
+            if p:
+                c["last_preview"] = p["text"]
+                c["last_preview_author"] = p["author_id"]
     return {"channels": channels}
 
 

@@ -2075,6 +2075,11 @@ def main():
     if len(sys.argv) > 1 and sys.argv[1] == "recover-password":
         raise SystemExit(_recover_password_cli(sys.argv[2:]))
 
+    # `taos reset --onboarding` -- offline re-arm of first-run onboarding.
+    if len(sys.argv) > 1 and sys.argv[1] == "reset":
+        from tinyagentos.reset_cli import reset_cli
+        raise SystemExit(reset_cli(sys.argv[2:]))
+
     import uvicorn
     config = load_config(PROJECT_DIR / "data" / "config.yaml")
     app = create_app()
