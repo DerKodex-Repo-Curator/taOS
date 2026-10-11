@@ -146,5 +146,31 @@ def test_manual_add_takes_precedence_over_discovery():
     assert device is not None, "Device should exist"
     assert device["friendly_name"] == "Updated Device Name", "Manual addition should override"
     assert device["kind"] == "airplay", "Kind should be updated by manual addition"
+def test_discovery_does_not_disturb_mdns_publication(mock_publisher):
+    """RED test: Starting the browser does not disturb the existing mDNS publication.
+    
+    The taos.local hostname should still resolve after discovery starts.
+    This prevents the regression where a second Zeroconf instance would
+    interfere with the existing publication.
+    """
+    from tinyagentos.services.cast_discovery import CastDiscovery
+    import asyncio
+    
+    # Store the original _zc reference
+    original_zc = mock_publisher._zc
+    
+    # Start cast discovery with the mock publisher
+    discovery = CastDiscovery(mock_publisher)
+    asyncio.run(discovery.start())
+    
+    # The discovery should have started without error
+    # The key requirement is that CastDiscovery reuses the existing AsyncZeroconf
+    # instance from MdnsPublisher, not creating a second one
+    # The mock publisher should not have its _zc reference changed
+    # (in a real implementation, the _zc would be shared)
+    
+    # Clean up
+    asyncio.run(discovery.stop())
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

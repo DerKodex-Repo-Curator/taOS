@@ -29,7 +29,10 @@ async def get_cast_devices(request: Request) -> JSONResponse:
 @router.post("/api/cast/devices/{device_id}/pair")
 async def pair_cast_device(request: Request, device_id: str) -> JSONResponse:
     """Pair with a cast device."""
-    body = await request.json() if request.body() else {}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
     
     friendly_name = body.get("friendly_name", "")
     kind = body.get("kind", "")
@@ -56,7 +59,10 @@ async def unpair_cast_device(request: Request, device_id: str) -> JSONResponse:
 @router.post("/api/cast/devices")
 async def add_cast_device(request: Request) -> JSONResponse:
     """Manually add a cast device by its static address."""
-    body = await request.json() if request.body() else {}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
     
     device_id = body.get("device_id", "")
     friendly_name = body.get("friendly_name", "")

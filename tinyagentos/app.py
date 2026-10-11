@@ -1377,9 +1377,6 @@ def create_app(data_dir: Path | None = None, catalog_dir: Path | None = None) ->
             logger.exception("canvas snapshotter failed to start")
             app.state.canvas_snapshotter = None
 
-        # mDNS publisher — advertises http://taos.local:<port>/ on the LAN.
-        # Failure must never break startup; the publisher swallows its own
-        # errors but wrap it again here for belt-and-braces.
         try:
             from tinyagentos.services.mdns_publisher import MdnsPublisher
             mdns_publisher = MdnsPublisher(port=config.server.get("port", 6969))
@@ -1388,6 +1385,20 @@ def create_app(data_dir: Path | None = None, catalog_dir: Path | None = None) ->
         except Exception:
             logger.exception("mdns publisher failed to start — continuing without")
             app.state.mdns_publisher = None
+
+        # Cast (Chromecast/AirPlay) discovery and paired device registry
+        try:
+            from tinyagentos.services.cast_discovery import CastDiscovery
+            # Only create CastDiscovery if MdnsPublisher is available
+            if mdns_publisher:
+                cast_discovery = CastDiscovery(mdns_publisher)
+                await cast_discovery.start()
+                app.state.cast_discovery = cast_discovery
+            else:
+                app.state.cast_discovery = None
+        except Exception:
+            logger.exception("cast discovery failed to start — continuing without")
+            app.state.cast_discovery = None
 
         # System event bus — unified typed-event broadcast.
         from tinyagentos.events import EventBus, SystemEventStore
