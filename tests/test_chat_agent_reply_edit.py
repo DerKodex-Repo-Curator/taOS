@@ -186,3 +186,35 @@ async def test_edit_agent_reply_non_owner_returns_403(tmp_path):
         )
     assert r.status_code == 403, r.text
     assert (await store.get_message(reply["id"]))["content"] == "tom's"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", ["[]", "null", '"text"'])
+async def test_edit_agent_reply_non_object_body_returns_400(tmp_path, body):
+    app, rec, ch_id = await _setup(tmp_path)
+    reply = await app.state.chat_messages.send_message(
+        channel_id=ch_id, author_id="tom", author_type="agent", content="x",
+    )
+    async with _client(app, rec["id"]) as client:
+        r = await client.patch(
+            f"/api/chat/messages/{reply['id']}/agent-reply",
+            content=body, headers={"content-type": "application/json"},
+        )
+    assert r.status_code == 400, r.text
+
+
+@pytest.mark.asyncio
+async def test_store_refuses_stale_reply_in_the_write_itself(tmp_path):
+    """The recency check lives in the UPDATE: once a newer agent reply has
+    landed, the store refuses the stale id and writes nothing."""
+    app, _rec, ch_id = await _setup(tmp_path)
+    store = app.state.chat_messages
+    older = await store.send_message(
+        channel_id=ch_id, author_id="tom", author_type="agent", content="first",
+    )
+    assert await store.edit_last_agent_reply(older["id"], "ok") is True
+    await store.send_message(
+        channel_id=ch_id, author_id="tom", author_type="agent", content="second",
+    )
+    assert await store.edit_last_agent_reply(older["id"], "late") is False
+    assert (await store.get_message(older["id"]))["content"] == "ok"

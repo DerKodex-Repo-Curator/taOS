@@ -323,23 +323,31 @@ class ChatMessageStore(BaseStore):
         )
         await self._db.commit()
 
-    async def latest_agent_message_id(
-        self, channel_id: str, thread_id: str | None,
-    ) -> str | None:
-        """Return the id of the most recent live agent message in one thread.
+    async def edit_last_agent_reply(self, message_id: str, content: str) -> bool:
+        """Rewrite *message_id* only if it is still the last completed agent reply.
 
-        *thread_id* ``None`` scopes to the channel's top level. Deleted and
-        ephemeral rows are skipped so a tombstone never counts as "last".
+        One conditional UPDATE, so the eligibility check and the write are
+        atomic: the row must be a live, complete agent message with no
+        content blocks, and the most recent live agent message of its thread
+        (top level when ``thread_id`` is NULL; ephemeral rows never count).
+        Returns ``False`` when any condition fails and nothing was written.
         """
-        async with self._db.execute(
-            "SELECT id FROM chat_messages"
-            " WHERE channel_id = ? AND thread_id IS ? AND author_type = 'agent'"
-            " AND deleted_at IS NULL AND ephemeral = 0"
-            " ORDER BY created_at DESC, rowid DESC LIMIT 1",
-            (channel_id, thread_id),
-        ) as cursor:
-            row = await cursor.fetchone()
-        return row[0] if row else None
+        cursor = await self._db.execute(
+            "UPDATE chat_messages SET content = ?, edited_at = ?"
+            " WHERE id = ? AND author_type = 'agent' AND deleted_at IS NULL"
+            " AND state = 'complete'"
+            " AND COALESCE(json_array_length(NULLIF(content_blocks, '')), 0) = 0"
+            " AND id = ("
+            "   SELECT latest.id FROM chat_messages AS latest"
+            "   WHERE latest.channel_id = chat_messages.channel_id"
+            "   AND latest.thread_id IS chat_messages.thread_id"
+            "   AND latest.author_type = 'agent'"
+            "   AND latest.deleted_at IS NULL AND latest.ephemeral = 0"
+            "   ORDER BY latest.created_at DESC, latest.rowid DESC LIMIT 1)",
+            (content, time.time(), message_id),
+        )
+        await self._db.commit()
+        return cursor.rowcount == 1
 
     async def set_metadata(self, message_id: str, metadata: dict) -> None:
         await self._db.execute(

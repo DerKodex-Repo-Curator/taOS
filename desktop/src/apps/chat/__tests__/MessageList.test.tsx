@@ -343,6 +343,17 @@ describe("MessageList", () => {
       expect(screen.queryByRole("button", { name: "Edit reply" })).toBeNull();
     });
 
+    it("scopes 'last' per thread: a newer thread reply keeps the top-level pencil", () => {
+      const messages = [
+        ...agentMsgs(),
+        msg({ id: "t1", author_id: "tom", author_type: "agent", content: "in thread", thread_id: "a2" }),
+      ];
+      const { container } = renderWithMsg({ messages, onEditAgentReply: vi.fn() });
+      const buttons = screen.getAllByRole("button", { name: "Edit reply" });
+      const top = container.querySelector('[data-message-id="a2"]');
+      expect(buttons.some((b) => top?.contains(b))).toBe(true);
+    });
+
     it("opens MessageEditor on the agent bubble being edited", () => {
       renderWithMsg({
         messages: agentMsgs(),

@@ -720,7 +720,7 @@ async def edit_agent_reply_endpoint(
     with 409.
     """
     body = await request.json()
-    if set(body.keys()) - {"content"}:
+    if not isinstance(body, dict) or set(body.keys()) - {"content"}:
         return JSONResponse(
             {"error": "only 'content' may be edited"}, status_code=400,
         )
@@ -734,21 +734,15 @@ async def edit_agent_reply_endpoint(
     if msg.get("author_type") != "agent":
         return JSONResponse({"error": "not an agent reply"}, status_code=409)
     await require_agent_owner_or_admin(request, user, msg["author_id"])
-    latest = await msg_store.latest_agent_message_id(
-        msg["channel_id"], msg.get("thread_id"),
-    )
+    # Recency, state and the no-content-blocks rule are checked in the same
+    # UPDATE that writes, so a reply landing mid-request cannot slip past.
     # Rich replies render their content_blocks, not content, so a text edit
     # would change what the agent sees but not what the user sees.
-    if (
-        latest != message_id
-        or msg.get("state") != "complete"
-        or msg.get("content_blocks")
-    ):
+    if not await msg_store.edit_last_agent_reply(message_id, content):
         return JSONResponse(
             {"error": "only the last completed agent reply can be edited"},
             status_code=409,
         )
-    await msg_store.edit_message(message_id, content)
     updated = await msg_store.get_message(message_id)
     hub = request.app.state.chat_hub
     await hub.broadcast(msg["channel_id"], {

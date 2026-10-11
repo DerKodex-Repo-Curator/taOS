@@ -253,11 +253,15 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(funct
     },
   }), []);
 
-  // Only the most recent agent reply is editable, and only once it has
-  // finished streaming (the server refuses anything else).
-  const lastAgent = [...messages]
-    .reverse()
-    .find((m) => m.author_type === "agent" && !m.deleted_at);
+  // Only the most recent agent reply of each thread (top level keyed "") is
+  // editable, and only once it has finished streaming; the server applies
+  // the same per-thread rule and refuses anything else.
+  const lastAgentByThread = new Map<string, string>();
+  for (const m of messages) {
+    if (m.author_type === "agent" && !m.deleted_at) {
+      lastAgentByThread.set(m.thread_id ?? "", m.id);
+    }
+  }
 
   if (!selectedChannel) {
     return (
@@ -595,7 +599,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(funct
                           />
                         )}
                       {onEditAgentReply &&
-                        msg.id === lastAgent?.id &&
+                        msg.id === lastAgentByThread.get(msg.thread_id ?? "") &&
                         (msg.state ?? "complete") === "complete" &&
                         !msg.content_blocks?.length && (
                           <button
