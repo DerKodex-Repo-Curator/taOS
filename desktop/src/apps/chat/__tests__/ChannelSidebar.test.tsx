@@ -825,6 +825,26 @@ describe("ChannelSidebar — presence dots", () => {
     expect(btn.querySelector('[aria-label^="Agent is"]')).toBeNull();
   });
 
+  it("clears presence dot when channel leaves the presence map", () => {
+    const ch = makeChannel({ id: "ch-1", name: "session-carol" });
+    const sections = [makeSection("Agents-DMs", [ch])];
+    const { rerender } = render(
+      <ChannelSidebar
+        {...buildProps({ sections, agentPresence: { "ch-1": "working" } })}
+      />,
+    );
+    let btn = screen.getByRole("button", { name: `Channel ${ch.name}` });
+    expect(btn.querySelector(".taos-status-pulse")).toBeTruthy();
+
+    rerender(
+      <ChannelSidebar
+        {...buildProps({ sections, agentPresence: {} })}
+      />,
+    );
+    btn = screen.getByRole("button", { name: `Channel ${ch.name}` });
+    expect(btn.querySelector(".taos-status-pulse")).toBeNull();
+  });
+
   it("does not show live dot on mobile when channel is live (intentionally omitted)", () => {
     const ch = makeChannel({ id: "ch-1", name: "session-dave" });
     const sections = [makeSection("Agents-DMs", [ch])];

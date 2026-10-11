@@ -155,13 +155,13 @@ describe("MobileChatList", () => {
     const props = buildProps({
       sections: [],
       projectGroups: [
-        { id: "p1", name: "Strata", channels: [ch({ id: "pc1", name: "strata-dev", project_id: "p1" })] },
+        { id: "p1", name: "Strata", channels: [ch({ id: "pc1", name: "general", project_id: "p1" })] },
       ],
     });
     render(<MobileChatList {...props} />);
     const search = screen.getByRole("searchbox", { name: "Search chats" });
     fireEvent.change(search, { target: { value: "strata" } });
-    expect(rowNames()).toEqual(["strata-dev"]);
+    expect(rowNames()).toEqual(["general"]);
   });
 
   it("resets filter to all when active filter has no matches after rows change", () => {

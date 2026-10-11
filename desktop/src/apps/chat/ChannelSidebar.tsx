@@ -102,7 +102,7 @@ export function ChannelSidebar(props: ChannelSidebarProps) {
   if (isMobile) {
     return (
       <div style={{ padding: "8px 0 16px" }}>
-        {/* connection status — only show when not connected */}
+        {/* connection status: only shown while not connected */}
         {wsStatus !== "connected" && <ConnectionStatus wsStatus={wsStatus} />}
 
         {allEmpty ? (
@@ -123,7 +123,7 @@ export function ChannelSidebar(props: ChannelSidebarProps) {
             />
           </>
         )}
-        {/* Archived channels — mobile (always rendered, not gated by allEmpty) */}
+        {/* Archived channels, mobile (always rendered, not gated by allEmpty) */}
         <ArchivedSection
           isMobile={true}
           archivedChannels={archivedChannels}
