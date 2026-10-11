@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from tinyagentos.log_redaction import PLACEHOLDER, redact, redact_lines
+import os
+from tinyagentos.log_redaction import PLACEHOLDER, redact, redact_lines, redact_for_archive, is_secret_file_read
 
 
 class TestKeyValue:
@@ -151,3 +152,36 @@ class TestFoldedFindings:
         assert out[0] == f"password={PLACEHOLDER}"
         assert out[1] == "None"
         assert out[2] == "42"
+
+
+class TestRedactForArchive:
+    def test_positive_control_masks_all(self):
+        text = (
+            "Bearer token: abcdef1234567890 and tailnet ip 100.101.102.103 "
+            "host foo.tailb4a2.ts.net invite /i/abc123 PIN 482913"
+        )
+        out = redact_for_archive(text)
+        assert PLACEHOLDER in out
+        assert "abcdef1234567890" not in out
+        assert "100.101.102.103" not in out
+        assert "foo.tailb4a2.ts.net" not in out
+        assert "/i/abc123" not in out
+        assert "482913" not in out
+
+    def test_negative_control_loops_unchanged(self):
+        text = "loopback 127.0.0.1, version 1.0.0, pin code 482913 no context"
+        out = redact_for_archive(text)
+        assert "127.0.0.1" in out
+        assert "1.0.0" in out
+        assert "482913" in out
+
+    def test_is_secret_file_read_true(self):
+        assert is_secret_file_read("/home/user/.taos-team/config") is True
+        assert is_secret_file_read("/home/user/.env") is True
+        assert is_secret_file_read("/home/user/.env.secret") is True
+        assert is_secret_file_read("/home/user/secret.cred") is True
+
+    def test_is_secret_file_read_false(self):
+        assert is_secret_file_read("/home/user/config.json") is False
+        assert is_secret_file_read("/home/user/taos-config.yaml") is False
+        assert is_secret_file_read("/home/user/data.json") is False
