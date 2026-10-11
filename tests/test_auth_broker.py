@@ -7,6 +7,7 @@ Red-first: before the broker exists every route here 404s.
 from __future__ import annotations
 
 import pytest
+import pytest_asyncio
 
 from tinyagentos.agent_registry_store import (
     AgentRegistryStore,
@@ -15,6 +16,19 @@ from tinyagentos.agent_registry_store import (
 )
 
 SIGNIN_URL = "https://claude.ai/oauth/authorize?code=true&client_id=abc&state=xyz"
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _auth_broker_store(app, tmp_data_dir):
+    # The client fixture does not run the app lifespan, so give the app its
+    # broker store here (app.py wires the real one at startup).
+    from tinyagentos.auth_broker import AuthBrokerStore
+
+    store = AuthBrokerStore(tmp_data_dir / "auth_broker.db")
+    await store.init()
+    app.state.auth_broker = store
+    yield store
+    await store.close()
 BASE = "/api/auth-broker/requests"
 
 
