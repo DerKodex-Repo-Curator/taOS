@@ -353,12 +353,12 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(funct
             >
               <Search size={14} aria-hidden="true" />
             </button>
+        </div>
+        {channel?.topic || channel?.description ? (
+          <div className="text-[11px] text-shell-text-tertiary truncate">
+            {channel.topic || channel.description}
           </div>
-          {channel?.description && (
-            <div className="text-[11px] text-shell-text-tertiary truncate">
-              {channel.description}
-            </div>
-          )}
+        ) : null}
         </div>
         {channel?.members && (
           <div className="text-[11px] text-shell-text-tertiary flex items-center gap-1">
