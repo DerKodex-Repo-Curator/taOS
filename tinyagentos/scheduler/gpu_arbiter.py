@@ -518,6 +518,7 @@ class GpuArbiter:
         claim_lease fails (taOS #1705 — reservation leak fix).
         """
         lease_id: str | None = None
+        registered: bool = False
         renew_task: asyncio.Task | None = None
         renew_stop: asyncio.Event | None = None
         try:
@@ -547,6 +548,7 @@ class GpuArbiter:
             current = asyncio.current_task()
             async with self._running_lock:
                 self._running[task.id] = (task, lease_id, int(task.priority), required_vram_mb)
+                registered = True
                 if current is not None:
                     self._running_tasks[task.id] = current
             if self._scheduler is not None:
@@ -585,6 +587,19 @@ class GpuArbiter:
                 if _lid is not None and self._cluster_manager is not None:
                     await self._cluster_manager.release_lease(
                         _lid, epoch=self._lease_epochs.pop(_lid, None),
+                    )
+            # If we claimed a lease but failed to register (task cancelled between claim and _running add),
+            # we still need to release the lease and stop renewal.
+            if lease_id is not None and not registered and self._cluster_manager is not None:
+                # Stop lease renewal (if any) - already handled above (lines 566-571)
+                try:
+                    await self._cluster_manager.release_lease(
+                        lease_id, epoch=self._lease_epochs.pop(lease_id, None)
+                    )
+                except Exception:
+                    logger.warning(
+                        "gpu-arbiter: failed to release lease %s for cancelled task %s",
+                        lease_id, task.id,
                     )
 
     async def cancel_running_for_leases(self, lease_ids: set[str]) -> tuple[int, int]:
