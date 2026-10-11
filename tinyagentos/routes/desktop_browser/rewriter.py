@@ -43,7 +43,7 @@ _SKIP_PREFIXES = (
 
 # CSS url() rewriter — captures url(), url(""), url('').
 _CSS_URL_RE = re.compile(
-    r"""url\(\s*(['"]?)([^)'"]+)\1\s*\)""",
+    r"""url\(\s*(['\"]?)\s*((?:['\"][^'\"]*['\"])|(?:[^)'\"\s]*))\1\s*\)""",
     re.IGNORECASE,
 )
 
@@ -231,6 +231,7 @@ def _rewrite_css_text(
 ) -> str:
     def replace(match: re.Match) -> str:
         quote = match.group(1)
+        # The URL is now captured in group 2 (either quoted or unquoted)
         url = match.group(2).strip()
         new_url = _rewrite_one(url, base_url=base_url, proxy=proxy)
         return f"url({quote}{new_url}{quote})"

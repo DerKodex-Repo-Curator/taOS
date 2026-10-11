@@ -45,6 +45,29 @@ def test_data_uri_with_parentheses_survives():
     assert svg.encode() in out
 
 
+def test_pathological_url_input_is_bounded():
+    """Pathological inputs must complete within 2 seconds."""
+    from tinyagentos.routes.desktop_browser.rewriter import rewrite_css
+    import time
+    
+    # Build pathological patterns as described in the issue
+    # 1. "url(" repeated many times - cause catastrophic backtracking
+    pattern1 = '"url(" * 20000'
+    # 2. "url(" + 4KB of spaces - cubic backtracking  
+    pattern2 = '"url(" + " " * 4096'
+    # 3. "a{b:url(x" repeated to 180KB - nested quantifier issues
+    pattern3 = '"a{b:url(x" * 20000'
+    
+    # Test each pattern under timeout
+    for name, css_bytes in [("url_repeated", pattern1.encode()),
+                           ("spaces_many", pattern2.encode()),
+                           ("nested", pattern3.encode())]:
+        start = time.perf_counter()
+        out = rewrite_css(css_bytes, base_url="https://example.com/", proxy=_proxy)
+        elapsed = time.perf_counter() - start
+        assert elapsed < 2.0, f"{name} took {elapsed}s (must be <2.0s)"
+
+
 @pytest.mark.asyncio
 class TestProxyRewritesCssResponse:
     @respx.mock
@@ -68,3 +91,27 @@ class TestProxyRewritesCssResponse:
         assert resp.headers["content-type"].startswith("text/css")
         assert b"example.com%2Fs%2Fother.css" in resp.content
         assert b"example.com%2Fs%2Fi.png" in resp.content
+
+    @respx.mock
+    async def test_oversized_css_body_is_served_unrewritten(self, client):
+        """CSS >512 KiB is served unchanged to avoid catastrophic backtracking."""
+        # Create CSS content larger than 512 KiB (536,870,912 bytes)
+        oversized_content = b".class {" + b"url(x)" * 200000 + b"}"
+        respx.get("http://example.com/oversized.css").mock(
+            return_value=Response(
+                200,
+                content=oversized_content,
+                headers={"content-type": "text/css; charset=utf-8"},
+            )
+        )
+        with patch(
+            "tinyagentos.routes.desktop_browser.ssrf.socket.getaddrinfo",
+            return_value=[(2, 1, 6, "", ("93.184.216.34", 0))],
+        ):
+            resp = await client.get(
+                "/api/desktop/browser/proxy",
+                params={"profile_id": "personal", "url": "http://example.com/oversized.css"},
+            )
+        assert resp.status_code == 200
+        # The body should be unchanged (not rewritten)
+        assert resp.content == oversized_content
