@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+# ruff: noqa: I001
 import ipaddress
 import json
 import logging
@@ -14,7 +15,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import HTMLResponse, RedirectResponse
 
 from tinyagentos.agent_token_auth import (
-    _enforce_rotation_cutoff, _get_keypair, _get_store, check_agent_identity,
+    check_agent_identity, _get_keypair, _get_store, _enforce_rotation_cutoff,
 )
 from tinyagentos.auth import AuthStoreCorruptError
 from tinyagentos.device_scopes import (
@@ -24,7 +25,17 @@ from tinyagentos.device_scopes import (
 from tinyagentos.device_store import DEVICE_TOKEN_PREFIX
 from tinyagentos.rate_limit import MovingWindowLimiter
 
+
+class _RaisingRotatingFileHandler(logging.handlers.RotatingFileHandler):
+    """Re-raise emit failures so the middleware's warning path sees them."""
+
+    def handleError(self, record):
+        raise  # noqa: PLE0704 - called from within emit's except block
+
+
 logger = logging.getLogger(__name__)
+
+
 def _get_agent_token_routes_logger(data_dir: Path) -> logging.Logger:
     """Return the module-level logger for agent token route recording.
 
@@ -50,7 +61,7 @@ def _get_agent_token_routes_logger(data_dir: Path) -> logging.Logger:
         log_logger.removeHandler(handler)
         handler.close()
 
-    handler = logging.handlers.RotatingFileHandler(
+    handler = _RaisingRotatingFileHandler(
         log_path, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
     )
     # JSON line formatter: just the message (we format as JSON in the caller)
@@ -949,12 +960,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
                         # We do a lightweight verification here; the route will
                         # do the full scope check.
                         try:
-                            from tinyagentos.agent_token_auth import (
-                                verify_registry_token,
-                            )
-                            from tinyagentos.native_agent_identity import (
-                                NATIVE_AGENT_ORIGIN,
-                            )
+                            from tinyagentos.agent_token_auth import verify_registry_token
+                            from tinyagentos.native_agent_identity import NATIVE_AGENT_ORIGIN
                             _private_pem, public_pem = _get_keypair(request)
                             payload = verify_registry_token(presented, public_pem)
                             canonical_id = payload.get("sub", "")
