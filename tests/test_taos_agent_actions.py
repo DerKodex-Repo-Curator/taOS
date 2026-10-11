@@ -141,7 +141,7 @@ async def test_auto_policy_skips_card_and_records_auto(client, app, executed):
         "/api/taos-agent/actions/policy", json={"kind": "test.write", "policy": "auto"}
     )
     assert resp.status_code == 200, resp.text
-    prefs = await app.state.desktop_settings.get_preference("user", "taos_agent")
+    prefs = await app.state.desktop_settings.get_preference(client.uid, "taos_agent")
     assert prefs["action_policy"]["test.write"] == "auto"
 
     queue = await app.state.event_bus.subscribe(f"user:{client.uid}")
@@ -153,6 +153,29 @@ async def test_auto_policy_skips_card_and_records_auto(client, app, executed):
     resp = await client.post(f"/api/taos-agent/actions/{body['action_id']}/execute")
     assert resp.status_code == 200
     assert executed == [{"n": 1}]
+
+
+@pytest.mark.asyncio
+async def test_auto_policy_is_scoped_to_the_signed_in_user(client, app, executed):
+    """One account's ``auto`` policy never skips the card for another account."""
+    resp = await client.put(
+        "/api/taos-agent/actions/policy", json={"kind": "test.write", "policy": "auto"}
+    )
+    assert resp.status_code == 200, resp.text
+
+    code = app.state.auth.add_user_invite("bob", "admin")
+    app.state.auth.complete_invite("bob", code, "Bob", "", "bobpass123")
+    bob = app.state.auth.find_user("bob")
+    bob_session = app.state.auth.create_session(user_id=bob["id"], long_lived=True)
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        cookies={"taos_session": bob_session},
+        event_hooks=csrf_event_hooks(),
+    ) as bob_client:
+        body = await _create(bob_client)
+    assert body["state"] == "pending"
+    assert body["confirmed_by"] is None
 
 
 @pytest.mark.asyncio

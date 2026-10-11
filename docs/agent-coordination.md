@@ -2304,7 +2304,8 @@ server-side mechanism, so it binds every harness the same way.
   or failed); a kind with no executor is a 422. A raising executor marks the
   action `failed` (502) and it is never re-run.
 - `PUT /api/taos-agent/actions/policy` `{kind, policy: ask|auto}` (browser
-  session only) sets `action_policy[kind]` in the `("user", "taos_agent")`
-  preference blob. Every kind defaults to `ask`.
+  session only) sets `action_policy[kind]` in the signed-in user's own
+  `(<user id>, "taos_agent")` preference blob, so one account's `auto` never
+  skips the card for another account. Every kind defaults to `ask`.
 
 Another user's action answers 404. Rows live in `taos_agent_actions.db`.
