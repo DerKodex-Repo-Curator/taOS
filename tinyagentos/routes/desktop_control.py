@@ -271,14 +271,18 @@ async def panel_shot(request: Request):
             )
             try:
                 await asyncio.wait_for(proc.communicate(), timeout=_PANEL_SHOT_TIMEOUT)
-            except asyncio.TimeoutError:
+            except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
                 # Kill the whole group: a child of the script (sleep, grim)
                 # would otherwise hold the stderr pipe open after the kill.
+                # On cancellation too, or the lock is released while
+                # taos-shot is still driving the panel.
                 try:
                     os.killpg(proc.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     proc.kill()
                 await proc.wait()
+                if isinstance(exc, asyncio.CancelledError):
+                    raise
                 return JSONResponse({"detail": "panel capture timed out"}, status_code=504)
             if proc.returncode != 0:
                 logger.warning("taos-shot exited %s", proc.returncode)

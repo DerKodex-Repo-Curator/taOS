@@ -8,11 +8,13 @@ from __future__ import annotations
 import asyncio
 import os
 import stat
+import time
 
 import pytest
 import pytest_asyncio
 import yaml
 from httpx import ASGITransport, AsyncClient
+from starlette.requests import Request
 
 from tinyagentos.agent_grants_store import AgentGrantsStore
 from tinyagentos.agent_registry_store import (
@@ -82,6 +84,9 @@ async def env(tmp_path):
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         client.tokens = tokens
+        client.registry, client.native_cid = registry, native["canonical_id"]
+        client.mint_native = lambda: mint_registry_token(
+            native["canonical_id"], priv, user_id=owner, framework="taos-native")
         yield client
     await registry.close()
     await grants.close()
@@ -177,3 +182,53 @@ async def test_concurrent_call_is_429(env, tmp_path, monkeypatch):
     assert second.status_code == 429
     first.cancel()
     await asyncio.gather(first, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_native_token_superseded_by_rotation_is_403(env, tmp_path, monkeypatch):
+    ran = tmp_path / "ran"
+    png = tmp_path / "fixture.png"
+    png.write_bytes(PNG)
+    monkeypatch.setattr(desktop_control.shutil, "which",
+                        lambda _n: _fake(tmp_path, f'touch "{ran}"\ncp "{png}" "$1"'))
+    old = env.tokens["native"]
+    await env.registry.bump_token_min_iat(env.native_cid, int(time.time()) + 3600)
+    resp = await env.post(PATH, headers={"Authorization": f"Bearer {old}"})
+    assert resp.status_code == 403
+    assert not ran.exists()
+
+
+@pytest.mark.asyncio
+async def test_native_token_minted_after_rotation_still_captures(env, tmp_path, monkeypatch):
+    monkeypatch.setattr(desktop_control.shutil, "which", lambda _n: _writes_png(tmp_path))
+    await env.registry.bump_token_min_iat(env.native_cid, int(time.time()))
+    resp = await env.post(PATH, headers={"Authorization": f"Bearer {env.mint_native()}"})
+    assert resp.status_code == 200
+    assert resp.content == PNG
+
+
+@pytest.mark.asyncio
+async def test_cancelled_request_kills_taos_shot_and_releases_lock(tmp_path, monkeypatch):
+    pidfile = tmp_path / "pid"
+    monkeypatch.setattr(desktop_control.shutil, "which",
+                        lambda _n: _fake(tmp_path, f'echo $$ > "{pidfile}"\nexec sleep 30'))
+    req = Request({"type": "http", "method": "POST", "path": PATH, "headers": [],
+                   "state": {"via": "registry_jwt_native_agent"}})
+    task = asyncio.create_task(desktop_control.panel_shot(req))
+    for _ in range(100):
+        await asyncio.sleep(0.05)
+        if pidfile.exists() and pidfile.read_text().strip():
+            break
+    pid = int(pidfile.read_text())
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    try:
+        os.kill(pid, 0)
+        alive = True
+    except ProcessLookupError:
+        alive = False
+    if alive:
+        os.kill(pid, 9)
+    assert not alive
+    assert not desktop_control._PANEL_SHOT_LOCK.locked()

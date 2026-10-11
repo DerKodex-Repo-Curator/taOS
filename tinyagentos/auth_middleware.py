@@ -13,7 +13,9 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import HTMLResponse, RedirectResponse
 
-from tinyagentos.agent_token_auth import _get_keypair, _get_store, check_agent_identity
+from tinyagentos.agent_token_auth import (
+    _enforce_rotation_cutoff, _get_keypair, _get_store, check_agent_identity,
+)
 from tinyagentos.auth import AuthStoreCorruptError
 from tinyagentos.device_scopes import (
     AGENTS_READ, CHAT_SEND, DECISIONS_ANSWER, FILES_UPLOAD, LIBRARY_INGEST,
@@ -953,6 +955,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
                                 registry = _get_store(request)
                                 record = await registry.get(canonical_id)
                                 if record and record.get("origin") == NATIVE_AGENT_ORIGIN and record.get("status") == "active":
+                                    # A token superseded by rotation raises here and
+                                    # falls through to registry_jwt_candidate below.
+                                    _enforce_rotation_cutoff(record, payload)
                                     request.state.user_id = record.get("user_id")
                                     request.state.is_admin = False
                                     request.state.via = "registry_jwt_native_agent"
