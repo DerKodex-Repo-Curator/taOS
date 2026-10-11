@@ -309,13 +309,18 @@ _AGENT_DECISIONS_ROUTES = (
     ("GET", re.compile(r"^/api/decisions/[^/]+/agent$")),
     ("GET", re.compile(r"^/api/decisions/agent$")),
     ("POST", re.compile(r"^/api/decisions/[^/]+/withdraw$")),
+    # tsk-f75p3z: the plain list. With a registry JWT the route returns ONLY
+    # the agent's own decisions (same set as /api/decisions/agent).
+    ("GET", re.compile(r"^/api/decisions$")),
 )
 
-# Notification route an agent may reach with its own registry JWT (scope
-# notifications_write). POST /api/notifications only.  The route verifies
-# the JWT + grant + project binding.  GET and mark-read stay session-only.
+# Notification routes an agent may reach with its own registry JWT (scope
+# notifications_write). POST creates; GET (tsk-f75p3z) lists ONLY the
+# notifications that agent posted.  The route verifies the JWT + grant (+
+# project binding on POST).  Count, mark-read and archive stay session-only.
 _AGENT_NOTIFICATIONS_ROUTES = (
     ("POST", re.compile(r"^/api/notifications$")),
+    ("GET", re.compile(r"^/api/notifications$")),
 )
 
 # Device-bearer self-service paths (lock-screen push-token rotation plus
@@ -469,14 +474,16 @@ def _is_agent_decisions_path(method: str, path: str) -> bool:
       - GET  /api/decisions/{id}/agent        -> decisions_write (read own)
       - GET  /api/decisions/agent             -> decisions_write (list own)
       - POST /api/decisions/{id}/withdraw     -> decisions_write (withdraw own)
+      - GET  /api/decisions                   -> decisions_write (list own)
     The route verifies the JWT + grant + project binding."""
     return any(m == method and rx.match(path) for m, rx in _AGENT_DECISIONS_ROUTES)
 
 
 def _is_agent_notifications_path(method: str, path: str) -> bool:
-    """True only for POST /api/notifications, which a notifications_write token
-    may reach.  GET and mark-read stay session-only.  The route verifies the
-    JWT + grant + project binding."""
+    """True only for POST /api/notifications (create) and GET
+    /api/notifications (list own), which a notifications_write token may
+    reach.  Count, mark-read and archive stay session-only.  The route
+    verifies the JWT + grant (+ project binding on POST)."""
     return any(m == method and rx.match(path) for m, rx in _AGENT_NOTIFICATIONS_ROUTES)
 
 

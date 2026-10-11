@@ -400,7 +400,7 @@ Publishes a `decision.note` event on the owner's `user:<id>` channel so open sur
 
 `POST /api/notifications` body: `title` (max 120 chars), `message` (max 1000 chars), `level` (`info`/`warning`), `source` (ignored on agent path), `data.project_id` (optional).
 
-- Admits exactly `POST /api/notifications` for agent registry bearers. `GET` and mark-read stay session-only.
+- Admits `POST`/`GET /api/notifications` for agent bearers; `GET` lists only the agent's own posts. Mark-read stays session-only.
 - Verifies JWT + grant + project binding via `check_agent_scope_for_project`.
 - Global grant posts to instance admin(s). Per-project grant posts to that project's owner only.
 - `source` from grant. Store row: `agent:<canonical_id>`. `data.from_agent` stamped to canonical_id.

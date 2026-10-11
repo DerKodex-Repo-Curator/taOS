@@ -12,7 +12,7 @@ from pydantic import BaseModel, field_validator
 from tinyagentos.notifications import VALID_LEVELS
 
 from tinyagentos.auth import get_current_user
-from tinyagentos.agent_token_auth import check_agent_scope_for_project
+from tinyagentos.agent_token_auth import check_agent_scope_for_project, registry_agent_caller
 from tinyagentos.rate_limit import MovingWindowLimiter
 from tinyagentos.routes.auth import _require_admin
 
@@ -55,8 +55,17 @@ def _format_ts(ts: int) -> str:
 
 @router.get("/api/notifications")
 async def list_notifications(request: Request, unread_only: bool = False):
-    user_id = _notif_user_id(request)
     store = request.app.state.notifications
+    # tsk-f75p3z: a registry JWT is accepted here (it used to 401), resolved
+    # like _authorize_task_actor: a session wins, otherwise the Bearer must
+    # carry notifications_write.  An agent reads back ONLY what it posted
+    # (source ``agent:<canonical_id>``, stamped server-side by
+    # create_notification), with the recipient's read flag, never the user's
+    # other notifications.
+    agent_cid = await registry_agent_caller(request, "notifications_write")
+    if agent_cid is not None:
+        return await store.list(unread_only=unread_only, source=f"agent:{agent_cid}")
+    user_id = _notif_user_id(request)
     items = await store.list(unread_only=unread_only, user_id=user_id)
     # Return HTML for HTMX requests, JSON otherwise
     if request.headers.get("hx-request"):
