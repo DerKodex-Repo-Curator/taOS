@@ -146,21 +146,26 @@ def get_csrf_secret(app) -> bytes:
     secret = getattr(app.state, "csrf_secret", None)
     if secret:
         return secret
-    local_token = None
-    auth_mgr = getattr(app.state, "auth", None)
-    if auth_mgr is not None:
-        try:
-            local_token = auth_mgr.get_local_token()
-        except Exception:
-            local_token = None
-    if local_token:
-        secret = hmac.new(
-            local_token.encode("utf-8"), _SECRET_CONTEXT, hashlib.sha256
-        ).digest()
-    else:
+    secret = csrf_secret_for_auth(getattr(app.state, "auth", None))
+    if secret is None:
         secret = secrets.token_bytes(32)
     app.state.csrf_secret = secret
     return secret
+
+
+def csrf_secret_for_auth(auth_mgr) -> bytes | None:
+    """The binding key derived from ``auth_mgr``'s local token, or None."""
+    if auth_mgr is None:
+        return None
+    try:
+        local_token = auth_mgr.get_local_token()
+    except Exception:
+        return None
+    if not local_token:
+        return None
+    return hmac.new(
+        local_token.encode("utf-8"), _SECRET_CONTEXT, hashlib.sha256
+    ).digest()
 
 
 def _issued_session(response: Response) -> str | None:
