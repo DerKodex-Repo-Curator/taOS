@@ -2708,6 +2708,7 @@ className="shrink-0 p-0.5 rounded hover:bg-shell-surface-active transition-color
                   name: slug, type: "dm",
                   members: ["user", slug],
                   description: "",
+                  topic: "",
                 }),
               });
               if (r.ok) {
