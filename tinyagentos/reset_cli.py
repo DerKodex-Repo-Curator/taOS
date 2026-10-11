@@ -13,7 +13,7 @@ import shutil
 import socket
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 # Account files (AuthManager): users, legacy password, sessions.
@@ -21,6 +21,27 @@ ONBOARDING_FILES = (".auth_user.json", ".auth_password", ".auth_sessions")
 # Onboarding-adjacent SQLite stores (plus their -wal/-shm sidecars).
 ONBOARDING_DBS = ("auth_requests.db", "password_resets.db")
 _SIDECARS = ("", "-wal", "-shm")
+
+
+def _controller_port(data_dir: Path) -> int:
+    """The port the controller binds, mirroring ``tinyagentos.__main__``:
+    ``TAOS_PORT`` (or a bare ``TAOS_HOST``) wins, else ``server.port`` from the
+    data dir's config.yaml, else 6969. Read-only: ``load_config`` may rewrite
+    config.yaml, which a safety probe must never do."""
+    env_port = os.environ.get("TAOS_PORT")
+    if env_port or os.environ.get("TAOS_HOST"):
+        return int(env_port) if env_port else 6969
+    try:
+        import yaml
+
+        data = yaml.safe_load((data_dir / "config.yaml").read_text())
+        return int((data or {}).get("server", {}).get("port", 6969))
+    except (OSError, ValueError, TypeError, AttributeError, yaml.YAMLError):
+        return 6969
+
+
+def _backup_stamp() -> str:
+    return datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
 
 
 def controller_is_up(port: int) -> bool:
@@ -69,7 +90,7 @@ def reset_cli(argv) -> int:
     override = ns.data_dir or os.environ.get("TAOS_DATA_DIR")
     data_dir = resolve_data_dir(Path(override) if override else None)
 
-    port = int(os.environ.get("TAOS_PORT", "6969"))
+    port = _controller_port(data_dir)
     if not ns.force and controller_is_up(port):
         print(f"The taOS controller is running on port {port}. Stop it first "
               "(sudo systemctl stop tinyagentos) or pass --force.", file=sys.stderr)
@@ -85,16 +106,22 @@ def reset_cli(argv) -> int:
     if not targets and pref is None:
         print("Nothing to reset.")
         return 0
-    if not ns.yes:
-        if input("Type 'yes' to continue: ").strip().lower() != "yes":
-            print("Aborted; nothing was removed.")
-            return 1
+    if not ns.yes and input("Type 'yes' to continue: ").strip().lower() != "yes":
+        print("Aborted; nothing was removed.")
+        return 1
 
     backup_dir = None
     if not ns.no_backup:
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        backup_dir = data_dir / "backups" / f"reset-{stamp}"
-        backup_dir.mkdir(parents=True, exist_ok=True)
+        base = data_dir / "backups" / f"reset-{_backup_stamp()}"
+        backup_dir = base
+        for n in range(1, 1000):
+            try:
+                backup_dir.mkdir(parents=True, exist_ok=False)
+                break
+            except FileExistsError:
+                backup_dir = base.with_name(f"{base.name}-{n}")
+        else:
+            raise FileExistsError(f"no free backup directory next to {base}")
         for t in targets:
             shutil.copy2(t, backup_dir / t.name)
         if pref is not None:

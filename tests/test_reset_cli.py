@@ -106,3 +106,47 @@ def test_main_dispatches_reset_verb(monkeypatch):
         app_mod.main()
     assert exc.value.code == 0
     assert seen["argv"] == ["--onboarding", "--yes"]
+
+def _seed_user(tmp_path, username="admin"):
+    AuthManager(tmp_path).setup_user(username, "Admin", "", "pass1234!")
+
+
+def test_controller_probe_honours_config_port(tmp_path, monkeypatch):
+    """The safety probe must check the port the controller binds (config.yaml), not 6969."""
+    _seed_user(tmp_path)
+    (tmp_path / "config.yaml").write_text("server:\n  port: 7171\n")
+    monkeypatch.delenv("TAOS_PORT", raising=False)
+    monkeypatch.delenv("TAOS_HOST", raising=False)
+    seen = []
+
+    def probe(port):
+        seen.append(port)
+        return True
+
+    monkeypatch.setattr(reset_cli, "controller_is_up", probe)
+    assert reset_cli.reset_cli(["--onboarding", "--yes", "--data-dir", str(tmp_path)]) == 1
+    assert seen == [7171]
+
+
+def test_controller_probe_env_port_beats_config(tmp_path, monkeypatch):
+    _seed_user(tmp_path)
+    (tmp_path / "config.yaml").write_text("server:\n  port: 7171\n")
+    monkeypatch.setenv("TAOS_PORT", "8181")
+    seen = []
+    monkeypatch.setattr(reset_cli, "controller_is_up", lambda port: seen.append(port) or True)
+    assert reset_cli.reset_cli(["--onboarding", "--yes", "--data-dir", str(tmp_path)]) == 1
+    assert seen == [8181]
+
+
+def test_backup_dir_is_unique_per_reset(tmp_path, monkeypatch):
+    """Two resets in the same second must not share (and overwrite) one backup directory."""
+    monkeypatch.setattr(reset_cli, "controller_is_up", lambda port: False)
+    monkeypatch.setattr(reset_cli, "_backup_stamp", lambda: "20260101T000000Z")
+    _seed_user(tmp_path)
+    assert reset_cli.reset_cli(["--onboarding", "--yes", "--data-dir", str(tmp_path)]) == 0
+    first = (tmp_path / "backups" / "reset-20260101T000000Z" / ".auth_user.json").read_text()
+    _seed_user(tmp_path, "other")
+    assert reset_cli.reset_cli(["--onboarding", "--yes", "--data-dir", str(tmp_path)]) == 0
+    backups = sorted((tmp_path / "backups").glob("reset-*"))
+    assert len(backups) == 2
+    assert (backups[0] / ".auth_user.json").read_text() == first
