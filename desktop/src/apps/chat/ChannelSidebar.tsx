@@ -121,20 +121,20 @@ export function ChannelSidebar(props: ChannelSidebarProps) {
               busSelected={busSelected}
               onSelectBusChannel={onSelectBusChannel}
             />
-            {/* Archived channels — mobile */}
-            <ArchivedSection
-              isMobile={true}
-              archivedChannels={archivedChannels}
-              archivedExpanded={archivedExpanded}
-              onToggleArchived={onToggleArchived}
-              selectedChannel={selectedChannel}
-              onSelectChannel={onSelectChannel}
-              onRestoreArchivedChannel={onRestoreArchivedChannel}
-              onDeleteArchivedChannel={onDeleteArchivedChannel}
-              archivedAgents={props.archivedAgents}
-            />
           </>
         )}
+        {/* Archived channels — mobile (always rendered, not gated by allEmpty) */}
+        <ArchivedSection
+          isMobile={true}
+          archivedChannels={archivedChannels}
+          archivedExpanded={archivedExpanded}
+          onToggleArchived={onToggleArchived}
+          selectedChannel={selectedChannel}
+          onSelectChannel={onSelectChannel}
+          onRestoreArchivedChannel={onRestoreArchivedChannel}
+          onDeleteArchivedChannel={onDeleteArchivedChannel}
+          archivedAgents={props.archivedAgents}
+        />
       </div>
     );
   }

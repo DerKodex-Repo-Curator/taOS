@@ -1,2 +1,1 @@
-### Added
 - taOS talk mobile: the chat tab is one searchable, filterable, recency-sorted list (Agents, Groups, Projects, Bus).

@@ -135,4 +135,68 @@ describe("MobileChatList", () => {
     render(<MobileChatList {...buildProps({ sections: [{ items: [ch({ id: "a", name: "busy" })] }] })} />);
     expect(screen.queryByRole("button", { name: /Agent activity/ })).toBeNull();
   });
+
+  it("sortKey falls back to created_at when last_message_at is empty string", () => {
+    const props = buildProps({
+      sections: [
+        {
+          items: [
+            ch({ id: "a", name: "alpha", created_at: "2026-10-01T10:00:00Z", last_message_at: "" }),
+            ch({ id: "b", name: "beta", created_at: "2026-10-03T10:00:00Z", last_message_at: "" }),
+          ],
+        },
+      ],
+    });
+    render(<MobileChatList {...props} />);
+    expect(rowNames()).toEqual(["beta", "alpha"]);
+  });
+
+  it("search matches project name in project channels", () => {
+    const props = buildProps({
+      sections: [],
+      projectGroups: [
+        { id: "p1", name: "Strata", channels: [ch({ id: "pc1", name: "strata-dev", project_id: "p1" })] },
+      ],
+    });
+    render(<MobileChatList {...props} />);
+    const search = screen.getByRole("searchbox", { name: "Search chats" });
+    fireEvent.change(search, { target: { value: "strata" } });
+    expect(rowNames()).toEqual(["strata-dev"]);
+  });
+
+  it("resets filter to all when active filter has no matches after rows change", () => {
+    const { rerender } = render(
+      <MobileChatList
+        {...buildProps({
+          sections: [
+            {
+              items: [
+                ch({ id: "dm1", name: "alice", type: "dm", members: ["user", "alice"] }),
+                ch({ id: "t1", name: "random", type: "topic" }),
+              ],
+            },
+          ],
+        })}
+      />,
+    );
+    const agentsChip = screen.getByRole("button", { name: "Agents" });
+    fireEvent.click(agentsChip);
+    expect(agentsChip).toHaveAttribute("aria-pressed", "true");
+    expect(rowNames()).toEqual(["alice"]);
+
+    rerender(
+      <MobileChatList
+        {...buildProps({
+          sections: [
+            {
+              items: [ch({ id: "t1", name: "random", type: "topic" })],
+            },
+          ],
+        })}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "All" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.queryByRole("button", { name: "Agents" })).not.toBeInTheDocument();
+    expect(rowNames()).toEqual(["random"]);
+  });
 });
