@@ -241,7 +241,10 @@ class NotificationStore(BaseStore):
         limit: int = 20,
         unread_only: bool = False,
         user_id: str | None = None,
+        source: str | None = None,
     ) -> list[dict]:
+        if user_id is not None and source is not None:
+            raise ValueError("list() takes user_id or source, not both")
         if user_id is not None:
             # Per-user notifications: include both own notifications and broadcasts
             sql = (
@@ -258,15 +261,21 @@ class NotificationStore(BaseStore):
                 rows = await cursor.fetchall()
             return [_serialize_row(r) for r in rows]
         else:
-            # Internal/system caller: unfiltered by user
+            # Internal/system caller: unfiltered by user.  ``source`` narrows
+            # to one sender (the agent path of GET /api/notifications lists
+            # only rows stamped ``agent:<canonical_id>``).
             conds = ["archived = 0"]
+            source_params: tuple = ()
             if unread_only:
                 conds.append("read = 0")
+            if source is not None:
+                conds.append("source = ?")
+                source_params = (source,)
             sql = (
                 "SELECT id, timestamp, level, title, message, read, source, data, user_id FROM notifications"
                 f" WHERE {' AND '.join(conds)} ORDER BY timestamp DESC LIMIT ?"
             )
-            params: tuple = (limit,)
+            params: tuple = source_params + (limit,)
             async with self._db.execute(sql, params) as cursor:
                 rows = await cursor.fetchall()
             return [_serialize_row(r) for r in rows]
