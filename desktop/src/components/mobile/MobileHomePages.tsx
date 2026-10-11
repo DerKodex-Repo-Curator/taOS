@@ -63,6 +63,16 @@ function WidgetCard({ children, style, onClick, onLongPress }: { children: React
 
   const longPressProps = onLongPress
     ? {
+        tabIndex: 0,
+        "aria-haspopup": "dialog" as const,
+        onKeyDown: (e: React.KeyboardEvent) => {
+          if (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) {
+            e.preventDefault();
+            onLongPress();
+          } else if (e.key === "Enter" || e.key === " ") {
+            onClick?.();
+          }
+        },
         onPointerDown: (e: React.PointerEvent) => {
           fired.current = false;
           cancel();
@@ -275,7 +285,12 @@ function PageContent({ page, onOpenApp }: { page: HomePage; onOpenApp: (appId: s
             } else {
               const curApp = WIDGET_APP_MAP[cur.widgetType];
               rendered.push(
-                <WidgetCard key={cur.index} onClick={curApp ? () => onOpenApp(curApp) : undefined} onLongPress={lp(cur.widgetType)}>
+                <WidgetCard
+                  key={cur.index}
+                  style={pairable(cur.widgetType) ? { width: "calc(50% - 6px)" } : undefined}
+                  onClick={curApp ? () => onOpenApp(curApp) : undefined}
+                  onLongPress={lp(cur.widgetType)}
+                >
                   {renderWidgetContent(cur.widgetType)}
                 </WidgetCard>
               );

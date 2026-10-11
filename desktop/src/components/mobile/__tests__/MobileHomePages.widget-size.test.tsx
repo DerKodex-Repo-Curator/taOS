@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { render, screen, fireEvent, act, cleanup } from "@testing-library/react";
 import { MobileHomePages } from "../MobileHomePages";
 import { useMobileHomeStore } from "@/stores/mobile-home-store";
+import { setWidgetSize } from "@/stores/mobile-widget-size";
 
 vi.mock("@/hooks/use-installed-optional-apps", () => ({
   useInstalledOptionalApps: () => new Set<string>(),
@@ -65,5 +66,23 @@ describe("MobileHomePages widget size", () => {
     fireEvent.click(card);
     expect(onOpenApp).toHaveBeenCalledWith("weather");
     expect(screen.queryByRole("dialog", { name: "Widget size" })).toBeNull();
+  });
+
+  it("keyboard ContextMenu opens the size sheet", () => {
+    render(<MobileHomePages onOpenApp={onOpenApp} />);
+    const card = weatherCard();
+    expect(card.tabIndex).toBe(0);
+    fireEvent.keyDown(card, { key: "ContextMenu" });
+    expect(screen.getByRole("dialog", { name: "Widget size" })).toBeTruthy();
+  });
+
+  it("a lone half side widget renders at half width", () => {
+    setWidgetSize("weather", "half");
+    useMobileHomeStore.setState({
+      activePageIndex: 0,
+      pages: [{ items: [{ type: "widget", widgetType: "weather" }] }],
+    });
+    render(<MobileHomePages onOpenApp={onOpenApp} />);
+    expect(weatherCard().style.width).toBe("calc(50% - 6px)");
   });
 });
