@@ -3,11 +3,16 @@
 How it works
 ------------
 1. ``CSRFMiddleware`` sets a ``csrf_token`` cookie (non-HttpOnly, so JS can
-   read it) on every outgoing response that does not already carry one.
+   read it).  With a ``taos_session`` the token is bound to that session
+   (``mint_csrf_token``) and is re-issued whenever the cookie does not verify
+   for it, including on login.  Before a session exists (sign-in page) it is
+   a plain random token, set only when the request carries none.
 2. ``verify_csrf`` is a FastAPI dependency.  State-mutating routes
    (POST / PUT / PATCH / DELETE) that rely on session-cookie auth include
    this dependency.  It checks that the ``X-CSRF-Token`` request header
-   matches the ``csrf_token`` cookie value.
+   matches the ``csrf_token`` cookie value AND that the cookie was minted
+   for the request's ``taos_session`` (``verify_bound``), so a cookie planted
+   from a sibling subdomain cannot satisfy it.
 3. Routes authenticated exclusively via ``Authorization: Bearer <token>``
    do *not* need CSRF protection — the bearer token itself is unforgeable
    from a third-party origin.  Those routes skip ``verify_csrf``.
@@ -126,6 +131,49 @@ def verify_bound(secret: bytes, token: object, session_id: object) -> bool:
     return hmac.compare_digest(mac, _bound_mac(secret, session_id, nonce))
 
 
+_SECRET_CONTEXT = b"taos-csrf-binding-v1"
+
+
+def get_csrf_secret(app) -> bytes:
+    """Return the key that binds CSRF tokens to sessions, cached on ``app.state``.
+
+    Derived from the persistent local auth token (``<data_dir>/.auth_local_token``)
+    so issued tokens survive a restart without a new secret file.  The HMAC
+    with a fixed context string means the CSRF key is not the local token
+    itself.  An app without an auth manager (a bare test app) gets a
+    per-process random key instead.
+    """
+    secret = getattr(app.state, "csrf_secret", None)
+    if secret:
+        return secret
+    local_token = None
+    auth_mgr = getattr(app.state, "auth", None)
+    if auth_mgr is not None:
+        try:
+            local_token = auth_mgr.get_local_token()
+        except Exception:
+            local_token = None
+    if local_token:
+        secret = hmac.new(
+            local_token.encode("utf-8"), _SECRET_CONTEXT, hashlib.sha256
+        ).digest()
+    else:
+        secret = secrets.token_bytes(32)
+    app.state.csrf_secret = secret
+    return secret
+
+
+def _issued_session(response: Response) -> str | None:
+    """The ``taos_session`` value this response sets, ``""`` if it deletes it,
+    ``None`` if it does not touch it."""
+    issued = None
+    for line in response.headers.getlist("set-cookie"):
+        name, _, rest = line.split(";", 1)[0].partition("=")
+        if name.strip() == "taos_session":
+            issued = rest.strip().strip('"')
+    return issued
+
+
 class CSRFMiddleware(BaseHTTPMiddleware):
     """Ensure every response carries a ``csrf_token`` cookie.
 
@@ -140,9 +188,30 @@ class CSRFMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next) -> Response:
         existing = request.cookies.get(_COOKIE_NAME)
+        session_token = request.cookies.get("taos_session")
         response = await call_next(request)
-        if not existing:
+        issued_session = _issued_session(response)
+        if issued_session:
+            # Login / session creation: bind to the session just minted.
+            bind_to = issued_session
+        elif issued_session is None and not getattr(
+            request.state, "clear_stale_session", False
+        ):
+            bind_to = session_token
+        else:
+            bind_to = None
+        token = None
+        if bind_to:
+            # Re-issue whenever the cookie does not verify for this session:
+            # a pre-login unbound token, a pre-change cookie, or one planted
+            # from a sibling subdomain.
+            secret = get_csrf_secret(request.app)
+            if issued_session or not verify_bound(secret, existing, bind_to):
+                token = mint_csrf_token(secret, bind_to)
+        elif not existing:
+            # No session yet (sign-in page): today's unbound token.
             token = secrets.token_hex(_TOKEN_BYTES)
+        if token:
             response.set_cookie(
                 _COOKIE_NAME,
                 token,
@@ -192,7 +261,8 @@ def verify_csrf(conn: HTTPConnection) -> None:
       active cookie-session there is nothing for CSRF to hijack.
 
     For protected requests the ``X-CSRF-Token`` header must match the
-    ``csrf_token`` cookie value (double-submit pattern).
+    ``csrf_token`` cookie value (double-submit pattern), and the cookie must
+    verify as bound to the request's ``taos_session``.
     """
     # WebSocket scope has no HTTP method — not CSRF-able; skip.
     method = getattr(conn, "method", None)
@@ -238,3 +308,10 @@ def verify_csrf(conn: HTTPConnection) -> None:
 
     if not secrets.compare_digest(cookie_token, header_token):
         raise HTTPException(status_code=403, detail="CSRF token mismatch")
+
+    # The cookie must also have been minted for THIS session.  A pre-change
+    # unbound cookie, or one planted from a sibling subdomain, fails here;
+    # CSRFMiddleware re-issues a bound cookie on this same 403 response, so a
+    # caller that re-reads the cookie and retries once goes through.
+    if not verify_bound(get_csrf_secret(conn.app), cookie_token, session_token):
+        raise HTTPException(status_code=403, detail="CSRF token not bound to session")
