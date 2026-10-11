@@ -1075,7 +1075,7 @@ class TestDeliverHandshake:
                 http_client=client,
             )
             assert result is True
-            assert seen["url"] == "http://93.184.216.34/api/peer/inbox"
+            assert seen["url"] == "http://93.184.216.34/api/peer/handshake"
         finally:
             await client.aclose()
 
@@ -1112,7 +1112,7 @@ class TestDeliverHandshake:
                 envelope, link["endpoints"], http_client=client,
             )
             assert result is True
-            assert seen["url"] == "http://93.184.216.34/api/peer/inbox"
+            assert seen["url"] == "http://93.184.216.34/api/peer/handshake"
         finally:
             await client.aclose()
 
@@ -1127,6 +1127,6 @@ class TestDeliverHandshake:
                 http_client=client,
             )
             assert result is True
-            assert seen["url"] == "http://93.184.216.34/api/peer/inbox"
+            assert seen["url"] == "http://93.184.216.34/api/peer/handshake"
         finally:
             await client.aclose()
