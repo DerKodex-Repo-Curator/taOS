@@ -1,6 +1,5 @@
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
-# ruff: noqa: I001
 import ipaddress
 import json
 import logging
@@ -14,9 +13,7 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import HTMLResponse, RedirectResponse
 
-from tinyagentos.agent_token_auth import (
-    check_agent_identity, _get_keypair, _get_store, _enforce_rotation_cutoff,
-)
+from tinyagentos.agent_token_auth import check_agent_identity, _get_keypair, _get_store, _enforce_rotation_cutoff
 from tinyagentos.auth import AuthStoreCorruptError
 from tinyagentos.device_scopes import (
     AGENTS_READ, CHAT_SEND, DECISIONS_ANSWER, FILES_UPLOAD, LIBRARY_INGEST,
@@ -30,7 +27,7 @@ class _RaisingRotatingFileHandler(logging.handlers.RotatingFileHandler):
     """Re-raise emit failures so the middleware's warning path sees them."""
 
     def handleError(self, record):
-        raise  # noqa: PLE0704 - called from within emit's except block
+        raise  # noqa: PLE0704 - handleError called from emit's except block
 
 
 logger = logging.getLogger(__name__)
@@ -960,7 +957,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                         # We do a lightweight verification here; the route will
                         # do the full scope check.
                         try:
-                            from tinyagentos.agent_token_auth import verify_registry_token
+                            from tinyagentos.agent_token_auth import verify_registry_token  # noqa: I001
                             from tinyagentos.native_agent_identity import NATIVE_AGENT_ORIGIN
                             _private_pem, public_pem = _get_keypair(request)
                             payload = verify_registry_token(presented, public_pem)

@@ -121,17 +121,13 @@ class TestAgentTokenRouteRecorder:
     async def test_recorder_failure_does_not_break_request(
         self, client: AsyncClient, app, log_file_path, monkeypatch, caplog
     ):
-        """Recorder failure (emit raises) does not break the request."""
+        """Recorder failure (shouldRollover raises OSError) does not break the request."""
         agent_name = "test-failure-agent"
         path = f"/api/agents/{agent_name}"
 
-        # First make the bound-token GET /api/agents/test-failure-agent request WITHOUT any patch
-        # and record expected = resp.status_code
         resp1, _token1 = await self._make_request_with_bound_token(client, app, agent_name, "GET", path)
         expected = resp1.status_code
 
-        # Then obtain the logger via logging.getLogger("taos.agent_token_routes"),
-        # assert it has exactly one handler, monkeypatch that handler's shouldRollover to raise OSError
         logger = logging.getLogger("taos.agent_token_routes")
         assert len(logger.handlers) == 1
         handler = logger.handlers[0]
@@ -141,8 +137,6 @@ class TestAgentTokenRouteRecorder:
 
         monkeypatch.setattr(handler, "shouldRollover", _raise_oserror)
 
-        # Make the SAME request again inside caplog at WARNING level on logger tinyagentos.auth_middleware
-        # and assert resp.status_code == expected and warning was logged
         with caplog.at_level(logging.WARNING, logger="tinyagentos.auth_middleware"):
             resp2, _token2 = await self._make_request_with_bound_token(client, app, agent_name, "GET", path)
             assert resp2.status_code == expected, f"Status changed after logger failure: {resp2.status_code} != {expected}"
