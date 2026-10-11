@@ -386,6 +386,8 @@ def register_all_routers(app):
 
     from tinyagentos.routes.taos_agent import router as taos_agent_router
     app.include_router(taos_agent_router, dependencies=_csrf)
+    from tinyagentos.routes.taos_agent_actions import router as taos_agent_actions_router
+    app.include_router(taos_agent_actions_router, dependencies=_csrf)
 
     from tinyagentos.routes.taosmd import router as taosmd_router
     app.include_router(taosmd_router, dependencies=_csrf)
