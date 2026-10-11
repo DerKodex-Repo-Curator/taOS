@@ -100,16 +100,23 @@ export function ExcalidrawBoard({ elements, theme = "light" }: ExcalidrawBoardPr
     // One skeleton can convert to several elements (a container plus its bound
     // label text), so group by the row id elementToSkeleton stamps into
     // customData; a label text carries no customData and follows its container.
-    const byRow = new Map<string, ExcalidrawElements[number][]>();
+    // Map every stamped element first so a label emitted before its container
+    // still finds its row.
+    const taosIdOf = (x: ExcalidrawElements[number]): string | undefined => {
+      const taosId = (x.customData as { taos_id?: unknown } | undefined)?.taos_id;
+      return typeof taosId === "string" ? taosId : undefined;
+    };
     const rowOf = new Map<string, string>();
+    for (const x of converted) {
+      const taosId = taosIdOf(x);
+      if (taosId) rowOf.set(x.id, taosId);
+    }
+    const byRow = new Map<string, ExcalidrawElements[number][]>();
     let lastRow: string | undefined;
     for (const x of converted) {
-      const taosId = (x.customData as { taos_id?: unknown } | undefined)?.taos_id;
       const containerId = "containerId" in x ? x.containerId : null;
-      const row =
-        typeof taosId === "string" ? taosId : (containerId && rowOf.get(containerId)) || lastRow;
+      const row = taosIdOf(x) ?? (containerId && rowOf.get(containerId)) ?? lastRow;
       if (!row) continue;
-      rowOf.set(x.id, row);
       lastRow = row;
       const group = byRow.get(row);
       if (group) group.push(x);

@@ -55,7 +55,8 @@ function skeletonIds(call: unknown[]): string[] {
 
 describe("ExcalidrawBoard", () => {
   beforeEach(() => {
-    convertSpy.mockClear();
+    // mockReset also restores the pass-through after a test overrides it.
+    convertSpy.mockReset();
     parseSpy.mockClear();
   });
 
@@ -125,5 +126,26 @@ describe("ExcalidrawBoard", () => {
     // converted only the two notes, together, in one call.
     const last = convertSpy.mock.calls[convertSpy.mock.calls.length - 1];
     expect(skeletonIds(last)).toEqual(["bottom", "top"]);
+  });
+
+  it("a bound label text follows its container whatever the converter's order", () => {
+    // A labelled skeleton converts to a container plus a text element that
+    // carries no customData, only containerId. Emit n2's text BEFORE its
+    // container: grouping must not depend on the converter's output order.
+    convertSpy.mockImplementation((skeletons: unknown[]) =>
+      (skeletons as { id: string; label?: { text: string } }[]).flatMap((s) => {
+        const text = { id: `t-${s.id}`, type: "text", containerId: s.id, text: s.label?.text };
+        return s.id === "n2" ? [text, s] : [s, text];
+      }),
+    );
+    const { getByTestId } = render(
+      <ExcalidrawBoard
+        elements={[
+          el({ id: "n1", kind: "note", z_index: 1, payload: { text: "a" } }),
+          el({ id: "n2", kind: "note", z_index: 0, payload: { text: "b" } }),
+        ]}
+      />,
+    );
+    expect(getByTestId("excalidraw").getAttribute("data-ids")).toBe("t-n2,n2,n1,t-n1");
   });
 });
