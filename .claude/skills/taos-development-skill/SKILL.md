@@ -197,7 +197,7 @@ What this means when you write a test:
   several `conftest.py` files exist, so a bare `from conftest import ...` binds whichever one
   is on `sys.path` first.
 - **The `csrf_token` must be bound to the session.** `verify_csrf` also checks
-  `verify_bound(cookie, taos_session)`, so an arbitrary value next to a real session 403s.
+  `verify_bound(secret, cookie, taos_session)`, so an arbitrary value next to a real session 403s.
   The hook mints a bound token for any session made by `AuthManager.create_session`. If you
   set the cookie and header by hand, mint it:
   `from taos_test_csrf import bound_csrf_token; token = bound_csrf_token(app, session)`.
