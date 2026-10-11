@@ -216,7 +216,7 @@ def _render_context(ctx):
         return ""
     lines = []
     for m in ctx:
-        who = m.get("author_id") or "?"
+        who = m.get("author_id") or m.get("role") or "?"
         lines.append(f"{who}: {m.get('content','')}")
     return "\n".join(lines)
 
@@ -253,15 +253,18 @@ def _msg_content_text(msg) -> str:
     return ""
 
 
+_NO_REPLY = "[deer-flow error: no assistant message in response]"
+
+
 def _extract_text(messages) -> str:
     """Pull the assistant reply from a list of LangGraph/LangChain messages.
 
     The final message is not necessarily the assistant turn (after a tool call
     it can be a tool message), so scan from the end for the last AI message.
-    Falls back to the last message's text, then str() of it.
+    Returns a bridge error when the run produced no assistant text.
     """
     if not messages:
-        return ""
+        return _NO_REPLY
     for msg in reversed(messages):
         if not isinstance(msg, dict):
             continue
@@ -270,7 +273,8 @@ def _extract_text(messages) -> str:
             text = _msg_content_text(msg)
             if text:
                 return text
-    return _msg_content_text(messages[-1]) or str(messages[-1])
+    # Never post a tool result or serialized tool call as the agent's reply.
+    return _NO_REPLY
 
 
 async def _thinking(c: httpx.AsyncClient, ch_id, state: str, *,
@@ -484,6 +488,16 @@ if __name__ == "__main__":
 BRIDGE_EOF
 chmod +x /opt/taos/taos-deer-flow-bridge.py
 
+# Bridge env (carries TAOS_LOCAL_TOKEN) lives in a mode-600 file, not in the
+# world-readable unit file.
+cat > /opt/taos/deer-flow-bridge.env <<ENVFILE
+TAOS_BRIDGE_URL=$BRIDGE_URL
+TAOS_AGENT_NAME=$AGENT_NAME
+TAOS_LOCAL_TOKEN=$LOCAL_TOKEN
+DEER_FLOW_URL=http://127.0.0.1:8001
+ENVFILE
+chmod 600 /opt/taos/deer-flow-bridge.env
+
 cat > /etc/systemd/system/taos-deer-flow-bridge.service <<UNIT
 [Unit]
 Description=taOS-DeerFlow bridge (SSE to DeerFlow /api/runs/wait)
@@ -491,10 +505,7 @@ After=deer-flow.service network.target
 Wants=deer-flow.service
 [Service]
 Type=simple
-Environment=TAOS_BRIDGE_URL=$BRIDGE_URL
-Environment=TAOS_AGENT_NAME=$AGENT_NAME
-Environment=TAOS_LOCAL_TOKEN=$LOCAL_TOKEN
-Environment=DEER_FLOW_URL=http://127.0.0.1:8001
+EnvironmentFile=/opt/taos/deer-flow-bridge.env
 ExecStart=/usr/bin/python3 /opt/taos/taos-deer-flow-bridge.py
 Restart=on-failure
 RestartSec=5
@@ -505,8 +516,10 @@ WantedBy=multi-user.target
 UNIT
 
 systemctl daemon-reload
+# restart (not start) so a re-run picks up the rewritten config, env and bridge.
 systemctl enable deer-flow.service
-systemctl start deer-flow.service
-systemctl enable --now taos-deer-flow-bridge.service
+systemctl restart deer-flow.service
+systemctl enable taos-deer-flow-bridge.service
+systemctl restart taos-deer-flow-bridge.service
 echo "deer-flow-2.1.0" > /opt/taos/framework.version
 log "done"

@@ -157,6 +157,20 @@ class TestCallDeerFlow:
         assert client.post.call_count == 1
         mock_sleep.assert_not_called()
 
+    @pytest.mark.parametrize("messages", [
+        [],
+        [{"type": "human", "content": "hi"},
+         {"type": "ai", "content": "", "tool_calls": [{"name": "search"}]},
+         {"type": "tool", "content": "raw tool output"}],
+    ])
+    def test_no_assistant_text_is_a_bridge_error(self, bridge_ns, messages):
+        """A tool result or serialized tool call must never be posted as the reply."""
+        call = bridge_ns["call_deer_flow"]
+        client = MagicMock()
+        client.post = AsyncMock(return_value=_ok({"messages": messages}))
+        result = asyncio.run(call(client, "hi"))
+        assert result == "[deer-flow error: no assistant message in response]"
+
     def test_connect_errors_exhaust_retries(self, bridge_ns):
         call = bridge_ns["call_deer_flow"]
         client = MagicMock()
@@ -207,6 +221,13 @@ class TestHandleUserMessage:
         assert "what now?" in prompt
         assert "test-agent" in prompt
 
+    def test_context_without_author_id_uses_role(self, bridge_ns):
+        render = bridge_ns["_render_context"]
+        out = render([{"role": "system", "content": "agent manual"},
+                      {"author_id": "jay", "role": "user", "content": "hi"},
+                      {"content": "anon"}])
+        assert out.splitlines() == ["system: agent manual", "jay: hi", "?: anon"]
+
     def test_no_response_suppressed_when_not_forced(self, bridge_ns):
         handle = bridge_ns["handle_user_message"]
         client = MagicMock()
@@ -247,13 +268,31 @@ class TestInstallWiring:
         script = Path(deployer.__file__).parent / "scripts" / "install_deer-flow.sh"
         assert script.exists()
 
-    def test_bridge_service_enabled_after_httpx_install(self):
+    def test_bridge_service_started_after_httpx_install(self):
         lines = SCRIPT_PATH.read_text().splitlines()
         pip_lines = [i for i, l in enumerate(lines) if re.search(r"^pip3 install .*httpx\b", l)]
-        enable_lines = [i for i, l in enumerate(lines)
-                        if "systemctl enable --now taos-deer-flow-bridge.service" in l]
-        assert pip_lines and enable_lines
-        assert min(pip_lines) < min(enable_lines)
+        start_lines = [i for i, l in enumerate(lines)
+                       if l == "systemctl restart taos-deer-flow-bridge.service"]
+        assert pip_lines and start_lines
+        assert min(pip_lines) < min(start_lines)
+
+    def test_rerun_restarts_both_services(self):
+        """start / enable --now are no-ops on active units, so a re-run would
+        leave the old bridge and config running."""
+        lines = SCRIPT_PATH.read_text().splitlines()
+        assert "systemctl restart deer-flow.service" in lines
+        assert "systemctl restart taos-deer-flow-bridge.service" in lines
+        assert "systemctl enable taos-deer-flow-bridge.service" in lines
+        assert not any(l.startswith("systemctl start ") for l in lines)
+
+    def test_local_token_not_in_unit_file(self):
+        """Unit files are world-readable; the token goes in a mode-600 env file."""
+        text = SCRIPT_PATH.read_text()
+        unit = re.search(r"taos-deer-flow-bridge.service <<UNIT\n(.*?)\nUNIT", text, re.DOTALL)
+        assert unit
+        assert "TAOS_LOCAL_TOKEN" not in unit.group(1)
+        assert "EnvironmentFile=/opt/taos/deer-flow-bridge.env" in unit.group(1)
+        assert "chmod 600 /opt/taos/deer-flow-bridge.env" in text
 
     def test_deer_flow_service_still_provisioned(self):
         text = SCRIPT_PATH.read_text()
