@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, waitFor, cleanup } from "@testing-library/react";
+import { render, screen, cleanup } from "@testing-library/react";
 import { Suspense } from "react";
+import type { ReactElement } from "react";
 
 vi.mock("../canvas/CanvasBoard", () => ({
   CanvasBoard: () => <div data-testid="canvas-board-stub" />,
@@ -15,7 +16,7 @@ import { CanvasView } from "../canvas/CanvasView";
 
 afterEach(cleanup);
 
-function renderWithSuspense(ui: React.ReactElement) {
+function renderWithSuspense(ui: ReactElement) {
   return render(<Suspense fallback={null}>{ui}</Suspense>);
 }
 
@@ -33,18 +34,14 @@ describe("CanvasView engine switching", () => {
   it("renders CanvasBoard by default", async () => {
     window.location.search = "";
     renderWithSuspense(<CanvasView projectId="p1" projectSlug="s1" />);
-    await waitFor(() => {
-      expect(screen.getByTestId("canvas-board-stub")).toBeInTheDocument();
-    });
+    await screen.findByTestId("canvas-board-stub");
     expect(screen.queryByTestId("excalidraw-canvas-stub")).not.toBeInTheDocument();
   });
 
   it("renders ExcalidrawCanvas when ?canvas=excalidraw", async () => {
     window.location.search = "?canvas=excalidraw";
     renderWithSuspense(<CanvasView projectId="p1" projectSlug="s1" />);
-    await waitFor(() => {
-      expect(screen.getByTestId("excalidraw-canvas-stub")).toBeInTheDocument();
-    });
+    await screen.findByTestId("excalidraw-canvas-stub");
     expect(screen.queryByTestId("canvas-board-stub")).not.toBeInTheDocument();
   });
 });

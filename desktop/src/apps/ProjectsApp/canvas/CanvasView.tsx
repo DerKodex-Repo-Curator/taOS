@@ -4,6 +4,7 @@ import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent } from "react";
 import { Download } from "lucide-react";
 import { AppErrorBoundary } from "@/components/AppErrorBoundary";
 import { getCanvasEngine } from "./canvas-engine";
+import { canvasApi } from "./canvas-api";
 
 const CanvasBoard = lazy(() =>
   import("./CanvasBoard").then((m) => ({ default: m.CanvasBoard }))
@@ -95,7 +96,7 @@ function CanvasBackupMenu({ projectId, projectSlug }: { projectId: string; proje
           }}
         >
           <a
-            href={`/api/projects/${projectId}/canvas/snapshot.tldr`}
+            href={canvasApi.snapshotTldrUrl(projectId)}
             download={`${projectSlug}-canvas.tldr`}
             onClick={() => setOpen(false)}
             style={linkStyle}
@@ -103,7 +104,7 @@ function CanvasBackupMenu({ projectId, projectSlug }: { projectId: string; proje
             Download .tldr (open in tldraw)
           </a>
           <a
-            href={`/api/projects/${projectId}/canvas/elements?include_deleted=true`}
+            href={canvasApi.elementsJsonUrl(projectId)}
             download={`${projectSlug}-canvas.json`}
             onClick={() => setOpen(false)}
             style={linkStyle}
