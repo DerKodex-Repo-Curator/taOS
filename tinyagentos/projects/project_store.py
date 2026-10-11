@@ -496,7 +496,7 @@ class ProjectStore(ProjectsDBStore):
     async def list_members(self, project_id: str) -> list[dict]:
         async with self._read(
             "SELECT * FROM project_members WHERE project_id = ? ORDER BY added_at ASC",
-            (project_id,)
+            (project_id,),
         ) as cur:
             rows = await cur.fetchall()
             keys = [d[0] for d in cur.description]

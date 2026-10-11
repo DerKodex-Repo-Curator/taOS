@@ -91,6 +91,9 @@ async def test_add_remove_member(store):
     )
     members = await store.list_members(p["id"])
     assert len(members) == 2
+    by_id = {m["member_id"]: m for m in members}
+    assert by_id["agent-2-clone"]["memory_seed"] == "snapshot"
+    assert by_id["agent-2-clone"]["source_agent_id"] == "agent-2"
 
     await store.remove_member(p["id"], "agent-1")
     members = await store.list_members(p["id"])
