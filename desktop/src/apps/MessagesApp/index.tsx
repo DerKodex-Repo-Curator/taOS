@@ -53,6 +53,7 @@ import { MessageList, type MessageListHandle } from "../chat/MessageList";
 import {
   pinMessage, unpinMessage, listPins,
   editMessage as apiEditMessage, deleteMessage as apiDeleteMessage,
+  editAgentReply as apiEditAgentReply,
   markUnread as apiMarkUnread,
 } from "@/lib/chat-messages-api";
 import { getReceipts, markSeen, type Receipt } from "@/lib/a2a-receipts-api";
@@ -2000,7 +2001,9 @@ body: JSON.stringify({
 
   const handleSaveEdit = async (msgId: string, content: string) => {
     try {
-      await apiEditMessage(msgId, content);
+      const target = messages.find((m) => m.id === msgId);
+      if (target?.author_type === "agent") await apiEditAgentReply(msgId, content);
+      else await apiEditMessage(msgId, content);
       setEditingMessageId(null);
     } catch (e) {
       setSendError((e as Error).message);
@@ -2304,6 +2307,7 @@ body: JSON.stringify({
             editingMessageId={editingMessageId}
             onCancelEdit={() => setEditingMessageId(null)}
             onSaveEdit={handleSaveEdit}
+            onEditAgentReply={setEditingMessageId}
             onToggleReaction={toggleReaction}
             showEmoji={showEmoji}
             onShowEmoji={setShowEmoji}

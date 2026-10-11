@@ -323,6 +323,24 @@ class ChatMessageStore(BaseStore):
         )
         await self._db.commit()
 
+    async def latest_agent_message_id(
+        self, channel_id: str, thread_id: str | None,
+    ) -> str | None:
+        """Return the id of the most recent live agent message in one thread.
+
+        *thread_id* ``None`` scopes to the channel's top level. Deleted and
+        ephemeral rows are skipped so a tombstone never counts as "last".
+        """
+        async with self._db.execute(
+            "SELECT id FROM chat_messages"
+            " WHERE channel_id = ? AND thread_id IS ? AND author_type = 'agent'"
+            " AND deleted_at IS NULL AND ephemeral = 0"
+            " ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (channel_id, thread_id),
+        ) as cursor:
+            row = await cursor.fetchone()
+        return row[0] if row else None
+
     async def set_metadata(self, message_id: str, metadata: dict) -> None:
         await self._db.execute(
             "UPDATE chat_messages SET metadata = ? WHERE id = ?",
