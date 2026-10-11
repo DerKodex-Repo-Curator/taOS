@@ -201,3 +201,7 @@ The `safe.directory` flag is needed because the repo is owned by the `taos` serv
 
 - **User-mode systemd** (installer ran without root): same commands with `systemctl --user` and `journalctl --user -u tinyagentos`. No `taos` user exists; everything runs as you.
 - **macOS** (launchd agent): `launchctl kickstart -k gui/$(id -u)/com.tinyagentos.controller` to restart; logs land in the paths configured in `~/Library/LaunchAgents/com.tinyagentos.controller.plist`.
+
+## Re-run onboarding on a working install
+
+Stop the controller (`sudo systemctl stop tinyagentos`), run `sudo -u taos /opt/taos/.venv/bin/taos reset --onboarding` (prompts; `--yes` skips the prompt, `--no-backup` skips the backup, a timestamped backup of everything removed is written to `<data_dir>/backups/reset-<UTC>/` and its path is printed), start the controller, reload the page. State that models, installed apps, agents and every other store are kept.

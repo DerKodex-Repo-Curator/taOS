@@ -1,0 +1,1 @@
+- New `taos reset --onboarding` command re-arms first-run onboarding offline (removes accounts, sessions, password-reset and auth-request stores and the setup checklist state, with a timestamped backup) while keeping models, apps and agents.
