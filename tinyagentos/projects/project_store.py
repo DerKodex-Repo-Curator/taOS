@@ -130,7 +130,7 @@ class ProjectStore(ProjectsDBStore):
                     (pid,),
                 )
 
-    async def set_lead(self, project_id: str, member_id: "str | None") -> None:
+    async def set_lead(self, project_id: str, member_id: str | None) -> None:
         """Set (or clear, when member_id is None) the project's exclusive lead.
 
         The single pointer column makes the one-lead-per-project invariant
