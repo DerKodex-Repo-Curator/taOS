@@ -109,6 +109,8 @@ interface Channel {
   created_at?: string;
   last_message_at?: string;
   lastPreview?: string;
+  last_preview?: string;
+  last_preview_author?: string;
   project_id?: string;
   settings?: {
     archived?: boolean;
@@ -1004,7 +1006,12 @@ export function MessagesApp({
       ]);
       if (chRes.ok) {
         const data = await chRes.json();
-        setChannels(data.channels ?? []);
+        setChannels(
+          (data.channels ?? []).map((c: Channel) => ({
+            ...c,
+            lastPreview: c.last_preview ?? c.lastPreview,
+          }))
+        );
       }
       if (unRes.ok) {
         const data = await unRes.json();
@@ -1026,7 +1033,12 @@ export function MessagesApp({
       const res = await fetch(url);
       if (res.ok) {
         const data = await res.json();
-        setArchivedChannels(data.channels ?? []);
+        setArchivedChannels(
+          (data.channels ?? []).map((c: Channel) => ({
+            ...c,
+            lastPreview: c.last_preview ?? c.lastPreview,
+          }))
+        );
       }
     } catch {
       /* offline */
