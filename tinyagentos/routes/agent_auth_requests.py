@@ -189,6 +189,16 @@ class ApproveScopeBody(BaseModel):
     renew: bool = False
 
 
+class DenyScopeBody(BaseModel):
+    """Optional body for POST .../scope-requests/{req_id}/deny.
+
+    ``reason`` is the approver's explanation, recorded on the row and returned
+    as ``deny_reason`` by the read routes so the agent learns why. The body is
+    optional so a bare deny (the bell / toast) stays valid.
+    """
+    reason: str = Field(default="", max_length=2000)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -1980,6 +1990,7 @@ _PUBLIC_SCOPE_REQUEST_FIELDS = (
     "granted_scopes",
     "created_ts",
     "decided_ts",
+    "deny_reason",
 )
 
 
@@ -2260,9 +2271,13 @@ async def deny_scope_request(
     request: Request,
     canonical_id: str,
     req_id: str,
+    body: Optional[DenyScopeBody] = None,
     user: CurrentUser = Depends(current_user),
 ):
-    """Deny a pending scope request (owner/admin only)."""
+    """Deny a pending scope request (owner/admin only).
+
+    An optional ``{"reason": "..."}`` body is recorded as ``deny_reason``.
+    """
     registry = _get_registry_store(request)
     record = await registry.get(canonical_id)
     if record is None:
@@ -2290,7 +2305,10 @@ async def deny_scope_request(
                 detail=f"request is already {req['status']!r}; cannot deny",
             )
 
-        result = await store.set_decision(req_id, "refused", decided_by=user.user_id)
+        deny_reason = (body.reason.strip() if body else "") or None
+        result = await store.set_decision(
+            req_id, "refused", decided_by=user.user_id, deny_reason=deny_reason
+        )
         if result is None:
             raise HTTPException(
                 status_code=409,
