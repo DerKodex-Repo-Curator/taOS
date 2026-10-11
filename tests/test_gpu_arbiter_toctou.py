@@ -207,3 +207,74 @@ class TestToctouReservation:
         stats = await arbiter.stats()
         assert stats["reserved_vram_mb"] == 2048
         assert stats["pending_reservations"] == 1
+
+
+class _EpochFakeCluster:
+    """Fake controller that fences renew/release by lease epoch, like ClusterManager."""
+
+    class _Lease:
+        def __init__(self, lease_id, epoch):
+            self.lease_id = lease_id
+            self.epoch = epoch
+
+    def __init__(self):
+        self.current_epoch = "g.1"
+        self.claim_calls = []
+        self.renew_epochs = []
+        self.release_epochs = []
+
+    async def claim_lease(self, resource_id, caller, ttl_seconds, required_vram_mb):
+        self.claim_calls.append(resource_id)
+        return self._Lease("lease-1", self.current_epoch)
+
+    async def renew_lease(self, lease_id, ttl_seconds=30, epoch=None):
+        self.renew_epochs.append(epoch)
+        if epoch is not None and epoch != self.current_epoch:
+            return None  # takeover: the stored lease now has a different epoch
+        return self._Lease(lease_id, self.current_epoch)
+
+    async def release_lease(self, lease_id, epoch=None):
+        self.release_epochs.append(epoch)
+        return True
+
+
+class TestGpuArbiterLeaseEpochs:
+    @pytest.mark.asyncio
+    async def test_renew_presents_claim_epoch_and_takeover_stops_task(self):
+        cm = _EpochFakeCluster()
+        arbiter = GpuArbiter(vram_probe=lambda: (8192, 8192), cluster_manager=cm, max_queue_size=10)
+        arbiter._RENEW_INTERVAL_S = 0.02
+        started = asyncio.Event()
+
+        async def blocking(_resource):
+            started.set()
+            await asyncio.sleep(30)
+
+        task = _make_task("t-epoch", vram_mb=0)
+        task.payload = blocking
+        runner = asyncio.create_task(arbiter._run_gpu_task(task, 0, False, "gpu-cuda-0:t-epoch"))
+        await asyncio.wait_for(started.wait(), timeout=5)
+        await asyncio.sleep(0.1)  # a few renews with the claim epoch
+        assert cm.renew_epochs and set(cm.renew_epochs) == {"g.1"}, cm.renew_epochs
+        cm.current_epoch = "g.2"  # takeover: same lease_id, new epoch
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(runner, timeout=5)
+        assert len(cm.claim_calls) == 1  # never re-claimed
+        assert cm.release_epochs == ["g.1"]  # release presents the epoch it holds
+
+    @pytest.mark.asyncio
+    async def test_lease_renew_happy_path_keeps_task_running(self):
+        cm = _EpochFakeCluster()
+        arbiter = GpuArbiter(vram_probe=lambda: (8192, 8192), cluster_manager=cm, max_queue_size=10)
+        arbiter._RENEW_INTERVAL_S = 0.02
+
+        async def short(_resource):
+            await asyncio.sleep(0.15)
+            return "done"
+
+        task = _make_task("t-happy", vram_mb=0)
+        task.payload = short
+        result = await asyncio.wait_for(arbiter._run_gpu_task(task, 0, False, "gpu-cuda-0:t-happy"), timeout=5)
+        assert result == "done"
+        assert len(cm.renew_epochs) >= 2 and set(cm.renew_epochs) == {"g.1"}
+        assert cm.release_epochs == ["g.1"]
