@@ -416,7 +416,7 @@ a real lease:
 |--------|------|-------|---------|
 | GET  | `/api/a2a/gpu/check`   | `a2a_receive` | Fold the channel's open claims + the node's live VRAM and answer "may I load?" |
 | POST | `/api/a2a/gpu/claim`   | `a2a_send`    | Admission-checked claim: cluster lease (TTL) + `[GPU CLAIM]` post |
-| POST | `/api/a2a/gpu/release` | `a2a_send`    | Release the lease + `[GPU RELEASE]` post |
+| POST | `/api/a2a/gpu/release` | `a2a_send`    | Release the lease (if any) and `[GPU RELEASE]` post, unless releasing an expired lease ID when a newer lease exists (then returns `already_released` without posting) |
 | POST | `/api/a2a/gpu/request` | `a2a_send`    | Post `[GPU REQUEST]` when blocked |
 | POST | `/api/a2a/gpu/renew`   | `a2a_send`    | Keep-alive: extend a lease TTL |
 
@@ -503,7 +503,10 @@ Rules that matter when you use it:
 
 `check` returns `admitted`, `blockers`, `free_mb`, `capacity_mb`, `claimed_mb`,
 `vram_verified`, `reason`, and the `claims` it folded. `claim` returns the
-`lease_id` (when the node is a cluster worker) and the exact `line` posted.
+`lease_id` and `epoch` (when the node is a cluster worker) and the exact `line`
+posted. `renew` accepts an optional `epoch` body field that must match the lease's
+current epoch; a mismatch is refused with `409` so a replaced lease is not
+silently extended. `release` also accepts an optional `epoch` field.
 
 ## Bus restarts during a controller update
 
@@ -768,6 +771,13 @@ A bool, string, float, zero, negative or over-ten-years value is refused with
 and a bound that is set is never silently dropped or lengthened. To explicitly
 renew or extend an existing bound, set `renew: true` on the approve body.
 
+Set `is_lead: true` on the approve body to make the approved agent the
+project's lead: the membership row gets role `lead` and the project's lead
+pointer is set to it. It is refused with **400** unless the body names an
+explicit `project_id` and grants `project_tasks` or a canvas scope (the grants
+that create the membership row), and it cannot be combined with
+`defer_binding`.
+
 Deferred binding (`defer_binding=True`) mints the token and grants UNBOUND
 (project_id=None) with the same `expires_at` from `duration_secs`. When the
 agent is later bound to a project via `POST /api/projects/{id}/members/assign-agent`,
@@ -1004,6 +1014,7 @@ covers:
 - `POST /api/chat/messages` — scope `chat:send`
 - `POST /api/device/v1/voice`, `POST /api/device/v1/voice/tts` — scope `voice:stt` / `voice:tts`
 - `GET /api/device/v1/state` — scope `agents:read` (owner-filtered agent list)
+- `GET /api/device/v1/events` -- scope `agents:read` (SSE of owner-filtered agent changes; `Last-Event-ID` resume, closes on revoke or scope loss; see docs/routes.d/16-device-v1.md)
 
 ## Share destinations (device bearer)
 
@@ -1056,6 +1067,12 @@ The auth-request flow (`POST /api/agents/auth-requests`) MINTS A NEW identity on
 approval, so an agent that already holds an active registry identity cannot use
 it to gain more scopes without duplicating itself. A scope request adds grants to
 that SAME canonical_id instead:
+
+**Auth model.** When `POST /api/agents/auth-requests` receives an Authorization header, it calls `check_agent_identity` and records the proven canonical id (or None on rejection). A `proof_status` field now indicates the result:
+   - `"none"` when no Authorization header is present
+   - `"accepted"` when a token validates and the record's `proven_canonical_id` is set
+   - `"rejected"` when an Authorization header is present but validation raises OR returns no identity (empty or non-Bearer header value)
+   The status is exposed in the response so the caller can distinguish these three states.
 
 - `POST /api/agents/registry/{canonical_id}/scope-requests`
   `{requested_scopes, project_id?, reason?}`: create a pending request. Unlike
@@ -1290,7 +1307,10 @@ registry token in the mandatory header:
 Authorization: Bearer <registry token>
 ```
 
-Without a valid registry token the request returns **401**. The token subject is
+Without a valid registry token the request returns **401**. The `proof_status`
+field on the response is always `"accepted"` on this path, because an unproven
+caller receives 401 before any auth-request record is created; the path never
+returns `"none"` or `"rejected"`. The token subject is
 the only source of the canonical agent id. The body's `identity_claim` must equal the registry handle of the agent the token was minted for; a mismatch returns **403**. The body
 carries the desired project name, slug, and purpose:
 
@@ -1774,6 +1794,12 @@ Behaviour common to all three:
   scheduler stops routing tasks to it, rather than waiting out the heartbeat
   timeout. The worker stays REGISTERED and therefore still visible in
   `GET /api/cluster/workers`, which is what makes it unblockable from the UI.
+- `DELETE /api/cluster/workers/{name}` additionally unpins every agent whose
+  `remote` matches the worker name: `remote` and `placement_source` are popped,
+  `host` is set to empty, `status` is set to `failed`, and `placement_error`
+  records the worker name. The response includes `unpinned_agents` (the list of
+  affected agent names, empty when none). Marking a worker offline via revoke or
+  block does NOT unpin agents, only full deletion does.
 
 **Blocked devices keep consuming a per-user slot.** `list_for_user` returns rows
 where `revoked=0 OR blocked=1`, so a blocked device counts against
@@ -2003,6 +2029,22 @@ eliminating the last-deploy-wins collision where two agents bound to the same
 host token would overwrite each other's identity. The shared host token remains
 valid for admin/system callers but is no longer bound to any agent name.
 
+## Chat author identity (credential-bound for per-agent local tokens)
+
+`POST /api/chat/messages`, `POST /api/chat/messages/{id}/reactions`,
+`DELETE /api/chat/messages/{id}/reactions/{emoji}`, and
+`POST /api/chat/channels/{id}/typing` now bind the caller-supplied author to the
+per-agent local token when one is presented. `POST /api/chat/messages/{id}/delta`
+and `POST /api/chat/messages/{id}/state` CHECK message ownership (403 when the
+message is missing or not authored by the bound agent) rather than overriding an
+author field. `POST /api/chat/channels/{id}/thinking` REJECTS a mismatched slug
+(it does not override it). The auth middleware sets `request.state.agent_name`
+for bound tokens (`AuthManager.get_local_token_agent`); the routes use a
+`_bound_agent(request)` helper and override `author_id`/`slug` with that name.
+The host local token, admin sessions, session cookies, and device bearers are
+not bound, so their caller-supplied values are preserved (byte-for-byte
+compatibility with taosctl and the SPA).
+
 ## In-process LLM gateway (`/api/llm/v1`, scoped gateway keys, session or host local token)
 
 `tinyagentos/llm_gateway/` is the in-controller replacement for the LiteLLM
@@ -2155,7 +2197,7 @@ the LiteLLM hook's 429 before anything is forwarded. Revoking, blocking or
 deleting a cluster node, and archiving an agent, revoke the keys bound to it
 in the same request.
 
-## The system taOS Agent's harness (opencode, or PicoClaw on a handset)
+## The system taOS Agent's harness (opencode, PicoClaw on a handset, or Claude Code)
 
 The built-in taOS Agent runs on opencode (a host `opencode serve`) on every
 host, except a taOSmobile handset, where it runs on PicoClaw (the catalog's
@@ -2165,13 +2207,27 @@ the choice is made, from two config.yaml keys:
 - `device.class`: `auto` (default; `hardware._detect_device_class`, which
   reads the `taos-kiosk.service` unit), `mobile` or `desktop`;
 - `taos_agent.framework`: `auto` (default; picoclaw on mobile, opencode
-  elsewhere), `opencode` or `picoclaw` (operator overrides).
+  elsewhere), `opencode`, `picoclaw` or `claude_code` (operator overrides;
+  `auto` never picks `claude_code`).
 
 PicoClaw needs the LLM gateway (on unless `TAOS_LLM_GATEWAY=0`) and a `picoclaw` binary
 (`TAOS_PICOCLAW_BIN`, PATH, `/usr/local/bin`, `/usr/bin`). Without either,
 opencode runs and the reason is logged, e.g. exactly
 `picoclaw preferred, gateway disabled, using opencode`. An unknown config
 value is ignored (treated as `auto`) with a warning.
+
+`claude_code` runs one `claude -p --output-format stream-json` turn per chat
+message (`tinyagentos/claude_code_runtime.py`), continued with `--resume`. It
+signs in with the long-lived token `claude setup-token` prints, stored as the
+Secrets entry `claude_code_oauth_token` (never the controller env); the child
+gets only `HOME`, `PATH`, `LANG`, `NO_COLOR`, `TZ` and
+`CLAUDE_CODE_OAUTH_TOKEN`. It needs the `claude` binary (PATH,
+`~/.local/bin/claude`, `/usr/local/bin/claude`) and that secret, not the
+gateway. Without them opencode runs, with the reason exactly
+`claude_code preferred, claude binary not found, using opencode` or
+`claude_code preferred, no claude_code_oauth_token secret, using opencode`;
+a chat request while it is selected but not ready answers 503 with a plain
+message. Attachments are not supported yet.
 
 - `GET /api/taos-agent/config` and the lock screen (`/auth/lock-widgets`)
   report `framework` = the harness that RUNS the agent (never the

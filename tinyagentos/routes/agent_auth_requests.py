@@ -37,7 +37,7 @@ from tinyagentos.agent_registry_store import (
     agent_slug_or_fallback,
     mint_registry_token,
 )
-from tinyagentos.agent_token_auth import check_agent_identity
+from tinyagentos.agent_token_auth import check_agent_identity, check_agent_identity_claims
 from tinyagentos.auth_context import CurrentUser, current_user, require_owner_or_admin
 from tinyagentos.base_store import PendingCapExceeded
 from tinyagentos.routes.projects import _free_suggestions
@@ -149,6 +149,10 @@ class ApproveBody(BaseModel):
     project_id: Optional[str] = None
     defer_binding: bool = False
     renew: bool = False
+    # Make the approved agent the project's lead (membership role + the
+    # projects.lead_member_id pointer). Needs an explicit project_id and a
+    # membership-creating grant; refused otherwise rather than silently ignored.
+    is_lead: bool = False
 
 
 class AssignAgentBody(BaseModel):
@@ -229,6 +233,32 @@ def _get_relationships(request: Request):
     if rel is None:
         raise RuntimeError("relationships manager not on app.state")
     return rel
+
+
+async def _classify_proof(request: Request) -> tuple[str, str | None, int | None]:
+    """Return (proof_status, proven_cid, proven_iat) from the request's Authorization header.
+
+    Header absent -> ("none", None, None).
+    Header present -> check_agent_identity_claims; truthy -> ("accepted", cid, iat);
+    None or HTTPException -> ("rejected", None, None).
+    """
+    authorization_header = request.headers.get("authorization")
+    has_auth_header = authorization_header is not None
+    proof_status = "none" if not has_auth_header else "rejected"
+    proven = None
+    proven_iat = None
+    if has_auth_header:
+        try:
+            result = await check_agent_identity_claims(request)
+            if result is not None:
+                proven, proven_iat = result
+            if proven:
+                proof_status = "accepted"
+        except HTTPException:
+            proven = None
+            proven_iat = None
+            proof_status = "rejected"
+    return proof_status, proven, proven_iat
 
 
 async def _retire_request_notification(request: Request, request_id: str) -> None:
@@ -374,6 +404,8 @@ async def _handle_project_create_request(
 
     from_agent = await _resolve_agent_identity(request, body.identity_claim, strict=True)
 
+    proof_status, proven = "accepted", from_agent
+
     admins = [u for u in request.app.state.auth.list_users() if u.get("is_admin")]
     if not admins:
         raise HTTPException(status_code=409, detail="no admin to receive the decision")
@@ -381,11 +413,8 @@ async def _handle_project_create_request(
 
     decision_store = request.app.state.decision_store
 
-    # Check agent identity for proof of reuse
-    try:
-        proven = await check_agent_identity(request)
-    except HTTPException:
-        proven = None
+    # proof_status is fixed above; only the token iat is needed for rotation detection.
+    _, _, proven_iat = await _classify_proof(request)
 
     record = None
     try:
@@ -405,6 +434,7 @@ async def _handle_project_create_request(
             cap_identity=from_agent,
             cap_framework="project_create",
             proven_canonical_id=proven,
+            proven_token_iat=proven_iat,
         )
     except PendingCapExceeded as exc:
         raise HTTPException(
@@ -473,7 +503,7 @@ async def _handle_project_create_request(
             pass
 
     return JSONResponse(
-        {"request_id": record["id"], "status": "pending", "decision_id": decision["id"]}
+        {"request_id": record["id"], "status": "pending", "decision_id": decision["id"], "proof_status": proof_status}
     )
 
 
@@ -555,10 +585,9 @@ async def create_auth_request(request: Request, body: CreateAuthRequest):
     # than counted here first: this route takes no credentials, so a burst of
     # concurrent posts is free, and a count-then-insert check hands every
     # request in that burst the same pre-insert count.
-    try:
-        proven = await check_agent_identity(request)
-    except HTTPException:
-        proven = None
+    
+    proof_status, proven, proven_iat = await _classify_proof(request)
+
     try:
         record = await store.create(
             identity_claim=body.identity_claim,
@@ -570,6 +599,7 @@ async def create_auth_request(request: Request, body: CreateAuthRequest):
             project_id=body.project_id,
             pending_cap=_PENDING_CAP,
             proven_canonical_id=proven,
+            proven_token_iat=proven_iat,
         )
     except PendingCapExceeded as exc:
         raise HTTPException(
@@ -612,7 +642,7 @@ async def create_auth_request(request: Request, body: CreateAuthRequest):
         except Exception:
             pass
 
-    return {"request_id": record["id"], "status": "pending"}
+    return {"request_id": record["id"], "status": "pending", "proof_status": proof_status}
 
 
 @router.get("/api/agents/auth-requests/{request_id}")
@@ -751,6 +781,7 @@ async def approve_request_record(
     display_name: str | None = None,
     defer_binding: bool = False,
     renew: bool = False,
+    is_lead: bool = False,
 ) -> dict:
     """Register an agent, mint its token, write grants + relationships +
     membership + a2a sync, and record the decision.
@@ -922,6 +953,17 @@ async def approve_request_record(
                         f"{existing_active['canonical_id']}; resubmit the request with that agent's registry token as a Bearer header"
                     ),
                 )
+            # Also reject if the proof token was superseded by a rotation since
+            # the request was filed. The stored token iat must be >= the
+            # identity's current token_min_iat.
+            if (record.get("proven_token_iat") or 0) < (existing_active.get("token_min_iat") or 0):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"handle '{handle}' belongs to active agent "
+                        f"{existing_active['canonical_id']}; the proof token was superseded by a rotation and the request must be resubmitted with a current token"
+                    ),
+                )
             existing_cid = existing_active["canonical_id"]
             token = mint_registry_token(
                 existing_cid,
@@ -936,6 +978,7 @@ async def approve_request_record(
                 project_id=project_id,
                 granted_scopes=granted_scopes,
                 decided_by=decided_by,
+                is_lead=is_lead,
                 expires_at=expires_at,
                 renew=renew,
             )
@@ -1057,8 +1100,13 @@ async def approve_request_record(
                         project_id=binding_project,
                         member_id=canonical_id,
                         member_kind="native",
-                        role="member",
+                        role="lead" if is_lead else "member",
                     )
+                    # The role is only a label; set_lead writes the
+                    # lead_member_id pointer the lead-gated checks read
+                    # (same split as add_agent_to_project, taOS #2113).
+                    if is_lead:
+                        await pstore.set_lead(binding_project, canonical_id)
                     if granted_canvas:
                         await pstore.set_member_canvas(
                             project_id=binding_project,
@@ -1593,6 +1641,29 @@ async def _do_approve(request: Request, request_id: str, body: ApproveBody, user
             status_code=400,
             detail="defer_binding cannot be combined with an explicit project_id",
         )
+    # is_lead makes the agent lead of the EXPLICIT project, so it needs one
+    # (never the agent-supplied fallback) and a grant that creates the
+    # membership row the lead pointer must reference.
+    if body.is_lead:
+        if body.defer_binding or not (body.project_id and body.project_id.strip()):
+            raise HTTPException(
+                status_code=400,
+                detail="is_lead requires an explicit project_id",
+            )
+        if not ("project_tasks" in body.granted_scopes or set(body.granted_scopes) & _CANVAS_SCOPES):
+            raise HTTPException(
+                status_code=400,
+                detail="is_lead requires granting project_tasks or a canvas scope",
+            )
+        # Validate the project BEFORE minting: the lead write runs inside the
+        # best-effort membership block, so a missing project would otherwise
+        # surface only as a log line after the request is already accepted.
+        pstore = getattr(request.app.state, "project_store", None)
+        if pstore is None or await pstore.get_project(body.project_id) is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"is_lead: project {body.project_id!r} not found",
+            )
 
     approval_result = await approve_request_record(
         request,
@@ -1603,7 +1674,15 @@ async def _do_approve(request: Request, request_id: str, body: ApproveBody, user
         project_id=body.project_id,
         defer_binding=body.defer_binding,
         renew=body.renew,
+        is_lead=body.is_lead,
     )
+    # Report whether the lead pointer actually landed rather than trusting the
+    # best-effort write, so the approver is told when it did not.
+    if body.is_lead:
+        project = await request.app.state.project_store.get_project(body.project_id)
+        approval_result["lead_assigned"] = bool(
+            project and project.get("lead_member_id") == approval_result.get("canonical_id")
+        )
 
     # Attach duration information to the approval result.
     approval_result.update({
