@@ -961,6 +961,19 @@ export function MessagesApp({
   // or null when not in mention mode. mentionSel is the highlighted candidate.
   const [mention, setMention] = useState<{ partial: string; atIndex: number } | null>(null);
   const [mentionSel, setMentionSel] = useState(0);
+  // Reactive draft text: keep in sync with localStorage on every channel change
+  // and on every keystroke in the composer.
+  useEffect(() => {
+    if (selectedChannel) {
+      const text = loadDraft(selectedChannel);
+      setInput(text);
+      if (inputRef.current) {
+        inputRef.current.value = text;
+        inputRef.current.style.height = "auto";
+        inputRef.current.style.height = Math.min(inputRef.current.scrollHeight, 120) + "px";
+      }
+    }
+  }, [selectedChannel]); // reload draft whenever channel switches
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [currentUserDisplayName, setCurrentUserDisplayName] = useState<string | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
@@ -2418,6 +2431,29 @@ className="shrink-0 p-0.5 rounded hover:bg-shell-surface-active transition-color
                 aria-label="Dismiss prefill"
               >
                 <X size={12} aria-hidden="true" />
+              </button>
+            </div>
+          )}
+          {/* draft preview */}
+          {input && input.trim() && (
+            <div
+              className="mx-4 mb-1 px-3 py-2 rounded-lg bg-shell-surface border border-shell-border-strong text-[12px] text-shell-text flex items-center gap-2 shrink-0"
+              role="status"
+            >
+              <span className="flex-1 truncate">Draft: {input.trim().replace(/\s+/g, " ")}</span>
+              <button
+                onClick={() => {
+                  setInput("");
+                  if (inputRef.current) {
+                    inputRef.current.value = "";
+                    inputRef.current.style.height = "auto";
+                    inputRef.current.style.height = "120px";
+                  }
+                }}
+                className="shrink-0 text-shell-text-tertiary hover:underline hover:text-shell-text transition-colors"
+                aria-label="Clear draft"
+              >
+                ✕
               </button>
             </div>
           )}

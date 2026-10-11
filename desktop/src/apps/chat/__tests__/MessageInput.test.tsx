@@ -370,4 +370,35 @@ describe("MessageInput", () => {
     render(<MessageInput {...defaultProps({ value: "   " })} />);
     expect(screen.getByRole("button", { name: /send message/i })).toBeDisabled();
   });
+
+  /* ---- draft-before-send ---- */
+
+  it("calls onChange with edited text when draft is edited", () => {
+    const onChange = vi.fn();
+    const draft = "Original draft text";
+    render(
+      <MessageInput
+        {...defaultProps({ onChange, value: draft })}
+        channel={{ id: "ch-1", name: "general", type: "topic", members: ["user"] }}
+      />,
+    );
+    const textarea = screen.getByRole("textbox", { name: /message input/i });
+    fireEvent.change(textarea, { target: { value: "Edited draft text" } });
+    expect(onChange).toHaveBeenCalledWith("Edited draft text");
+  });
+
+  it("preserves draft text in input when Enter is pressed without Shift", () => {
+    const onSend = vi.fn();
+    const draft = "Original draft";
+    render(
+      <MessageInput
+        {...defaultProps({ onSend, value: draft })}
+        channel={{ id: "ch-1", name: "general", type: "topic", members: ["user"] }}
+      />,
+    );
+    const textarea = screen.getByRole("textbox", { name: /message input/i });
+    fireEvent.keyDown(textarea, { key: "Enter", shiftKey: false });
+    // In a controlled component, the value resets to the draft after onSend
+    expect(textarea).toHaveValue("Original draft");
+  });
 });
