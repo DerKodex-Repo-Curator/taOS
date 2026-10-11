@@ -99,6 +99,11 @@ class MdnsPublisher:
         self._info: ServiceInfo | None = None
         self._active = False
 
+    @property
+    def async_zeroconf(self) -> AsyncZeroconf | None:
+        """Return the AsyncZeroconf instance for reuse by discovery."""
+        return self._zc
+
     async def start(self) -> None:
         """Register the service. Never raises into the caller."""
         try:

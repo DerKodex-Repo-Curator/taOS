@@ -509,6 +509,8 @@ def create_app(data_dir: Path | None = None, catalog_dir: Path | None = None) ->
     desktop_settings = DesktopSettingsStore(data_dir / "desktop.db")
     from tinyagentos.device_store import DeviceStore
     device_store = DeviceStore(data_dir / "devices.db")
+    from tinyagentos.cast_device_store import CastDeviceStore
+    cast_device_store = CastDeviceStore(data_dir / "cast_devices.db")
     from tinyagentos.device_pair_requests_store import DevicePairRequestsStore
     device_pair_requests_store = DevicePairRequestsStore(data_dir / "device_pair_requests.db")
     from tinyagentos.push.apns import apns_sender_from_env
@@ -718,6 +720,7 @@ def create_app(data_dir: Path | None = None, catalog_dir: Path | None = None) ->
         await canvas_store.init()
         await desktop_settings.init()
         await device_store.init()
+        await cast_device_store.init()
         await device_pair_requests_store.init()
         await user_memory.init()
         await installed_apps.init()
@@ -1389,6 +1392,18 @@ def create_app(data_dir: Path | None = None, catalog_dir: Path | None = None) ->
             logger.exception("mdns publisher failed to start — continuing without")
             app.state.mdns_publisher = None
 
+        # Cast discovery — discovers Chromecast/AirPlay devices on the LAN.
+        # Uses the mdns_publisher's AsyncZeroconf instance; if publisher failed,
+        # discovery is unavailable but startup continues.
+        try:
+            from tinyagentos.services.cast_discovery import CastDiscovery
+            cast_discovery = CastDiscovery(mdns_publisher, cast_device_store)
+            await cast_discovery.start()
+            app.state.cast_discovery = cast_discovery
+        except Exception:
+            logger.exception("cast discovery failed to start — continuing without")
+            app.state.cast_discovery = None
+
         # System event bus — unified typed-event broadcast.
         from tinyagentos.events import EventBus, SystemEventStore
         from tinyagentos.events.bus import SystemEvent as _SystemEvent
@@ -1498,6 +1513,14 @@ def create_app(data_dir: Path | None = None, catalog_dir: Path | None = None) ->
         if _hb_task is not None:
             _bg.add(_hb_task)
         await cancel_and_wait(_bg, timeout=5.0)
+
+        # Stop cast discovery before mDNS publisher (uses its zeroconf).
+        _cast = getattr(app.state, "cast_discovery", None)
+        if _cast is not None:
+            try:
+                await _cast.stop()
+            except Exception:
+                logger.exception("cast discovery stop failed")
 
         # Unregister mDNS first so the goodbye packet goes out before other
         # services start tearing down (and potentially blocking the loop).
