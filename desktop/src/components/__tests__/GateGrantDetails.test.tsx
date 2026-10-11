@@ -121,6 +121,16 @@ describe("gate decision grant details", () => {
     expect(screen.queryByRole("group", { name: /what approving grants/i })).toBeNull();
   });
 
+  it("a kind naming an inherited Object property still renders the card", async () => {
+    const proto = { ...ordinary, metadata: { kind: "toString" } };
+    vi.stubGlobal("fetch", mockFetch(inboxRoutes([proto])));
+    render(<DecisionsApp windowId="w1" />);
+    await flush();
+    await waitFor(() => expect(screen.getByText("Ship it?")).toBeTruthy());
+
+    expect(screen.queryByRole("group", { name: /what approving grants/i })).toBeNull();
+  });
+
   it("chat decision block shows what an execution gate grants", async () => {
     vi.stubGlobal("fetch", mockFetch({ "GET /api/decisions/dec-gate": executionGate }));
     render(<DecisionBlock block={{ kind: "decision", decision_id: "dec-gate" }} />);

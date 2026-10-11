@@ -45,7 +45,9 @@ function display(value: unknown): string {
 
 export function GateGrantDetails({ metadata }: { metadata?: Record<string, unknown> | null }) {
   const kind = typeof metadata?.kind === "string" ? metadata.kind : "";
-  const gate = GATE_KINDS[kind];
+  // Own keys only: a caller-chosen kind like "toString" must not resolve to an
+  // inherited Object property.
+  const gate = Object.prototype.hasOwnProperty.call(GATE_KINDS, kind) ? GATE_KINDS[kind] : undefined;
   if (!metadata || !gate) return null;
   const rows = gate.fields
     .map(([key, label]) => [label, display(metadata[key])] as const)
