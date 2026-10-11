@@ -51,7 +51,7 @@ from tinyagentos.routes.desktop_browser.profile import (
     ensure_default_profiles,
     get_profile_or_404,
 )
-from tinyagentos.routes.desktop_browser.rewriter import rewrite_html
+from tinyagentos.routes.desktop_browser.rewriter import rewrite_css, rewrite_html
 from tinyagentos.routes.desktop_browser.ssrf import (
     SsrfBlockedError,
     guarded_async_client,
@@ -397,16 +397,29 @@ async def proxy_get(
             {"error": "response too large"}, status_code=502,
         )
 
-    if "text/html" in content_type:
-        # Rewrite + inject for HTML
-        proxy_prefix = (
-            f"/api/desktop/browser/proxy?profile_id={quote(profile_id, safe='')}"
-            f"&url="
+    proxy_prefix = (
+        f"/api/desktop/browser/proxy?profile_id={quote(profile_id, safe='')}"
+        f"&url="
+    )
+
+    def _proxy_url(absolute: str) -> str:
+        return f"{proxy_prefix}{quote(absolute, safe='')}"
+
+    if "text/css" in content_type:
+        # Stylesheets carry origin-absolute url() and @import references too.
+        rewritten_css = rewrite_css(
+            response.content, base_url=str(response.url), proxy=_proxy_url,
+            charset=_detect_charset(content_type, b""),
+        )
+        return Response(
+            content=rewritten_css,
+            status_code=response.status_code,
+            headers=out_headers,
+            media_type="text/css; charset=utf-8",
         )
 
-        def _proxy_url(absolute: str) -> str:
-            return f"{proxy_prefix}{quote(absolute, safe='')}"
-
+    if "text/html" in content_type:
+        # Rewrite + inject for HTML
         charset = _detect_charset(content_type, response.content)
         rewritten = rewrite_html(
             response.content, base_url=str(response.url), proxy=_proxy_url,

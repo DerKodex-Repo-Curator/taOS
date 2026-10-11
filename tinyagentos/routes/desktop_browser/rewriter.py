@@ -48,6 +48,14 @@ _CSS_URL_RE = re.compile(
 )
 
 
+# CSS @import with a bare string target: @import "x.css"; (the url() form is
+# already matched by _CSS_URL_RE above).
+_CSS_IMPORT_STR_RE = re.compile(
+    r"""(@import\s+)(['"])([^'"]+)\2""",
+    re.IGNORECASE,
+)
+
+
 # Kept in sync with the proxy route path in proxy.py. GET forms submit to this
 # bare path (their query string is replaced by the form's own fields on
 # submit), carrying the taOS routing params as hidden inputs instead.
@@ -227,7 +235,29 @@ def _rewrite_css_text(
         new_url = _rewrite_one(url, base_url=base_url, proxy=proxy)
         return f"url({quote}{new_url}{quote})"
 
+    def replace_import(match: re.Match) -> str:
+        quote = match.group(2)
+        new_url = _rewrite_one(
+            match.group(3).strip(), base_url=base_url, proxy=proxy
+        )
+        return f"{match.group(1)}{quote}{new_url}{quote}"
+
+    text = _CSS_IMPORT_STR_RE.sub(replace_import, text)
     return _CSS_URL_RE.sub(replace, text)
+
+
+def rewrite_css(
+    css_bytes: bytes,
+    *,
+    base_url: str,
+    proxy: Callable[[str], str],
+    charset: str = "utf-8",
+) -> bytes:
+    """Rewrite url() and @import references in a text/css response body."""
+    if not css_bytes:
+        return b""
+    text = css_bytes.decode(charset or "utf-8", errors="replace")
+    return _rewrite_css_text(text, base_url=base_url, proxy=proxy).encode("utf-8")
 
 
 def _rewrite_inline_styles(
@@ -244,7 +274,10 @@ def _rewrite_style_tags(
     tree, *, base_url: str, proxy: Callable[[str], str],
 ) -> None:
     for style_el in tree.iter("style"):
-        if style_el.text is None or "url(" not in style_el.text.lower():
+        if style_el.text is None:
+            continue
+        lowered = style_el.text.lower()
+        if "url(" not in lowered and "@import" not in lowered:
             continue
         style_el.text = _rewrite_css_text(
             style_el.text, base_url=base_url, proxy=proxy
