@@ -190,3 +190,28 @@ async def test_audit_kinds_cannot_be_posted_through_the_trace_api(client):
         )
         assert resp.status_code == 400, (kind, resp.text)
     assert await _rows(client) == []
+
+
+@pytest.mark.asyncio
+async def test_trace_read_shows_only_the_callers_own_audit_rows(client):
+    """Another account's external_write and local_fix rows never reach this user."""
+    store = await client.app.state.trace_registry.get("taos-agent")
+    await store.record("external_write", payload={**_WRITE_ROW, "user_id": "someone-else"})
+    await store.record(
+        "local_fix",
+        payload={"tool": "t", "target": "x", "undo": "u", "user_id": "someone-else"},
+    )
+    await store.record("message_in", payload={"text": "hello"})
+    aid = await _create(client)
+
+    for kind in ("external_write", "local_fix"):
+        resp = await client.get(f"/api/agents/taos-agent/trace?kind={kind}&limit=200")
+        assert resp.status_code == 200, resp.text
+        for event in resp.json()["events"]:
+            assert event["payload"]["user_id"] == client.uid, (kind, event["payload"])
+
+    resp = await client.get("/api/agents/taos-agent/trace?kind=external_write")
+    assert [e["payload"]["action_id"] for e in resp.json()["events"]] == [aid]
+    resp = await client.get("/api/agents/taos-agent/trace")
+    kinds = sorted(e["kind"] for e in resp.json()["events"])
+    assert kinds == ["external_write", "message_in"]

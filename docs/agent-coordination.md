@@ -2325,5 +2325,7 @@ writes one `executed` or `failed` row and decline one `declined` row. The
 reversible local fixes use kind `local_fix` `{tool, target, undo, user_id}`.
 The trace store refuses either kind with a field missing, and
 `POST /api/trace` refuses both (400): only taOS writes its own audit trail.
-The rows show in the Agents app trace list (kind filter) and in the taOS
+`GET /api/agents/{name}/trace` returns a row of either kind only to the
+signed-in user whose `user_id` it carries, so one account never reads
+another's audit trail. The rows show in the Agents app trace list (kind filter) and in the taOS
 agent's Activity tab.
