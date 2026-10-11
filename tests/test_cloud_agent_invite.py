@@ -1,17 +1,11 @@
 import json
-import logging
-import os
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
 from tinyagentos.projects.invite_store import ProjectInviteStore
-from tinyagentos.routes.project_invites import (
-    _build_controller_dict,
-    build_connection_bundle,
-)
-from tinyagentos.auth_context import CurrentUser, current_user
+from tinyagentos.routes.project_invites import build_connection_bundle
 
 
 async def _create_project(client, slug="cloud-proj") -> str:
@@ -139,7 +133,9 @@ class TestMintCloudAgentInvite:
         data = resp.json()
         assert len(data["invite_id"]) == 6
         assert len(data["pin"]) == 4
+        # project_tasks is auto-added for project-scoped invites
         assert "project_tasks" in data["scopes"]
+        assert "a2a_send" in data["scopes"]
 
     @pytest.mark.asyncio
     async def test_mint_cloud_agent_defaults_check_interval_to_900(self, client, app, monkeypatch):
@@ -171,6 +167,24 @@ class TestMintCloudAgentInvite:
         )
         assert resp.status_code == 200, resp.text
         assert resp.json()["check_interval_secs"] == 300
+
+    @pytest.mark.asyncio
+    async def test_mint_cloud_agent_explicit_1800_stays_1800(self, client, app, monkeypatch):
+        """Explicit check_interval_secs=1800 for cloud_agent must not be rewritten to 900."""
+        monkeypatch.setenv("TAOS_CONTROLLER_RELAY_URL", "https://relay.example.test")
+        pid = await _create_project(client)
+
+        resp = await client.post(
+            f"/api/projects/{pid}/invites",
+            json={
+                "scopes": ["a2a_send"],
+                "approval_mode": "auto",
+                "kind": "cloud_agent",
+                "check_interval_secs": 1800,
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["check_interval_secs"] == 1800
 
     @pytest.mark.asyncio
     async def test_mint_unknown_kind_returns_400(self, client, app):
@@ -279,45 +293,6 @@ class TestDefaultAgentKindUnchanged:
         # Should have at least one LAN endpoint (mocked)
         lan_eps = [ep for ep in endpoints if ep["kind"] == "lan"]
         assert len(lan_eps) >= 1
-
-
-class TestBuildControllerDictCloudAgent:
-    """Test _build_controller_dict filtering for cloud_agent kind."""
-
-    @pytest.mark.asyncio
-    async def test_build_controller_dict_filters_for_cloud_agent(self, monkeypatch):
-        """When invite_record.kind == 'cloud_agent', only relay endpoints are kept."""
-        from tinyagentos.routes.project_invites import _build_controller_dict
-
-        monkeypatch.setenv("TAOS_CONTROLLER_RELAY_URL", "https://relay.example.test")
-        monkeypatch.delenv("TAOS_CONTROLLER_CALLBACK_HOST", raising=False)
-
-        req = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
-
-        # Mock LAN and mesh to return endpoints
-        with patch(
-            "tinyagentos.routes.project_invites._enumerate_lan_ips",
-            return_value=["192.168.1.1", "10.0.0.5"],
-        ), patch(
-            "tinyagentos.taosnet.mesh.mesh_status",
-            return_value={"joined": True, "node_ip": "100.64.0.7"},
-        ), patch(
-            "tinyagentos.routes.agent_deploy.controller_callback_host",
-            return_value=None,
-        ):
-            # Build controller dict normally (with all endpoints)
-            result = await _build_controller_dict(req)
-
-        # Verify we have all three kinds normally
-        all_kinds = {ep["kind"] for ep in result["endpoints"]}
-        assert "relay" in all_kinds
-        assert "lan" in all_kinds
-        assert "mesh" in all_kinds
-
-        # Now filter for cloud_agent: only relay should remain
-        cloud_endpoints = [ep for ep in result["endpoints"] if ep["kind"] == "relay"]
-        assert len(cloud_endpoints) == 1
-        assert cloud_endpoints[0]["url"] == "https://relay.example.test"
 
 
 class TestBuildConnectionBundleCloudAgent:

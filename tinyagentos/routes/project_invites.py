@@ -34,7 +34,7 @@ router = APIRouter()
 class MintInviteIn(BaseModel):
     scopes: list[str] = Field(default_factory=list)
     approval_mode: str = Field(default="auto", pattern="^(auto|manual)$")
-    check_interval_secs: int = Field(default=1800, ge=60)
+    check_interval_secs: int | None = Field(default=None, ge=60)
     kind: str = Field(default="agent")
     # How long the invite stays redeemable. Omitted means the store default
     # (1 hour). Capped at 24 hours: the PIN is the security gate, expiry is
@@ -836,7 +836,7 @@ async def mint_invite(
     kind = payload.kind
     if kind not in ("agent", "cloud_agent"):
         return JSONResponse(
-            {"error": f"invalid invite kind: {kind!r} -- must be one of ['agent', 'cloud_agent']"},
+            {"error": f"invalid invite kind: {kind}; valid: ['agent', 'cloud_agent']"},
             status_code=400,
         )
 
@@ -855,8 +855,10 @@ async def mint_invite(
                 },
                 status_code=400,
             )
-        if check_interval_secs == 1800:
+        if check_interval_secs is None:
             check_interval_secs = 900
+    elif check_interval_secs is None:
+        check_interval_secs = 1800
 
     try:
         result = await store.mint(
