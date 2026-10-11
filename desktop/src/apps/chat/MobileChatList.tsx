@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, useEffect } from "react";
 import { Bot, Globe, Hash, Radio, Users } from "lucide-react";
 import { MessageAvatar } from "./MessageAvatar";
 import { A2aBusSection, type BusChannel } from "./A2aBusPanel";
@@ -33,7 +33,8 @@ const FILTERS: { key: FilterKey; label: string; test: (c: Channel) => boolean }[
 ];
 
 function sortKey(c: Channel): number {
-  const t = Date.parse(c.last_message_at ?? c.created_at ?? "");
+  const parsed = c.last_message_at ? Date.parse(c.last_message_at) : NaN;
+  const t = Number.isNaN(parsed) ? Date.parse(c.created_at ?? "") : parsed;
   return Number.isNaN(t) ? -Infinity : t;
 }
 
@@ -81,8 +82,16 @@ export function MobileChatList(props: MobileChatListProps) {
       (activeFilter?.test(r.channel) ?? true) &&
       (!needle ||
         r.channel.name.toLowerCase().includes(needle) ||
-        (r.channel.lastPreview ?? "").toLowerCase().includes(needle)),
+        (r.channel.lastPreview ?? "").toLowerCase().includes(needle) ||
+        (r.projectName ?? "").toLowerCase().includes(needle)),
   );
+
+  // Reset filter to "all" if the active filter has no matching rows in the current rows
+  useEffect(() => {
+    if (filter !== "all" && activeFilter && !rows.some((r) => activeFilter.test(r.channel))) {
+      setFilter("all");
+    }
+  }, [filter, rows, activeFilter]);
 
   const cardStyle = {
     margin: "0 12px",
