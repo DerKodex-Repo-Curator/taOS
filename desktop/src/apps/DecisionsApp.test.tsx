@@ -400,6 +400,67 @@ describe("DecisionsApp", () => {
       ).toBeChecked();
     });
 
+    it("labels an agent-supplied project as requested and shows the grant lands OS-wide", async () => {
+      // decisions_* is global-capable: approve sends no project_id, so the
+      // grant is OS-wide whatever project the agent named.
+      const req = { ...liveRequest(), project_id: "prj-agent-picked" };
+      const scopeList: MockResponse = { ok: true, body: { requests: [req] } };
+      const fetchMock = mockFetch({
+        ...baseResponses(scopeList),
+        [`POST /api/agents/registry/${LIVE_CID}/scope-requests/${LIVE_ID}/approve`]: {
+          ok: true,
+          body: { status: "accepted" },
+        },
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      render(<DecisionsApp windowId="w1" />);
+      await flush();
+
+      const region = await screen.findByRole("region", { name: /scope requests/i });
+      expect(within(region).getByText(/requested project/i)).toBeTruthy();
+      expect(await within(region).findByText(/grants OS-wide \(all projects\)/i)).toBeTruthy();
+
+      const allow = within(region).getByRole("button", { name: /allow/i });
+      await waitFor(() => expect(allow).not.toBeDisabled());
+      fireEvent.click(allow);
+      await flush();
+      const post = fetchMock.mock.calls.find(
+        (c) => (c[1] as RequestInit)?.method === "POST",
+      );
+      expect(JSON.parse((post![1] as RequestInit).body as string).project_id).toBeUndefined();
+    });
+
+    it("still lists scope requests when the decisions inbox fails to load", async () => {
+      const scopeList = { ok: true, body: { requests: [liveRequest()] } };
+      const inner = mockFetch(baseResponses(scopeList));
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockImplementation((input: string, init?: RequestInit) =>
+          input === "/api/decisions?status=pending"
+            ? Promise.reject(new TypeError("network down"))
+            : inner(input, init),
+        ),
+      );
+      render(<DecisionsApp windowId="w1" />);
+      await flush();
+
+      const region = await screen.findByRole("region", { name: /scope requests/i });
+      expect(within(region).getByText(LIVE_CID)).toBeTruthy();
+    });
+
+    it("caps the deny reason at the route's 2000-character limit", async () => {
+      const scopeList = { ok: true, body: { requests: [liveRequest()] } };
+      vi.stubGlobal("fetch", mockFetch(baseResponses(scopeList)));
+      render(<DecisionsApp windowId="w1" />);
+      await flush();
+
+      const region = await screen.findByRole("region", { name: /scope requests/i });
+      fireEvent.click(within(region).getByRole("button", { name: /^deny/i }));
+      expect(
+        within(region).getByLabelText(/reason for denying/i).getAttribute("maxlength"),
+      ).toBe("2000");
+    });
+
     it("approving with a subset grants exactly that subset and the row leaves pending", async () => {
       const scopeList: MockResponse = { ok: true, body: { requests: [liveRequest()] } };
       const fetchMock = mockFetch({

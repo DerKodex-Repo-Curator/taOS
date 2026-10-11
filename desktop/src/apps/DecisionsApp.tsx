@@ -720,16 +720,18 @@ function ScopeRequestCard({
           <KeyRound size={11} className="shrink-0" />
           Scope request
         </span>
-        {req.project_id ? (
-          <span className="rounded-full bg-shell-surface px-2 py-0.5 text-xs text-shell-text-secondary">
-            Project <code>{req.project_id}</code>
-          </span>
-        ) : (
-          // A null project_id is the WIDER grant; never render it as blank.
-          <span className="rounded-full bg-red-500/10 px-2 py-0.5 text-xs font-medium text-red-300">
-            OS-wide (all projects)
-          </span>
-        )}
+        {/* The agent-supplied project_id is only what was ASKED for. The
+            binding that will actually apply is shown by ConsentActions below:
+            a global-capable grant lands OS-wide regardless (#3452). */}
+        <span className="rounded-full bg-shell-surface px-2 py-0.5 text-xs text-shell-text-secondary">
+          {req.project_id ? (
+            <>
+              Requested project <code>{req.project_id}</code>
+            </>
+          ) : (
+            "No project requested"
+          )}
+        </span>
         {req.created_ts && (
           <span className="ml-auto inline-flex items-center gap-1 text-xs text-shell-text-tertiary">
             <Clock size={11} className="shrink-0" />
@@ -769,6 +771,7 @@ function ScopeRequestCard({
         grantedScopes={granted}
         requestedProjectId={req.project_id ?? undefined}
         denyReasonRequired
+        showEffectiveBinding
         onResolved={onResolved}
       />
     </li>
@@ -790,6 +793,25 @@ export function DecisionsApp({ windowId: _windowId }: { windowId: string }) {
   const load = useCallback(async (opts?: { silent?: boolean }) => {
     const seq = ++latestSeq.current;
     if (!opts?.silent) setLoading(true);
+    // Pending agent scope requests (tsk-6ghcrv) load on their own task, started
+    // before the Promise.all below: a 403 (caller owns no agents) or a network
+    // error here must not blank the decisions inbox, and a failed decisions
+    // load must not stop this list from loading either.
+    void (async () => {
+      try {
+        const sRes = await fetch("/api/agents/scope-requests?status=pending", {
+          credentials: "include",
+        });
+        if (sRes.ok) {
+          const data = await sRes.json();
+          const reqs = data?.requests;
+          if (seq === latestSeq.current)
+            setScopeRequests(Array.isArray(reqs) ? (reqs as ScopeRequest[]) : []);
+        }
+      } catch {
+        // Best-effort: keep the last scope-request list in place.
+      }
+    })();
     try {
       const [pRes, aRes, rRes] = await Promise.all([
         fetch("/api/decisions?status=pending", { credentials: "include" }),
@@ -824,22 +846,6 @@ export function DecisionsApp({ windowId: _windowId }: { windowId: string }) {
         }
       } catch {
         // Best-effort: keep the last withdrawn list in place.
-      }
-      // Pending agent scope requests (tsk-6ghcrv), also outside the
-      // Promise.all: a 403 (caller owns no agents) or a network error must not
-      // blank the decisions inbox.
-      try {
-        const sRes = await fetch("/api/agents/scope-requests?status=pending", {
-          credentials: "include",
-        });
-        if (sRes.ok) {
-          const data = await sRes.json();
-          const reqs = data?.requests;
-          if (seq === latestSeq.current)
-            setScopeRequests(Array.isArray(reqs) ? (reqs as ScopeRequest[]) : []);
-        }
-      } catch {
-        // Best-effort: keep the last scope-request list in place.
       }
     } catch {
       // Network error: keep whatever was last loaded in place.

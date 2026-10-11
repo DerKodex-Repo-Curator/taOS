@@ -50,6 +50,9 @@ import { slugifyWithFallback } from "@/lib/slug";
  *  tinyagentos/routes/agent_auth_requests.py. */
 const SCOPE_VOCABULARY_URL = "/api/agents/scope-vocabulary";
 
+/** Mirrors DenyScopeBody.reason's max_length on the scope-request deny route. */
+const DENY_REASON_MAX = 2000;
+
 /** How long to wait for the vocabulary before treating silence as a failure.
  *  A hung request must become a visible error, not an Allow button that is
  *  disabled forever for no stated reason. */
@@ -129,6 +132,7 @@ export function ConsentActions({
   humanDuration,
   harness,
   denyReasonRequired = false,
+  showEffectiveBinding = false,
 }: {
   requestId: string;
   scopes: string[];
@@ -145,6 +149,10 @@ export function ConsentActions({
   /** Deny becomes two-step: the approver must type a reason, which is sent as
    *  `{reason}` to the deny route (scope requests record it as deny_reason). */
   denyReasonRequired?: boolean;
+  /** Say where the grant will actually apply. A grant with no project scope is
+   *  sent without a project_id and lands OS-wide, whatever project the request
+   *  named, so the approver must see that before Allow (tsk-6ghcrv). */
+  showEffectiveBinding?: boolean;
 }) {
   // `granted` is what the approve call will actually send. It defaults to the
   // full requested set, so the out-of-the-box behaviour (grant exactly what was
@@ -505,6 +513,14 @@ export function ConsentActions({
           This token will be readable by all bots on this Grok account.
         </p>
       )}
+      {showEffectiveBinding &&
+        projectScopes !== null &&
+        !needsProject &&
+        granted.length > 0 && (
+          <p className="mb-2 text-[11px] font-medium text-red-300">
+            Grants OS-wide (all projects)
+          </p>
+        )}
       {needsProject && (
           <div className="mb-2">
             {requestedProjectId && requestedProjectNotFound && (
@@ -671,6 +687,7 @@ export function ConsentActions({
               }}
               onClick={(e) => e.stopPropagation()}
               placeholder="Why is this request denied?"
+              maxLength={DENY_REASON_MAX}
               rows={2}
               className="w-full px-2 py-1 rounded-md text-[11px] bg-white/5 border border-white/10 text-shell-text"
             />

@@ -1170,9 +1170,13 @@ the same `ConsentActions` Allow/Deny control the notification renders), so
 approval no longer depends on an ephemeral toast. The Decisions app lists every
 pending scope request the caller may decide (`GET /api/agents/scope-requests?status=pending`)
 in a "Scope requests" section beside access requests (tsk-6ghcrv): each row
-shows the canonical_id, requested scopes, project binding (a null `project_id`
-renders explicitly as "OS-wide (all projects)", the wider grant), reason and
-age. Every requested scope has a tick box, so Approve can grant a strict
+shows the canonical_id, requested scopes, the requested project (labelled
+"Requested project", or "No project requested" for a null `project_id`),
+reason and age. The binding that will actually apply is shown separately: a
+grant with no project scope is sent without a `project_id` and lands OS-wide
+whatever the agent asked for, so the row says "Grants OS-wide (all projects)"
+before Allow. The list loads on its own, so a failed decisions load never hides
+it. The deny reason box is capped at the route's 2000 characters. Every requested scope has a tick box, so Approve can grant a strict
 SUBSET (the unticked scopes are simply not sent in `granted_scopes`); Allow is
 disabled with nothing ticked. Deny requires a reason. Either decision drops the
 row from the pending list on the refetch.
