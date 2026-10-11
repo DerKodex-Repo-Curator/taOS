@@ -1,9 +1,11 @@
 """taOS Agent action gate (spec section 3.1).
 
 POST /api/taos-agent/actions                 {kind, summary, payload} -> {action_id, state}
+GET  /api/taos-agent/actions?state=pending   the caller's own actions (recovers a missed card)
 POST /api/taos-agent/actions/{id}/confirm    human session only -> state confirmed
 POST /api/taos-agent/actions/{id}/decline    human session only -> state declined
 POST /api/taos-agent/actions/{id}/execute    409 unless confirmed; runs the kind's executor once
+                                             (executing while it runs, then executed | failed)
 PUT  /api/taos-agent/actions/policy          human session only, {kind, policy: ask|auto}
 
 A new action under the default ``ask`` policy is stored pending and a
@@ -23,7 +25,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Literal
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -86,6 +88,20 @@ async def _policy_for(request: Request, uid: str, kind: str) -> str:
     prefs = await request.app.state.desktop_settings.get_preference(uid, _PREF_NAMESPACE)
     policy = (prefs.get("action_policy") or {}).get(kind, POLICY_ASK)
     return policy if policy == POLICY_AUTO else POLICY_ASK
+
+
+@router.get("/api/taos-agent/actions")
+async def list_actions(
+    request: Request,
+    state: str | None = Query(default=None, pattern=r"^[a-z]{1,16}$"),
+):
+    """The caller's own actions. ``?state=pending`` lists confirm cards still open,
+    so a card lost to a restart or a failed event publish can be shown again."""
+    uid = getattr(request.state, "user_id", None)
+    if not uid:
+        return _error(401, "authentication required")
+    rows = await request.app.state.taos_agent_actions.list_for_user(uid, state=state)
+    return {"actions": [_view(row) for row in rows]}
 
 
 @router.post("/api/taos-agent/actions")
@@ -156,7 +172,8 @@ async def execute_action(request: Request, action_id: str):
         logger.exception("taos-agent action %s: executor failed", action_id)
         await store.mark_failed(action_id, f"{type(exc).__name__}: {exc}")
         return _error(502, "action failed")
-    return {**_view(claimed), "result": result}
+    done = await store.mark_executed(action_id)
+    return {**_view(done), "result": result}
 
 
 @router.put("/api/taos-agent/actions/policy")
