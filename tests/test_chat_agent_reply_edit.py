@@ -218,3 +218,26 @@ async def test_store_refuses_stale_reply_in_the_write_itself(tmp_path):
     )
     assert await store.edit_last_agent_reply(older["id"], "late") is False
     assert (await store.get_message(older["id"]))["content"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_bound_agent_token_cannot_edit_another_agents_reply(tmp_path):
+    """A per-agent local token maps to the admin user, so the owner check
+    alone would pass: the bound agent must also be the reply's author."""
+    app, _rec, ch_id = await _setup(tmp_path)
+    store = app.state.chat_messages
+    reply = await store.send_message(
+        channel_id=ch_id, author_id="tom", author_type="agent", content="tom's",
+    )
+    token = app.state.auth.mint_agent_local_token("other")
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test",
+        headers={"Authorization": f"Bearer {token}"},
+        event_hooks=csrf_event_hooks(),
+    ) as client:
+        r = await client.patch(
+            f"/api/chat/messages/{reply['id']}/agent-reply",
+            json={"content": "hijacked"},
+        )
+    assert r.status_code == 403, r.text
+    assert (await store.get_message(reply["id"]))["content"] == "tom's"

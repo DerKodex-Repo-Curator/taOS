@@ -733,6 +733,11 @@ async def edit_agent_reply_endpoint(
         return JSONResponse({"error": "message not found"}, status_code=404)
     if msg.get("author_type") != "agent":
         return JSONResponse({"error": "not an agent reply"}, status_code=409)
+    # A per-agent local token maps to the admin user, so the owner check
+    # alone would let agent A rewrite agent B's reply.
+    bound = _bound_agent(request)
+    if bound and bound != msg["author_id"]:
+        return JSONResponse({"error": "not your reply"}, status_code=403)
     await require_agent_owner_or_admin(request, user, msg["author_id"])
     # Recency, state and the no-content-blocks rule are checked in the same
     # UPDATE that writes, so a reply landing mid-request cannot slip past.
