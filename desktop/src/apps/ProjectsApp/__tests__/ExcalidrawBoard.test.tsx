@@ -147,4 +147,38 @@ describe("ExcalidrawBoard", () => {
     // The third element should be the note with z_index 2
     expect(mockRef.capturedElements[2]).toHaveProperty("id", "n2");
   });
+
+  it("a bound label text follows its container", () => {
+    // Override convertToExcalidrawElements to emit a container + a bound text element
+    // for each skeleton that has a label. The text element has containerId pointing
+    // to the container and NO customData (so it would be dropped by the current grouping logic).
+    mockRef.convertToExcalidrawElementsMock?.mockImplementation((skeletons: unknown[]) => {
+      const out: unknown[] = [];
+      for (const skel of skeletons as Array<{ customData?: { taos_id?: string }; label?: { text: string } }>) {
+        const taosId = skel.customData?.taos_id;
+        if (taosId && skel.label) {
+          out.push({ ...skel, id: `c-${taosId}` });
+          out.push({ id: `t-${taosId}`, type: "text", containerId: `c-${taosId}`, text: skel.label.text });
+        } else {
+          out.push(skel);
+        }
+      }
+      return out;
+    });
+
+    const { getByTestId } = render(
+      <ExcalidrawBoard
+        elements={[el({ id: "n1", kind: "note", payload: { text: "hello" } })]}
+      />,
+    );
+
+    const ex = getByTestId("excalidraw");
+    // Expect two elements: the container rectangle and its bound label text
+    expect(ex.getAttribute("data-count")).toBe("2");
+    // Expect capturedElements to be [container, text] in that order
+    expect(mockRef.capturedElements).toHaveLength(2);
+    expect(mockRef.capturedElements[0]).toHaveProperty("id", "c-n1");
+    expect(mockRef.capturedElements[1]).toHaveProperty("id", "t-n1");
+    expect(mockRef.capturedElements[1]).toHaveProperty("containerId", "c-n1");
+  });
 });

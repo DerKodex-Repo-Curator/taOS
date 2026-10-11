@@ -1,14 +1,17 @@
+import "./excalidraw-assets";
 import { Excalidraw, convertToExcalidrawElements } from "@excalidraw/excalidraw";
-import { ExcalidrawSkeleton } from "./element-to-excalidraw";
+import type { ExcalidrawSkeleton } from "./element-to-excalidraw";
 import type { CanvasElement } from "./canvas-api";
 import type { ComponentProps } from "react";
 import { useMemo, useState, useEffect, useRef } from "react";
-import "./excalidraw-assets";
 import "@excalidraw/excalidraw/index.css";
 import { elementToSkeleton } from "./element-to-excalidraw";
 import { mermaidToExcalidraw, type ExcalidrawElements } from "./mermaid-to-elements";
 
 type ExcalidrawElement = ReturnType<typeof convertToExcalidrawElements>[0];
+
+// Text elements emitted for bound labels have a containerId pointing to their container.
+type ExcalidrawElementWithContainer = ExcalidrawElement & { containerId?: string | null };
 
 // Read-only Excalidraw view over the canonical CanvasElement scene (tldraw ->
 // Excalidraw migration). Most kinds map synchronously; mermaid/flowchart kinds
@@ -79,60 +82,75 @@ export function ExcalidrawBoard({ elements, theme = "light" }: ExcalidrawBoardPr
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [diagramKey]);
 
-   const sceneElements = useMemo(() => {
-     // Batched conversion: build a list of skeletons for all live non-diagram elements
-     // and for diagram elements that are still converting (placeholder skeleton).
-     // Ready diagrams (diagrams[el.id] non-empty) are spliced in after conversion.
-     // This ensures arrow bindings resolve because all skeletons are converted in
-     // a single call, allowing Excalidraw to match start/end ids within the same batch.
-     const liveEls = live(elements);
-     const skeletonList: ExcalidrawSkeleton[] = [];
-     const itemList: { kind: 'skeleton' | 'diagram'; element: CanvasElement; skeletonIndex?: number }[] = [];
+const sceneElements = useMemo(() => {
+    // Batched conversion: build a list of skeletons for all live non-diagram elements
+    // and for diagram elements that are still converting (placeholder skeleton).
+    // Ready diagrams (diagrams[el.id] non-empty) are spliced in after conversion.
+    // This ensures arrow bindings resolve because all skeletons are converted in
+    // a single call, allowing Excalidraw to match start/end ids within the same batch.
+    const liveEls = live(elements);
+    const skeletonList: ExcalidrawSkeleton[] = [];
+    const itemList: { kind: "skeleton" | "diagram"; element: CanvasElement }[] = [];
 
-      for (const el of liveEls) {
-        const diagram = diagrams[el.id];
-        if (DIAGRAM_KINDS.has(el.kind) && diagram && diagram.length > 0) {
-          // Ready diagram: will be spliced in after conversion.
-          itemList.push({ kind: 'diagram', element: el });
-        } else {
-          // Either a non-diagram or a diagram still converting: use its skeleton.
-          const skel = elementToSkeleton(el, { rows: elements });
-          skeletonList.push(skel);
-          itemList.push({ kind: 'skeleton', element: el, skeletonIndex: skeletonList.length - 1 });
-        }
+    for (const el of liveEls) {
+      const diagram = diagrams[el.id];
+      if (DIAGRAM_KINDS.has(el.kind) && diagram && diagram.length > 0) {
+        // Ready diagram: will be spliced in after conversion.
+        itemList.push({ kind: "diagram", element: el });
+      } else {
+        // Either a non-diagram or a diagram still converting: use its skeleton.
+        const skel = elementToSkeleton(el, { rows: elements });
+        skeletonList.push(skel);
+        itemList.push({ kind: "skeleton", element: el });
       }
+    }
 
-     // Convert all skeletons in one batch.
-     const convertedList = convertToExcalidrawElements(skeletonList as unknown as SkeletonInput);
+    // Convert all skeletons in one batch.
+    const convertedList = convertToExcalidrawElements(skeletonList as unknown as SkeletonInput);
 
-     // Group converted elements by their taos_id (set via elementToSkeleton -> taosCustomData).
-     const convertedByTaosId = new Map<string, ExcalidrawElement[]>();
-     for (const convertedEl of convertedList) {
-       const taosId = convertedEl.customData?.taos_id as string | undefined;
-       if (taosId) {
-         if (!convertedByTaosId.has(taosId)) {
-           convertedByTaosId.set(taosId, []);
-         }
-         convertedByTaosId.get(taosId)!.push(convertedEl);
-       }
-       // Note: Elements without taos_id (should not happen) are ignored.
-     }
-
-     // Rebuild the final array in the original order, replacing skeletons with their
-     // converted elements and inserting ready diagram elements.
-     const finalElements: ExcalidrawElement[] = [];
-      for (const item of itemList) {
-        if (item.kind === 'diagram') {
-          finalElements.push(...(diagrams[item.element.id] || []));
-        } else {
-          const taosId = item.element.id;
-          const convertedForThis = convertedByTaosId.get(taosId) || [];
-          finalElements.push(...convertedForThis);
+    // Group converted elements by their taos_id (set via elementToSkeleton -> taosCustomData).
+    // Elements without taos_id but with a containerId are bound labels (text elements
+    // emitted by convertToExcalidrawElements for a skeleton's label). They belong to
+    // the group of the container element whose id matches containerId.
+    const convertedByTaosId = new Map<string, ExcalidrawElement[]>();
+    const convertedIdToTaosId = new Map<string, string>();
+    for (const convertedEl of convertedList) {
+      const taosId = convertedEl.customData?.taos_id as string | undefined;
+      const withContainer = convertedEl as ExcalidrawElementWithContainer;
+      if (taosId) {
+        if (!convertedByTaosId.has(taosId)) {
+          convertedByTaosId.set(taosId, []);
         }
+        convertedByTaosId.get(taosId)!.push(convertedEl);
+        convertedIdToTaosId.set(convertedEl.id, taosId);
+      } else if (withContainer.containerId) {
+        // Bound label text: find the taos_id of its container and append there.
+        const containerTaosId = convertedIdToTaosId.get(withContainer.containerId);
+        if (containerTaosId) {
+          if (!convertedByTaosId.has(containerTaosId)) {
+            convertedByTaosId.set(containerTaosId, []);
+          }
+          convertedByTaosId.get(containerTaosId)!.push(convertedEl);
+        }
+        // Elements with neither taos_id nor a resolvable containerId are dropped.
       }
+    }
 
-     return finalElements;
-   }, [elements, diagrams]);
+    // Rebuild the final array in the original order, replacing skeletons with their
+    // converted elements and inserting ready diagram elements.
+    const finalElements: ExcalidrawElement[] = [];
+    for (const item of itemList) {
+      if (item.kind === "diagram") {
+        finalElements.push(...(diagrams[item.element.id] || []));
+      } else {
+        const taosId = item.element.id;
+        const convertedForThis = convertedByTaosId.get(taosId) || [];
+        finalElements.push(...convertedForThis);
+      }
+    }
+
+    return finalElements;
+  }, [elements, diagrams]);
 
   // Excalidraw reads initialData once at mount; push later scenes (async
   // diagrams) through the imperative API. Fit the viewport to the content only

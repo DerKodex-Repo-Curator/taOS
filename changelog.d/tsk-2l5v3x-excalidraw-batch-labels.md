@@ -1,0 +1,2 @@
+### Fixed
+- Excalidraw batched conversion now preserves bound label texts (note/link/diagram-placeholder labels) by grouping containerId elements with their parent container, and restores the required import order for excalidraw-assets.
