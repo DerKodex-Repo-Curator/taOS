@@ -756,6 +756,17 @@ async def client(app, tmp_data_dir):
         sharing_grants = SharingGrantStore(tmp_data_dir / "sharing_grants.db")
         await sharing_grants.init()
         app.state.sharing_grants = sharing_grants
+    # auth_broker store (sign-in broker, tsk-diqs7d) is lifespan-owned too.
+    auth_broker = getattr(app.state, "auth_broker", None)
+    if auth_broker is not None:
+        if auth_broker._db is not None:
+            await auth_broker.close()
+        await auth_broker.init()
+    else:
+        from tinyagentos.auth_broker import AuthBrokerStore
+        auth_broker = AuthBrokerStore(tmp_data_dir / "auth_broker.db")
+        await auth_broker.init()
+        app.state.auth_broker = auth_broker
     # BrowserApp v2 stores
     from tinyagentos.routes.desktop_browser.store import BrowserStore, BrowserCookieStore
     _browser_store = BrowserStore(tmp_data_dir / "browser.sqlite3")
@@ -839,6 +850,9 @@ async def client(app, tmp_data_dir):
     sharing_grants = getattr(app.state, "sharing_grants", None)
     if sharing_grants is not None:
         await sharing_grants.close()
+    auth_broker = getattr(app.state, "auth_broker", None)
+    if auth_broker is not None:
+        await auth_broker.close()
 
 
 def create_test_qmd_db(db_path):
