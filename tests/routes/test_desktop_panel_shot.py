@@ -26,6 +26,7 @@ from tinyagentos.app import create_app
 from tinyagentos.auth_middleware import _AGENT_TOKEN_PATHS
 from tinyagentos.native_agent_identity import ensure_native_agent_identity
 from tinyagentos.routes import desktop_control
+from taos_test_csrf import csrf_event_hooks
 
 PATH = "/api/desktop/panel-shot"
 PNG = b"\x89PNG\r\n\x1a\n" + b"fake-panel-bytes"
@@ -82,8 +83,10 @@ async def env(tmp_path):
         "other": mint_registry_token(other["canonical_id"], priv, user_id=owner, framework="claude"),
     }
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
+    async with AsyncClient(transport=transport, base_url="http://test",
+                           event_hooks=csrf_event_hooks()) as client:
         client.tokens = tokens
+        client.auth_mgr = admin
         client.registry, client.native_cid = registry, native["canonical_id"]
         client.mint_native = lambda: mint_registry_token(
             native["canonical_id"], priv, user_id=owner, framework="taos-native")
@@ -232,3 +235,32 @@ async def test_cancelled_request_kills_taos_shot_and_releases_lock(tmp_path, mon
         os.kill(pid, 9)
     assert not alive
     assert not desktop_control._PANEL_SHOT_LOCK.locked()
+
+
+def _session(client, username):
+    auth = client.auth_mgr
+    if username != "admin":
+        code = auth.add_user_invite(username, "admin")
+        auth.complete_invite(username, code, username, "", "testpass1")
+    uid = auth.find_user(username)["id"]
+    return {"Cookie": f"taos_session={auth.create_session(user_id=uid, long_lived=True)}"}
+
+
+@pytest.mark.asyncio
+async def test_non_admin_session_is_403(env, tmp_path, monkeypatch):
+    ran = tmp_path / "ran"
+    png = tmp_path / "fixture.png"
+    png.write_bytes(PNG)
+    monkeypatch.setattr(desktop_control.shutil, "which",
+                        lambda _n: _fake(tmp_path, f'touch "{ran}"\ncp "{png}" "$1"'))
+    resp = await env.post(PATH, headers=_session(env, "guest"))
+    assert resp.status_code == 403
+    assert not ran.exists()
+
+
+@pytest.mark.asyncio
+async def test_admin_session_captures(env, tmp_path, monkeypatch):
+    monkeypatch.setattr(desktop_control.shutil, "which", lambda _n: _writes_png(tmp_path))
+    resp = await env.post(PATH, headers=_session(env, "admin"))
+    assert resp.status_code == 200
+    assert resp.content == PNG

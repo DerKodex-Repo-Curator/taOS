@@ -244,14 +244,17 @@ async def panel_shot(request: Request):
     """Return a PNG of what is actually on the handset glass.
 
     Unlike POST /api/desktop/screenshot (a DOM raster from the browser), this
-    runs the on-device `taos-shot` script, so it shows the real panel. Gated
-    like /screenshot: the middleware admits the native agent token or a signed-in
-    session; any other agent's registry token is refused here with 403.
+    runs the on-device `taos-shot` script, so it shows the real panel. The
+    panel is one physical screen, not per-user like /screenshot, so only the
+    native agent token or an admin session may capture it; any other caller
+    (a non-admin session, another agent's registry token) gets 403.
     404 if the host has no taos-shot, 429 if a capture is already running, 504
     on timeout, 502 if taos-shot fails or produces no image.
     """
-    if getattr(request.state, "via", None) in (
-        "registry_jwt_candidate", "device_bearer_candidate",
+    via = getattr(request.state, "via", None)
+    if not (
+        via == "registry_jwt_native_agent"
+        or (via == "session" and getattr(request.state, "is_admin", False))
     ):
         return JSONResponse({"detail": "forbidden"}, status_code=403)
     exe = shutil.which("taos-shot")
