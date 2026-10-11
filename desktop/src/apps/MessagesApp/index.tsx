@@ -73,6 +73,7 @@ import { getApp } from "@/registry/app-registry";
 import { CodeBlock } from "@/components/CodeBlock";
 import { ToolCallBlock } from "@/components/ToolCallBlock";
 import { StatusBlock } from "@/components/StatusBlock";
+import { GateGrantDetails } from "@/components/GateGrantDetails";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { SearchPanel } from "../chat/SearchPanel";
@@ -474,6 +475,8 @@ interface DecisionData {
   status: DecisionBlockStatus;
   answer?: { value: unknown; answered_by?: string; answered_at?: number } | null;
   created_at: number | string;
+  // Grant-bearing metadata for a server-raised gate decision (tsk-mul5pa).
+  metadata?: Record<string, unknown> | null;
 }
 
 function decisionTypeLabel(t: string): string {
@@ -666,6 +669,7 @@ export function DecisionBlock({ block }: { block: DecisionContentBlock }): React
       {/* header: question + type badge + state */}
       <div className="flex flex-col gap-1 px-3">
         <p className="text-sm font-semibold text-shell-text">{decision.question}</p>
+        <GateGrantDetails metadata={decision.metadata} />
         {decision.context && (
           <p className="text-xs leading-relaxed text-shell-text-secondary">
             {decision.context}

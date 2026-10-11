@@ -335,16 +335,17 @@ async def test_agent_mirror_does_not_write_execution_grant(client):
     pid = await _new_project(client)
     cid, token = await _mint_agent(app, pid, ("decisions_write",))
 
-    # Create an execution_gate decision as the agent
-    body = _decision_body(
-        project_id=pid,
+    # An execution_gate decision raised for the agent.  Gate kinds are
+    # server-owned (tsk-mul5pa), so raise it the way the internal raiser does.
+    decision = await app.state.decision_store.create(
+        from_agent=cid,
+        question="ship it?",
         type="approve_deny",
-        metadata={"kind": "execution_gate", "agent_name": cid, "action_class": "test-exec"},
+        project_id=pid,
+        metadata={"_server_raised": True, "kind": "execution_gate",
+                  "agent_name": cid, "action_class": "test-exec"},
     )
-    async with _agent_client(app, token) as ac:
-        resp = await ac.post("/api/decisions", json=body)
-    assert resp.status_code == 200, resp.text
-    did = resp.json()["id"]
+    did = decision["id"]
 
     # The agent mirrors "approve" -- gate-kind decisions MUST be refused.
     async with _agent_client(app, token) as ac:
