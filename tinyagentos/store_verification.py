@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import json
-import yaml
 from pathlib import Path
 
 from tinyagentos.installers.port_allocator import RESERVED_PORTS
-from tinyagentos.userspace.package import parse_manifest, PackageError, _ALLOWED_TYPES
+from tinyagentos.userspace.package import _ALLOWED_TYPES, PackageError, parse_manifest
 
 _REQUIRED_MANIFEST_FIELDS = ("id", "name", "version", "app_type")
 
@@ -112,7 +111,6 @@ def _check_builds(app_dir: Path) -> dict:
         return {"name": "builds", "status": "fail", "detail": "cannot read manifest for build check"}
 
     entry = manifest.get("entry")
-    app_type = manifest.get("app_type")
 
     # If entry is set, resolve it and run containment check FIRST
     if entry:
@@ -170,18 +168,8 @@ def _check_permissions_scan(app_dir: Path) -> dict:
 
     risky = []
     for perm in perms:
-        is_risky = False
-        # Check for network:* wildcard (may have space after colon)
-        if perm.startswith("network:") and perm[len("network:"):].strip().startswith("*"):
-            is_risky = True
-            risky.append(perm)
-        # Check for exec capability
-        elif perm == "exec":
-            is_risky = True
-            risky.append(perm)
-        # Check for host filesystem
-        elif perm == "host filesystem" or "host filesystem" in perm:
-            is_risky = True
+        # Check for network:* wildcard (may have space after colon) or exec capability or host filesystem
+        if perm.startswith("network:") and perm[len("network:"):].strip().startswith("*") or perm == "exec" or perm == "host filesystem" or "host filesystem" in perm:
             risky.append(perm)
 
     if risky:
@@ -205,11 +193,27 @@ def _check_port_hygiene(app_dir: Path) -> dict:
     # Get ports from manifest
     # Ports may be top-level or under container block for container apps
     ports = manifest.get("ports")
-    if ports is None and manifest.get("app_type") == "container":
+    if manifest.get("app_type") == "container":
         container = manifest.get("container")
         if isinstance(container, dict):
-            ports = container.get("ports")
-
+            container_ports = container.get("ports")
+            if container_ports and isinstance(container_ports, list):
+                # Union of top-level and container.ports (deduplicate)
+                if ports is None or not isinstance(ports, list):
+                    ports = []
+                # Keep ints only, deduplicate
+                seen = set()
+                combined_ports = []
+                for port in ports:
+                    if isinstance(port, int) and port not in seen:
+                        seen.add(port)
+                        combined_ports.append(port)
+                for port in container_ports:
+                    if isinstance(port, int) and port not in seen:
+                        seen.add(port)
+                        combined_ports.append(port)
+                ports = combined_ports
+    
     if not ports or not isinstance(ports, list):
         # No ports declared -- pass
         return {"name": "port_hygiene", "status": "pass", "detail": "no ports declared"}
@@ -246,7 +250,20 @@ async def run_checks(app_dir: str | Path) -> dict:
     The function is pure + side-effect-free: it only reads app_dir and never raises.
     On unexpected error per-check, returns a 'fail' check named 'runner_error'.
     """
-    app_dir_path = Path(app_dir).resolve()
+    # Wrap app_dir resolution to avoid raising on unresolvable paths (e.g., symlink loops)
+    try:
+        app_dir_path = Path(app_dir).resolve()
+    except (OSError, RuntimeError, ValueError) as exc:
+        return {
+            "ok": False,
+            "checks": [
+                {
+                    "name": "runner_error",
+                    "status": "fail",
+                    "detail": f"app_dir could not be resolved: {exc}",
+                }
+            ],
+        }
     checks: list[dict] = []
 
     # 1. manifest_valid
