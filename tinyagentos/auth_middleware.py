@@ -164,6 +164,7 @@ _AGENT_TOKEN_PATHS = (
         "/api/desktop/command",
         "/api/desktop/screenshot",
         "/api/desktop/layout",
+        "/api/desktop/panel-shot",
     })
 )
 
@@ -934,7 +935,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     # agent's token, set user_id to the native agent's user_id
                     # (the owner) so desktop control works. For other agents,
                     # user_id remains None (they cannot drive the desktop).
-                    if path in ("/api/desktop/command", "/api/desktop/screenshot", "/api/desktop/layout") or _is_agent_skill_exec_path(request.method, path):
+                    if path in ("/api/desktop/command", "/api/desktop/screenshot", "/api/desktop/layout", "/api/desktop/panel-shot") or _is_agent_skill_exec_path(request.method, path):
                         # Verify the token and check if it's the native agent.
                         # We do a lightweight verification here; the route will
                         # do the full scope check.
