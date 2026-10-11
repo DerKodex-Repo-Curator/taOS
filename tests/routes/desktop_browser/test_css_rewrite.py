@@ -65,6 +65,60 @@ def test_pathological_url_input_is_bounded(name, css_bytes):
     assert elapsed < 2.0, f"{name} ({len(css_bytes)} bytes) took {elapsed:.1f}s (must be <2.0s)"
 
 
+_PROXIED_X = b"example.com%2Fx"
+
+
+def _flood(n_bytes: int) -> bytes:
+    return b"url(x)" * (n_bytes // 6)
+
+
+@pytest.mark.parametrize(
+    "name, html",
+    [
+        pytest.param(
+            "style_block",
+            b"<html><head><style>" + _flood(3_000_000) + b"</style></head></html>",
+            id="style_block",
+        ),
+        pytest.param(
+            "style_attr",
+            b"<html><body><div style='" + _flood(3_000_000) + b"'></div></body></html>",
+            id="style_attr",
+        ),
+    ],
+)
+def test_oversized_inline_css_is_dropped_not_rewritten(name, html):
+    """A 3 MB url(x) flood inside HTML must neither be rewritten (~6s on the
+    event loop, 5x output) nor served with its references intact."""
+    import time
+
+    start = time.perf_counter()
+    out = rewrite_html(html, base_url="https://example.com/", proxy=_proxy)
+    elapsed = time.perf_counter() - start
+    assert elapsed < 2.0, f"{name} ({len(html)} bytes) took {elapsed:.1f}s (must be <2.0s)"
+    assert _PROXIED_X not in out, f"{name}: oversized CSS was rewritten"
+    assert b"url(x)" not in out, f"{name}: oversized CSS was passed through unproxied"
+    assert len(out) < len(html), f"{name}: output {len(out)} bytes not shrunk"
+
+
+def test_inline_css_budget_is_document_wide():
+    """Several medium blocks whose SUM exceeds the budget: the first ones are
+    rewritten, the rest dropped. A per-block cap would rewrite all of them."""
+    block = b"<style>" + _flood(300_000) + b"</style>"
+    html = b"<html><head>" + block * 3 + b"</head></html>"
+    out = rewrite_html(html, base_url="https://example.com/", proxy=_proxy)
+    assert _PROXIED_X in out, "first block within budget must still be rewritten"
+    assert out.count(b"/* taOS: inline stylesheet too large, dropped */") == 2
+    assert b"url(x)" not in out
+
+
+def test_small_inline_css_is_still_rewritten():
+    html = b"<html><head><style>a{background:url(x)}</style></head><body><p style='background:url(y)'></p></body></html>"
+    out = rewrite_html(html, base_url="https://example.com/", proxy=_proxy)
+    assert _PROXIED_X in out
+    assert b"example.com%2Fy" in out
+
+
 @pytest.mark.asyncio
 class TestProxyRewritesCssResponse:
     @respx.mock

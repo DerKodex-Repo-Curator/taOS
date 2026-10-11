@@ -35,6 +35,18 @@ from urllib.parse import urljoin
 from lxml import html as lxml_html
 
 
+# Upper bound on the CSS text the url()/@import rewriter will process for one
+# response. The regexes are linear-time but every match runs a Python callback,
+# so a 10 MB url(x) flood still costs ~20s on the event loop and inflates the
+# output ~5x. Standalone stylesheets over this are refused by the proxy (502);
+# inside an HTML document the budget is DOCUMENT-WIDE across every <style>
+# block and style="" attribute, and anything past it is dropped rather than
+# served with unproxied references.
+CSS_REWRITE_MAX_BYTES = 512 * 1024  # 512 KiB
+
+_DROPPED_CSS_COMMENT = "/* taOS: inline stylesheet too large, dropped */"
+
+
 # Schemes we never rewrite — these aren't HTTP fetches the proxy can serve.
 _SKIP_PREFIXES = (
     "data:", "javascript:", "mailto:", "tel:", "blob:", "about:", "#",
@@ -110,8 +122,11 @@ def rewrite_html(
     _rewrite_attributes(tree, base_url=base_url, proxy=proxy)
     _rewrite_forms(tree, base_url=base_url, proxy=proxy, profile_id=profile_id)
     _rewrite_srcset(tree, base_url=base_url, proxy=proxy)
-    _rewrite_inline_styles(tree, base_url=base_url, proxy=proxy)
-    _rewrite_style_tags(tree, base_url=base_url, proxy=proxy)
+    # One budget for the whole document: a per-block cap alone would let
+    # twenty 500 KiB blocks through.
+    css_budget = [CSS_REWRITE_MAX_BYTES]
+    _rewrite_inline_styles(tree, base_url=base_url, proxy=proxy, budget=css_budget)
+    _rewrite_style_tags(tree, base_url=base_url, proxy=proxy, budget=css_budget)
     _rewrite_meta_refresh(tree, base_url=base_url, proxy=proxy)
     _normalize_meta_charset(tree)
 
@@ -269,24 +284,39 @@ def rewrite_css(
     return _rewrite_css_text(text, base_url=base_url, proxy=proxy).encode("utf-8")
 
 
+def _charge_css_budget(budget: list[int], text: str) -> bool:
+    """Debit `len(text)` from the document budget; False means drop the text."""
+    if len(text) > budget[0]:
+        budget[0] = 0
+        return False
+    budget[0] -= len(text)
+    return True
+
+
 def _rewrite_inline_styles(
-    tree, *, base_url: str, proxy: Callable[[str], str],
+    tree, *, base_url: str, proxy: Callable[[str], str], budget: list[int],
 ) -> None:
     for el in tree.iter():
         style = el.get("style")
         if not style or "url(" not in style.lower():
             continue
+        if not _charge_css_budget(budget, style):
+            del el.attrib["style"]
+            continue
         el.set("style", _rewrite_css_text(style, base_url=base_url, proxy=proxy))
 
 
 def _rewrite_style_tags(
-    tree, *, base_url: str, proxy: Callable[[str], str],
+    tree, *, base_url: str, proxy: Callable[[str], str], budget: list[int],
 ) -> None:
     for style_el in tree.iter("style"):
         if style_el.text is None:
             continue
         lowered = style_el.text.lower()
         if "url(" not in lowered and "@import" not in lowered:
+            continue
+        if not _charge_css_budget(budget, style_el.text):
+            style_el.text = _DROPPED_CSS_COMMENT
             continue
         style_el.text = _rewrite_css_text(
             style_el.text, base_url=base_url, proxy=proxy

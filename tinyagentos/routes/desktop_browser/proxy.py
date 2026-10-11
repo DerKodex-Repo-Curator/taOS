@@ -51,7 +51,11 @@ from tinyagentos.routes.desktop_browser.profile import (
     ensure_default_profiles,
     get_profile_or_404,
 )
-from tinyagentos.routes.desktop_browser.rewriter import rewrite_css, rewrite_html
+from tinyagentos.routes.desktop_browser.rewriter import (
+    CSS_REWRITE_MAX_BYTES,
+    rewrite_css,
+    rewrite_html,
+)
 from tinyagentos.routes.desktop_browser.ssrf import (
     SsrfBlockedError,
     guarded_async_client,
@@ -66,8 +70,9 @@ _FETCH_TIMEOUT = 15.0   # seconds — total deadline including all redirect hops
 _HOP_TIMEOUT = 5.0      # seconds — per-operation (connect + read) limit per hop
 _MAX_RESPONSE_BYTES = 10 * 1024 * 1024  # 10 MB hard cap
 _MAX_REQUEST_BYTES = 10 * 1024 * 1024   # 10 MB cap on forwarded request bodies (POST forms/uploads)
-# CSS rewriting limit: larger bodies are refused (502) so the per-match rewrite cost stays bounded
-_CSS_REWRITE_MAX_BYTES = 512 * 1024  # 512 KiB
+# CSS rewriting limit (shared with the HTML inline-CSS budget in rewriter.py):
+# larger stylesheets are refused (502) so the per-match rewrite cost stays bounded
+_CSS_REWRITE_MAX_BYTES = CSS_REWRITE_MAX_BYTES
 # Request headers we forward to upstream for non-GET methods. Only the content
 # framing — never the client's cookies (we use the server-side jar), Host,
 # auth, or other ambient headers, which could leak or be abused.
