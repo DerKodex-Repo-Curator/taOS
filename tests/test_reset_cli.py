@@ -11,7 +11,7 @@ from tinyagentos.auth import AuthManager
 
 @pytest.fixture(autouse=True)
 def controller_down(monkeypatch):
-    monkeypatch.setattr(reset_cli, "controller_is_up", lambda port: False)
+    monkeypatch.setattr(reset_cli, "controller_is_up", lambda port, host="127.0.0.1": False)
 
 
 def _onboarded(data_dir):
@@ -76,7 +76,7 @@ def test_declined_prompt_removes_nothing(tmp_path, monkeypatch):
 
 def test_refuses_while_controller_is_up_unless_forced(tmp_path, monkeypatch):
     _onboarded(tmp_path)
-    monkeypatch.setattr(reset_cli, "controller_is_up", lambda port: True)
+    monkeypatch.setattr(reset_cli, "controller_is_up", lambda port, host="127.0.0.1": True)
     assert reset_cli.reset_cli(["--onboarding", "--yes", "--data-dir", str(tmp_path)]) == 1
     assert AuthManager(tmp_path).is_configured() is True
     assert reset_cli.reset_cli(["--onboarding", "--yes", "--force", "--data-dir", str(tmp_path)]) == 0
@@ -119,7 +119,7 @@ def test_controller_probe_honours_config_port(tmp_path, monkeypatch):
     monkeypatch.delenv("TAOS_HOST", raising=False)
     seen = []
 
-    def probe(port):
+    def probe(port, host="127.0.0.1"):
         seen.append(port)
         return True
 
@@ -133,14 +133,14 @@ def test_controller_probe_env_port_beats_config(tmp_path, monkeypatch):
     (tmp_path / "config.yaml").write_text("server:\n  port: 7171\n")
     monkeypatch.setenv("TAOS_PORT", "8181")
     seen = []
-    monkeypatch.setattr(reset_cli, "controller_is_up", lambda port: seen.append(port) or True)
+    monkeypatch.setattr(reset_cli, "controller_is_up", lambda port, host="127.0.0.1": seen.append(port) or True)
     assert reset_cli.reset_cli(["--onboarding", "--yes", "--data-dir", str(tmp_path)]) == 1
     assert seen == [8181]
 
 
 def test_backup_dir_is_unique_per_reset(tmp_path, monkeypatch):
     """Two resets in the same second must not share (and overwrite) one backup directory."""
-    monkeypatch.setattr(reset_cli, "controller_is_up", lambda port: False)
+    monkeypatch.setattr(reset_cli, "controller_is_up", lambda port, host="127.0.0.1": False)
     monkeypatch.setattr(reset_cli, "_backup_stamp", lambda: "20260101T000000Z")
     _seed_user(tmp_path)
     assert reset_cli.reset_cli(["--onboarding", "--yes", "--data-dir", str(tmp_path)]) == 0
@@ -150,3 +150,51 @@ def test_backup_dir_is_unique_per_reset(tmp_path, monkeypatch):
     backups = sorted((tmp_path / "backups").glob("reset-*"))
     assert len(backups) == 2
     assert (backups[0] / ".auth_user.json").read_text() == first
+
+
+def test_controller_probe_honours_config_host(tmp_path, monkeypatch):
+    """A controller bound to one LAN address is not reachable on loopback: probe that address."""
+    _seed_user(tmp_path)
+    (tmp_path / "config.yaml").write_text("server:\n  host: 192.0.2.5\n  port: 7171\n")
+    monkeypatch.delenv("TAOS_PORT", raising=False)
+    monkeypatch.delenv("TAOS_HOST", raising=False)
+    seen = []
+    monkeypatch.setattr(reset_cli, "controller_is_up",
+                        lambda port, host="127.0.0.1": seen.append((host, port)) or True)
+    assert reset_cli.reset_cli(["--onboarding", "--yes", "--data-dir", str(tmp_path)]) == 1
+    assert seen == [("192.0.2.5", 7171)]
+
+
+def test_controller_probe_env_host_beats_config(tmp_path, monkeypatch):
+    _seed_user(tmp_path)
+    (tmp_path / "config.yaml").write_text("server:\n  host: 192.0.2.5\n  port: 7171\n")
+    monkeypatch.setenv("TAOS_HOST", "192.0.2.9")
+    monkeypatch.delenv("TAOS_PORT", raising=False)
+    seen = []
+    monkeypatch.setattr(reset_cli, "controller_is_up",
+                        lambda port, host="127.0.0.1": seen.append((host, port)) or True)
+    assert reset_cli.reset_cli(["--onboarding", "--yes", "--data-dir", str(tmp_path)]) == 1
+    assert seen == [("192.0.2.9", 6969)]
+
+
+def test_wildcard_bind_probes_loopback(tmp_path, monkeypatch):
+    _seed_user(tmp_path)
+    (tmp_path / "config.yaml").write_text("server:\n  host: 0.0.0.0\n")
+    monkeypatch.delenv("TAOS_PORT", raising=False)
+    monkeypatch.delenv("TAOS_HOST", raising=False)
+    seen = []
+    monkeypatch.setattr(reset_cli, "controller_is_up",
+                        lambda port, host="127.0.0.1": seen.append((host, port)) or True)
+    assert reset_cli.reset_cli(["--onboarding", "--yes", "--data-dir", str(tmp_path)]) == 1
+    assert seen == [("127.0.0.1", 6969)]
+
+
+def test_controller_rechecked_before_removal(tmp_path, monkeypatch):
+    """A controller that starts after the first probe (prompt wait, backups) stops the reset."""
+    _seed_user(tmp_path)
+    answers = iter([False, True])
+    monkeypatch.setattr(reset_cli, "controller_is_up",
+                        lambda port, host="127.0.0.1": next(answers))
+    assert reset_cli.reset_cli(["--onboarding", "--yes", "--data-dir", str(tmp_path)]) == 1
+    assert AuthManager(tmp_path).is_configured() is True
+    assert list((tmp_path / "backups").glob("reset-*/.auth_user.json"))

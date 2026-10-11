@@ -23,30 +23,40 @@ ONBOARDING_DBS = ("auth_requests.db", "password_resets.db")
 _SIDECARS = ("", "-wal", "-shm")
 
 
-def _controller_port(data_dir: Path) -> int:
-    """The port the controller binds, mirroring ``tinyagentos.__main__``:
-    ``TAOS_PORT`` (or a bare ``TAOS_HOST``) wins, else ``server.port`` from the
-    data dir's config.yaml, else 6969. Read-only: ``load_config`` may rewrite
+_WILDCARD_HOSTS = ("", "0.0.0.0", "::")
+
+
+def _controller_endpoint(data_dir: Path) -> tuple[str, int]:
+    """The host and port the controller binds, mirroring ``tinyagentos.__main__``:
+    ``TAOS_HOST`` / ``TAOS_PORT`` win (defaults 127.0.0.1 / 6969 when only one is
+    set), else ``server.host`` / ``server.port`` from the data dir's config.yaml
+    (defaults 0.0.0.0 / 6969). Read-only: ``load_config`` may rewrite
     config.yaml, which a safety probe must never do."""
+    env_host = os.environ.get("TAOS_HOST")
     env_port = os.environ.get("TAOS_PORT")
-    if env_port or os.environ.get("TAOS_HOST"):
-        return int(env_port) if env_port else 6969
+    if env_host or env_port:
+        return env_host or "127.0.0.1", int(env_port) if env_port else 6969
     try:
         import yaml
 
-        data = yaml.safe_load((data_dir / "config.yaml").read_text())
-        return int((data or {}).get("server", {}).get("port", 6969))
+        server = (yaml.safe_load((data_dir / "config.yaml").read_text()) or {}).get("server", {})
+        return str(server.get("host", "0.0.0.0")), int(server.get("port", 6969))
     except (OSError, ValueError, TypeError, AttributeError, yaml.YAMLError):
-        return 6969
+        return "0.0.0.0", 6969
+
+
+def _probe_host(host: str) -> str:
+    """A wildcard bind is reachable on loopback; a specific bind only at that address."""
+    return "127.0.0.1" if host in _WILDCARD_HOSTS else host
 
 
 def _backup_stamp() -> str:
     return datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
 
 
-def controller_is_up(port: int) -> bool:
+def controller_is_up(port: int, host: str = "127.0.0.1") -> bool:
     try:
-        with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+        with socket.create_connection((host, port), timeout=0.5):
             return True
     except OSError:
         return False
@@ -90,9 +100,10 @@ def reset_cli(argv) -> int:
     override = ns.data_dir or os.environ.get("TAOS_DATA_DIR")
     data_dir = resolve_data_dir(Path(override) if override else None)
 
-    port = _controller_port(data_dir)
-    if not ns.force and controller_is_up(port):
-        print(f"The taOS controller is running on port {port}. Stop it first "
+    host, port = _controller_endpoint(data_dir)
+    host = _probe_host(host)
+    if not ns.force and controller_is_up(port, host):
+        print(f"The taOS controller is running on {host}:{port}. Stop it first "
               "(sudo systemctl stop tinyagentos) or pass --force.", file=sys.stderr)
         return 1
 
@@ -126,6 +137,13 @@ def reset_cli(argv) -> int:
             shutil.copy2(t, backup_dir / t.name)
         if pref is not None:
             (backup_dir / "setup_pref.json").write_text(json.dumps({"value": pref[0]}))
+    # The first probe is stale by now (prompt wait, backup copies): a controller
+    # that started meanwhile must not lose live state without --force.
+    if not ns.force and controller_is_up(port, host):
+        print(f"The taOS controller started on {host}:{port} meanwhile; nothing was removed"
+              + (f" (backup already written to {backup_dir})" if backup_dir else "") + ".",
+              file=sys.stderr)
+        return 1
     for t in targets:
         t.unlink()
     if pref is not None:
