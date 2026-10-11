@@ -3,7 +3,7 @@
 Card tsk-eioojd.  `tests/conftest.py` used to no-op `verify_csrf` for every
 test file whose path did not contain the substring "test_csrf".  That was
 inverted in #2547: the real dependency is now the default and opting out takes
-an explicit `@pytest.mark.csrf_bypass`.
+an explicit opt-out marker.
 
 `tests/test_app_csrf_wiring.py` already proves the behaviour end to end.  Its
 identity guard, though, checks `__module__` and `__name__`, and any stub can
