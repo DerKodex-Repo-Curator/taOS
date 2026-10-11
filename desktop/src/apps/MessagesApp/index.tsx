@@ -109,6 +109,8 @@ interface Channel {
   created_at?: string;
   last_message_at?: string;
   lastPreview?: string;
+  last_preview?: string;
+  last_preview_author?: string;
   project_id?: string;
   settings?: {
     archived?: boolean;
