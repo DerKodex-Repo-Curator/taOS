@@ -354,6 +354,17 @@ describe("MessageList", () => {
       expect(buttons.some((b) => top?.contains(b))).toBe(true);
     });
 
+    it("skips ephemeral agent messages when picking the editable reply", () => {
+      const messages = [
+        ...agentMsgs(),
+        msg({ id: "e1", author_id: "tom", author_type: "agent", content: "only you can see this", ephemeral: 1 }),
+      ];
+      const { container } = renderWithMsg({ messages, onEditAgentReply: vi.fn() });
+      const buttons = screen.getAllByRole("button", { name: "Edit reply" });
+      expect(buttons).toHaveLength(1);
+      expect(container.querySelector('[data-message-id="a2"]')?.contains(buttons[0])).toBe(true);
+    });
+
     it("opens MessageEditor on the agent bubble being edited", () => {
       renderWithMsg({
         messages: agentMsgs(),

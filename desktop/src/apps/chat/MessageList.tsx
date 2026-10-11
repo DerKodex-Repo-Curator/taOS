@@ -99,6 +99,7 @@ export interface MessageRow {
   reactions?: Record<string, string[]>;
   edited_at?: number | string;
   deleted_at?: number | null;
+  ephemeral?: number | boolean;
   delivered_at?: number | null;
   attachments?: AttachmentRecord[];
   reply_count?: number;
@@ -253,12 +254,12 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(funct
     },
   }), []);
 
-  // Only the most recent agent reply of each thread (top level keyed "") is
+  // Only the most recent non-ephemeral agent reply of each thread (top level keyed "") is
   // editable, and only once it has finished streaming; the server applies
   // the same per-thread rule and refuses anything else.
   const lastAgentByThread = new Map<string, string>();
   for (const m of messages) {
-    if (m.author_type === "agent" && !m.deleted_at) {
+    if (m.author_type === "agent" && !m.deleted_at && !m.ephemeral) {
       lastAgentByThread.set(m.thread_id ?? "", m.id);
     }
   }
