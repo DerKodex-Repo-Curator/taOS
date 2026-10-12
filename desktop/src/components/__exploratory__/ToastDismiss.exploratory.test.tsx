@@ -1,70 +1,57 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, act } from "@testing-library/react";
 import { useNotificationStore } from "@/stores/notification-store";
 import { NotificationToasts } from "@/components/NotificationToast";
 
-function flushStore() {
+// Reset the real store between cases so each test starts clean.
+function resetStore() {
   useNotificationStore.setState({ notifications: [], centreOpen: false });
 }
 
-// A parent that re-renders NotificationToasts on demand, mimicking the live
-// mobile shell which re-renders the toast host while a toast is visible.
-function Harness({ forceKey }: { forceKey?: number }) {
-  return <NotificationToasts topInset="calc(44px)" key={forceKey} />;
-}
-
-describe("mobile toast auto-dismiss exploratory", () => {
+describe("mobile toast auto-dismiss", () => {
   beforeEach(() => {
     vi.useFakeTimers();
-    flushStore();
+    resetStore();
   });
-  afterEach(() => vi.useRealTimers());
 
-  it("CASE A: no re-render — toast dismisses after 5s", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    resetStore();
+  });
+
+  it("info system toast auto-dismisses on mobile despite frequent parent re-renders", () => {
+    // Add an info-level system notification, the same kind SpaUpdateToast
+    // posts for "New taOS build available".
     useNotificationStore.getState().addNotification({
       source: "system",
       level: "info",
       title: "New taOS build available",
-      body: "Reload",
+      body: "Reload to update.",
     });
-    render(<Harness />);
-    expect(screen.getByText("New taOS build available")).toBeInTheDocument();
-    act(() => vi.advanceTimersByTime(5000));
-    expect(screen.queryByText("New taOS build available")).not.toBeInTheDocument();
-  });
 
-  it("CASE B: parent re-renders during the timer — does the toast dismiss?", () => {
-    useNotificationStore.getState().addNotification({
-      source: "system",
-      level: "info",
-      title: "New taOS build available",
-      body: "Reload",
-    });
-    const { rerender } = render(<Harness />);
-    expect(screen.getByText("New taOS build available")).toBeInTheDocument();
-    // Simulate the shell re-rendering the toast host partway through the 5s.
-    act(() => vi.advanceTimersByTime(2000));
-    rerender(<Harness />);
-    act(() => vi.advanceTimersByTime(5000));
-    const gone = screen.queryByText("New taOS build available");
-    expect(gone).not.toBeInTheDocument();
-  });
+    // topInset mirrors the mobile shell call site in App.tsx:
+    //   <NotificationToasts topInset={MOBILE_TOP_BAR_HEIGHT} />
+    const { rerender } = render(<NotificationToasts topInset="calc(44px)" />);
 
-  it("CASE C: repeated parent re-renders every 1s — toast persists?", () => {
-    useNotificationStore.getState().addNotification({
-      source: "system",
-      level: "info",
-      title: "New taOS build available",
-      body: "Reload",
-    });
-    const { rerender } = render(<Harness />);
+    // Toast is visible on the home pages.
     expect(screen.getByText("New taOS build available")).toBeInTheDocument();
-    // Simulate frequent shell re-renders (scroll/store ticks) every 1s.
+
+    // Simulate the mobile shell re-rendering the toast host while the toast
+    // is visible: widget ticks, grid re-renders, store updates every ~1s.
+    // Previously each re-render recreated the onExpire callback, resetting
+    // the 5s dismiss timer so the toast never cleared.
     for (let i = 0; i < 10; i++) {
-      act(() => vi.advanceTimersByTime(1000));
-      rerender(<Harness />);
+      act(() => {
+        vi.advanceTimersByTime(1000);
+      });
+      rerender(<NotificationToasts topInset="calc(44px)" />);
     }
-    const gone = screen.queryByText("New taOS build available");
-    expect(gone).not.toBeInTheDocument();
+
+    // Past the auto-dismiss timeout: toast is gone from the DOM...
+    expect(screen.queryByText("New taOS build available")).not.toBeInTheDocument();
+    // ...but the notification remains in the store so the notification
+    // centre does not lose the reload prompt.
+    const notifs = useNotificationStore.getState().notifications;
+    expect(notifs.some((n) => n.title === "New taOS build available")).toBe(true);
   });
 });
