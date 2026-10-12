@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, waitFor } from "@testing-library/react";
+import { render, waitFor, act } from "@testing-library/react";
 
 // Hoisted so the vi.mock factories below can close over them.
 const { convertSpy, parseSpy } = vi.hoisted(() => ({
@@ -7,35 +7,72 @@ const { convertSpy, parseSpy } = vi.hoisted(() => ({
   parseSpy: vi.fn(async (_src: string) => ({ elements: [] as unknown[], files: {} })),
 }));
 
+// Mock excalidraw-sync with a spy object we can assert against.
+const { markRemoteSpy, onLocalChangeSpy, disposeSpy, createSceneSyncSpy, flushSpy } = vi.hoisted(() => ({
+  markRemoteSpy: vi.fn(),
+  onLocalChangeSpy: vi.fn(async () => {}),
+  disposeSpy: vi.fn(),
+  createSceneSyncSpy: vi.fn(() => ({
+    markRemote: markRemoteSpy,
+    onLocalChange: onLocalChangeSpy,
+    dispose: disposeSpy,
+    shouldApplyRemote: vi.fn(() => true),
+    shouldApplyRemoteDelete: vi.fn(() => true),
+    flush: flushSpy,
+  })),
+  flushSpy: vi.fn(async () => {}),
+}));
+
 // Excalidraw is a heavy canvas/worker component jsdom cannot run. Mock it so the
 // board's mapping + wiring can be asserted: convertToExcalidrawElements passes
 // the skeletons through so we can count them, and Excalidraw records the props
 // it was handed.
+const mockApi = {
+  updateScene: vi.fn(),
+  scrollToContent: vi.fn(),
+};
 vi.mock("@excalidraw/excalidraw", () => ({
   convertToExcalidrawElements: convertSpy,
   Excalidraw: ({
     initialData,
     viewModeEnabled,
     theme,
+    onChange,
+    excalidrawAPI,
+    ...props
   }: {
     initialData?: { elements?: { id?: string }[] };
     viewModeEnabled?: boolean;
     theme?: string;
-  }) => (
-    <div
-      data-testid="excalidraw"
-      data-count={initialData?.elements?.length ?? 0}
-      data-ids={(initialData?.elements ?? []).map((e) => e.id).join(",")}
-      data-viewmode={String(!!viewModeEnabled)}
-      data-theme={theme}
-    />
-  ),
+    onChange?: (els: unknown[]) => void;
+    excalidrawAPI?: (api: typeof mockApi) => void;
+  }) => {
+    // Expose onChange so tests can call it.
+    (window as unknown as { __excalidrawOnChange?: (els: unknown[]) => void }).__excalidrawOnChange = onChange;
+    // Call the excalidrawAPI callback so the board gets the imperative API.
+    excalidrawAPI?.(mockApi);
+    return (
+      <div
+        data-testid="excalidraw"
+        data-count={initialData?.elements?.length ?? 0}
+        data-ids={(initialData?.elements ?? []).map((e) => e.id).join(",")}
+        data-viewmode={String(!!viewModeEnabled)}
+        data-theme={theme}
+        {...props}
+      />
+    );
+  },
+  CaptureUpdateAction: { NEVER: "NEVER" },
 }));
 vi.mock("@excalidraw/excalidraw/index.css", () => ({}));
 // Keep the heavy mermaid parser out of jsdom; a test that needs a ready
 // diagram overrides the parse result.
 vi.mock("@excalidraw/mermaid-to-excalidraw", () => ({
   parseMermaidToExcalidraw: parseSpy,
+}));
+// Mock excalidraw-sync so we can spy on its calls.
+vi.mock("../canvas/excalidraw-sync", () => ({
+  createSceneSync: createSceneSyncSpy,
 }));
 
 import { ExcalidrawBoard } from "../canvas/ExcalidrawBoard";
@@ -58,6 +95,15 @@ describe("ExcalidrawBoard", () => {
     // mockReset also restores the pass-through after a test overrides it.
     convertSpy.mockReset();
     parseSpy.mockClear();
+    markRemoteSpy.mockClear();
+    onLocalChangeSpy.mockClear();
+    flushSpy.mockClear();
+    disposeSpy.mockClear();
+    createSceneSyncSpy.mockClear();
+    mockApi.updateScene.mockClear();
+    mockApi.scrollToContent.mockClear();
+    // Reset the exposed onChange.
+    (window as unknown as { __excalidrawOnChange?: (els: unknown[]) => void }).__excalidrawOnChange = undefined;
   });
 
   it("maps non-deleted elements into the scene and renders read-only", () => {
@@ -147,5 +193,209 @@ describe("ExcalidrawBoard", () => {
       />,
     );
     expect(getByTestId("excalidraw").getAttribute("data-ids")).toBe("t-n2,n2,n1,t-n1");
+  });
+
+  it("with projectId the board is editable and onChange reaches the sync", () => {
+    const getElement = vi.fn((id: string) => ({ id, kind: "note" } as CanvasElement));
+    const { getByTestId } = render(
+      <ExcalidrawBoard
+        projectId="prj-1"
+        elements={[el({ id: "n1" })]}
+        getElement={getElement}
+      />,
+    );
+    // Board should be editable (viewModeEnabled = false).
+    expect(getByTestId("excalidraw").getAttribute("data-viewmode")).toBe("false");
+    // Sync should have been created once.
+    expect(createSceneSyncSpy).toHaveBeenCalledTimes(1);
+    // The sync receives a stable getElement wrapper that forwards to the latest getElement.
+    const createCall = createSceneSyncSpy.mock.calls[0][0] as { getElement?: (id: string) => CanvasElement | undefined };
+    expect(typeof createCall.getElement).toBe("function");
+    // Verify the wrapper forwards to the provided getElement.
+    expect(createCall.getElement?.("n1")).toEqual({ id: "n1", kind: "note" });
+    // Call the exposed onChange (simulating Excalidraw firing onChange).
+    const onChange = (window as unknown as { __excalidrawOnChange?: (els: unknown[]) => void }).__excalidrawOnChange;
+    expect(onChange).toBeDefined();
+    act(() => { onChange?.([{ id: "n1", type: "rectangle" }]); });
+    // onLocalChange should have been called with the elements.
+    expect(onLocalChangeSpy).toHaveBeenCalledTimes(1);
+    expect(onLocalChangeSpy).toHaveBeenCalledWith([{ id: "n1", type: "rectangle" }]);
+  });
+
+  it("updateScene is followed by markRemote", async () => {
+    const getElement = vi.fn((id: string) => ({ id, kind: "note" } as CanvasElement));
+    const { rerender, getByTestId } = render(
+      <ExcalidrawBoard
+        projectId="prj-1"
+        elements={[el({ id: "n1" })]}
+        getElement={getElement}
+      />,
+    );
+    // Wait for the effect to run and call markRemote.
+    await waitFor(() => expect(markRemoteSpy).toHaveBeenCalledTimes(1));
+    const firstCall = markRemoteSpy.mock.calls[0][0];
+    expect(Array.isArray(firstCall)).toBe(true);
+    // Re-render with new elements (simulates sceneElements change).
+    markRemoteSpy.mockClear();
+    rerender(
+      <ExcalidrawBoard
+        projectId="prj-1"
+        elements={[el({ id: "n1" }), el({ id: "n2" })]}
+        getElement={getElement}
+      />,
+    );
+    // markRemote should be called again with the new scene.
+    await waitFor(() => expect(markRemoteSpy).toHaveBeenCalledTimes(1));
+    const secondCall = markRemoteSpy.mock.calls[0][0];
+    expect(Array.isArray(secondCall)).toBe(true);
+  });
+
+  it("without projectId the board stays view-only", () => {
+    const { getByTestId } = render(
+      <ExcalidrawBoard elements={[el({ id: "n1" })]} />,
+    );
+    // Board should be view-only (viewModeEnabled = true).
+    expect(getByTestId("excalidraw").getAttribute("data-viewmode")).toBe("true");
+    // Sync should NOT have been created.
+    expect(createSceneSyncSpy).not.toHaveBeenCalled();
+  });
+
+  it("readOnly=true forces view-only even with projectId", () => {
+    const getElement = vi.fn((id: string) => ({ id, kind: "note" } as CanvasElement));
+    const { getByTestId } = render(
+      <ExcalidrawBoard
+        projectId="prj-1"
+        readOnly={true}
+        elements={[el({ id: "n1" })]}
+        getElement={getElement}
+      />,
+    );
+    // Board should be view-only.
+    expect(getByTestId("excalidraw").getAttribute("data-viewmode")).toBe("true");
+    // Sync should NOT have been created.
+    expect(createSceneSyncSpy).not.toHaveBeenCalled();
+  });
+
+  it("disposes sync on unmount", async () => {
+    // Reset the mock to clear any previous calls
+    createSceneSyncSpy.mockReset();
+    markRemoteSpy.mockReset();
+    onLocalChangeSpy.mockReset();
+    // dispose is a property of the returned sync object
+
+    const getElement = vi.fn((id: string) => ({ id, kind: "note" } as CanvasElement));
+
+    const { unmount } = render(
+      <ExcalidrawBoard
+        projectId="prj-1"
+        elements={[el({ id: "n1" })]}
+        getElement={getElement}
+      />,
+    );
+
+    // Wait for effects to run
+    await vi.waitFor(() => expect(createSceneSyncSpy).toHaveBeenCalledTimes(1));
+
+    // Unmount the component
+    unmount();
+
+    // The flush and dispose functions should have been called
+    await vi.waitFor(() => {
+      expect(flushSpy).toHaveBeenCalledTimes(1);
+      expect(disposeSpy).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("keeps the same SceneSync when getElement changes but projectId stays the same", () => {
+    const getElementV1 = vi.fn((id: string) => (id === "n1" ? ({ id, kind: "note" } as CanvasElement) : undefined));
+    const { rerender } = render(
+      <ExcalidrawBoard
+        projectId="prj-1"
+        elements={[el({ id: "n1" })]}
+        getElement={getElementV1}
+      />,
+    );
+    expect(createSceneSyncSpy).toHaveBeenCalledTimes(1);
+    expect(disposeSpy).not.toHaveBeenCalled();
+
+    // Capture the getElement that was passed to createSceneSync
+    const createCall = createSceneSyncSpy.mock.calls[0][0] as { getElement?: (id: string) => CanvasElement | undefined };
+    const syncedGetElement = createCall.getElement;
+
+    // Rerender with a NEW element list and a NEW getElement function (same projectId)
+    const getElementV2 = vi.fn((id: string) => (id === "n2" ? ({ id, kind: "note" } as CanvasElement) : undefined));
+    rerender(
+      <ExcalidrawBoard
+        projectId="prj-1"
+        elements={[el({ id: "n1" }), el({ id: "n2" })]}
+        getElement={getElementV2}
+      />,
+    );
+
+    // createSceneSync should NOT be called again (still exactly once total)
+    expect(createSceneSyncSpy).toHaveBeenCalledTimes(1);
+    // dispose should NOT have been called
+    expect(disposeSpy).not.toHaveBeenCalled();
+
+    // The getElement passed to createSceneSync should now forward to the latest (V2) map
+    // and return the element that only exists in the NEW list
+    expect(syncedGetElement?.("n2")).toEqual({ id: "n2", kind: "note" });
+    expect(syncedGetElement?.("n1")).toBeUndefined(); // V2 doesn't know about n1
+  });
+
+  it("flush pending SceneSync writes before dispose", async () => {
+    // Reset the mock to clear any previous calls
+    createSceneSyncSpy.mockReset();
+    markRemoteSpy.mockReset();
+    onLocalChangeSpy.mockReset();
+
+    const { unmount } = render(
+      <ExcalidrawBoard
+        projectId="prj-1"
+        elements={[el({ id: "n1" })]}
+      />,
+    );
+
+    // Wait for effects to run
+    await vi.waitFor(() => expect(createSceneSyncSpy).toHaveBeenCalledTimes(1));
+
+    // Unmount the component
+    unmount();
+
+    // The flush and dispose functions should have been called
+    await vi.waitFor(() => {
+      expect(flushSpy).toHaveBeenCalledTimes(1);
+      expect(disposeSpy).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("api.updateScene receives captureUpdate: CaptureUpdateAction.NEVER", async () => {
+    const { unmount } = render(
+      <ExcalidrawBoard
+        projectId="prj-1"
+        elements={[el({ id: "n1" })]}
+      />,
+    );
+
+    // Wait for effects to run
+    await vi.waitFor(() => expect(markRemoteSpy).toHaveBeenCalledTimes(1));
+
+    // Assert the mocked api.updateScene received captureUpdate equal to CaptureUpdateAction.NEVER
+    expect(mockApi.updateScene).toHaveBeenCalledTimes(1);
+    const callArgs = mockApi.updateScene.mock.calls[0][0];
+    expect(callArgs.captureUpdate).toBe("NEVER");
+
+    unmount();
+  });
+
+  it("viewModeEnabled is true when readOnly=false and no projectId", () => {
+    const { getByTestId } = render(
+      <ExcalidrawBoard
+        readOnly={false}
+        elements={[el({ id: "n1" })]}
+      />,
+    );
+    // Board should be view-only (viewModeEnabled = true) because no projectId
+    expect(getByTestId("excalidraw").getAttribute("data-viewmode")).toBe("true");
   });
 });
