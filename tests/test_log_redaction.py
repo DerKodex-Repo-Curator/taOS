@@ -185,3 +185,18 @@ class TestRedactForArchive:
         assert is_secret_file_read("/home/user/config.json") is False
         assert is_secret_file_read("/home/user/taos-config.yaml") is False
         assert is_secret_file_read("/home/user/data.json") is False
+
+    def test_pin_colon_form(self):
+        assert "482913" not in redact_for_archive("PIN: 482913")
+
+    def test_pin_equals_form(self):
+        assert "482913" not in redact_for_archive("PIN=482913")
+
+    def test_pin_no_space_form(self):
+        assert "482913" not in redact_for_archive("your PIN:482913")
+
+    def test_pin_prose_form(self):
+        assert "482913" not in redact_for_archive("pin code is 482913")
+
+    def test_ipv4_boundary_not_partially_rewritten(self):
+        assert redact_for_archive("host 110.1.2.3") == "host 110.1.2.3"

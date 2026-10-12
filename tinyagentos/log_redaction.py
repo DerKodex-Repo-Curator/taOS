@@ -94,6 +94,33 @@ _CONN_STR_RE = re.compile(r'(?P<pre>[a-zA-Z][a-zA-Z0-9+.\-]*://[^:/\s]+:)(?P<val
 # common substring and cause runaway redaction of unrelated text.
 _MIN_KNOWN_VALUE_LEN = 6
 
+# Tailnet IPv4 addresses (10/8, 100.64.0.0/10, 172.16/12, 192.168/16) -- leave
+# 127.0.0.1 and 0.0.0.0 alone. Leading \b so a public IP such as 110.1.2.3 is
+# not partially rewritten to 1[REDACTED].
+_IPV4_RE = re.compile(
+    r'\b(?:'
+    r'10\.\d{1,3}\.\d{1,3}\.\d{1,3}|'
+    r'100\.(6[4-9]|7[0-9]|8[0-9]|9[0-9]|1[0-1][0-9]|12[0-7])\.\d{1,3}\.\d{1,3}|'
+    r'172\.(1[6-9]|2[0-9]|3[0-1])\.\d{1,3}\.\d{1,3}|'
+    r'192\.168\.\d{1,3}\.\d{1,3}'
+    r')\b',
+    re.IGNORECASE,
+)
+
+# Tailnet host names: [a-z0-9-]+.tail[0-9a-f]+.ts.net
+_TAILNET_RE = re.compile(r'[a-z0-9-]+\.tail[0-9a-f]+\.ts\.net', re.IGNORECASE)
+
+# Invite URLs /i/<id>
+_INVITE_RE = re.compile(r'/i/\S+', re.IGNORECASE)
+
+# 6-8 digit PIN values following PIN/pin. The word PIN is anchored with \b so
+# "spinning" does not trip it; then either a colon/equals separator with
+# optional spaces (PIN: 482913, PIN=482913, your PIN:482913) or up to 3
+# intervening tokens (pin code is 482913). The whole match is replaced.
+_PIN_RE = re.compile(
+    r'(?i)\bPIN\b(?:\s*[:=]\s*|(?:\s+\S+){0,3}\s+)\d{6,8}\b',
+)
+
 
 def redact(text: str, known_values: "list[str] | None" = None) -> str:
     """Return `text` with credential-shaped spans replaced by PLACEHOLDER.
@@ -159,27 +186,14 @@ def redact_for_archive(text: str, known_values: "list[str] | None" = None) -> st
 
     text = redact(text, known_values)
 
-    # a. IPv4: 10/8, 100.64.0.0/10, 172.16/12, 192.168/16 — leave 127.0.0.1 and 0.0.0.0 alone
-    _IPV4_RE = re.compile(
-        r'(?:'
-        r'10\.\d{1,3}\.\d{1,3}\.\d{1,3}|'
-        r'100\.(6[4-9]|7[0-9]|8[0-9]|9[0-9]|1[0-1][0-9]|12[0-7])\.\d{1,3}\.\d{1,3}|'
-        r'172\.(1[6-9]|2[0-9]|3[0-1])\.\d{1,3}\.\d{1,3}|'
-        r'192\.168\.\d{1,3}\.\d{1,3}'
-        r')\b',
-        re.IGNORECASE,
-    )
+    # a. IPv4: 10/8, 100.64.0.0/10, 172.16/12, 192.168/16 -- leave 127.0.0.1 and 0.0.0.0 alone
     text = _IPV4_RE.sub(PLACEHOLDER, text)
 
     # b. Tailnet host names: [a-z0-9-]+.tail[0-9a-f]+.ts.net
-    _TAILNET_RE = re.compile(r'[a-z0-9-]+\.tail[0-9a-f]+\.ts\.net', re.IGNORECASE)
     text = _TAILNET_RE.sub(PLACEHOLDER, text)
 
-    # c. Invite URLs /i/<id> and 6-8 digit PIN values following PIN/pin within 3 tokens
-    _INVITE_RE = re.compile(r'/i/\S+', re.IGNORECASE)
+    # c. Invite URLs /i/<id> and 6-8 digit PIN values following PIN/pin
     text = _INVITE_RE.sub(PLACEHOLDER, text)
-
-    _PIN_RE = re.compile(r'(?i)(PIN|pin)(?:\s+\S+){0,3}\s+\d{6,8}')
     text = _PIN_RE.sub(PLACEHOLDER, text)
 
     return text
