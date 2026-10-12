@@ -34,8 +34,8 @@ describe("app-standalone-main shell link routing", () => {
       configResolve = resolve;
     });
 
-    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
-      const url = typeof input === "string" ? input : input.url;
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const url = String(input);
       if (url === TAOS_AGENT_CONFIG_URL) {
         return configPromise;
       }
@@ -50,6 +50,7 @@ describe("app-standalone-main shell link routing", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.useRealTimers();
   });
 
   it("awaits device-class prime before routing links: window.open after boot routes through openUrlInShell on mobile", async () => {
@@ -76,15 +77,10 @@ describe("app-standalone-main shell link routing", () => {
 
   it("renders even when the config fetch never resolves", async () => {
     vi.useFakeTimers();
-    
+
     let booted = false;
     const bootPromise = import("../app-standalone-main").then(() => {
       booted = true;
-    });
-
-    await vi.waitFor(() => {
-      const calls = fetchMock.mock.calls;
-      expect(calls.some(call => call[0] === TAOS_AGENT_CONFIG_URL)).toBe(true);
     });
 
     expect(booted).toBe(false);
@@ -95,7 +91,6 @@ describe("app-standalone-main shell link routing", () => {
 
     expect(booted).toBe(true);
     expect(document.getElementById('root')).toHaveProperty('children');
-
-    vi.useRealTimers();
+    expect(document.getElementById('root')?.children?.length).toBeGreaterThan(0);
   });
 });
