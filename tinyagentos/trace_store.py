@@ -66,7 +66,15 @@ CREATE TABLE IF NOT EXISTS trace_events (
 CREATE INDEX IF NOT EXISTS idx_trace_kind_time ON trace_events(kind, created_at);
 CREATE INDEX IF NOT EXISTS idx_trace_trace_id ON trace_events(trace_id);
 CREATE INDEX IF NOT EXISTS idx_trace_created ON trace_events(created_at);
+CREATE VIRTUAL TABLE IF NOT EXISTS trace_events_fts USING fts5(id UNINDEXED, text);
 """
+
+# Maximum searchable text length per event (64KB). Payloads are rendered
+# into a single string before being written to trace_events_fts.
+FTS_TEXT_CAP = 65536
+
+# Payload keys rendered into the FTS text column, in order.
+FTS_PAYLOAD_KEYS = ("text", "content", "tool", "args", "result")
 
 VALID_KINDS = frozenset({
     "message_in", "message_out", "llm_call", "tool_call",
@@ -197,6 +205,44 @@ def _build_envelope(agent_name: str, kind: str, fields: dict) -> dict:
     }
 
 
+def _render_fts_text(envelope: dict) -> str:
+    """Render an envelope's searchable text for the FTS5 index.
+
+    Concatenates the payload's text/content/tool/args/result fields plus the
+    top-level kind and error, capped at FTS_TEXT_CAP bytes. Idempotent for the
+    same envelope — the same input always produces the same string."""
+    parts: list[str] = []
+    kind = envelope.get("kind")
+    if kind:
+        parts.append(str(kind))
+    error = envelope.get("error")
+    if error:
+        parts.append(str(error))
+    payload = envelope.get("payload")
+    if isinstance(payload, dict):
+        for key in FTS_PAYLOAD_KEYS:
+            val = payload.get(key)
+            if val is None:
+                continue
+            parts.append(str(val))
+    text = " ".join(p for p in parts if p != "")
+    return text[:FTS_TEXT_CAP]
+
+
+def _envelope_to_row(envelope: dict) -> tuple:
+    """Project a v1 envelope onto the trace_events column tuple.
+
+    Order matches the INSERT column list in record() / import_envelopes()."""
+    return (
+        envelope["id"], envelope["v"], envelope["created_at"],
+        envelope["trace_id"], envelope["parent_id"], envelope["agent_name"],
+        envelope["kind"], envelope["channel_id"], envelope["thread_id"],
+        envelope["backend_name"], envelope["model"], envelope["duration_ms"],
+        envelope["tokens_in"], envelope["tokens_out"], envelope["cost_usd"],
+        envelope["error"], json.dumps(envelope["payload"], default=str),
+    )
+
+
 class AgentTraceStore:
     """One agent's trace store — manages hourly bucket DBs + JSONL fallback."""
 
@@ -309,21 +355,7 @@ class AgentTraceStore:
                 return envelope
             try:
                 conn = await self._open_bucket(bucket)
-                await conn.execute(
-                    """INSERT OR IGNORE INTO trace_events
-                       (id, v, created_at, trace_id, parent_id, agent_name, kind,
-                        channel_id, thread_id, backend_name, model, duration_ms,
-                        tokens_in, tokens_out, cost_usd, error, payload)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        envelope["id"], envelope["v"], envelope["created_at"],
-                        envelope["trace_id"], envelope["parent_id"], envelope["agent_name"],
-                        envelope["kind"], envelope["channel_id"], envelope["thread_id"],
-                        envelope["backend_name"], envelope["model"], envelope["duration_ms"],
-                        envelope["tokens_in"], envelope["tokens_out"], envelope["cost_usd"],
-                        envelope["error"], json.dumps(envelope["payload"], default=str),
-                    ),
-                )
+                await self._insert_envelope(conn, envelope)
                 await conn.commit()
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
@@ -354,6 +386,166 @@ class AgentTraceStore:
             except Exception:
                 pass
         return envelope
+
+    async def _insert_envelope(self, conn, envelope: dict) -> bool:
+        """Insert one envelope into the bucket DB + FTS index.
+
+        Returns True if the row was inserted, False if it was a duplicate
+        (INSERT OR IGNORE on id). Does NOT commit — the caller batches."""
+        row = _envelope_to_row(envelope)
+        cur = await conn.execute(
+            """INSERT OR IGNORE INTO trace_events
+               (id, v, created_at, trace_id, parent_id, agent_name, kind,
+                channel_id, thread_id, backend_name, model, duration_ms,
+                tokens_in, tokens_out, cost_usd, error, payload)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            row,
+        )
+        inserted = cur.rowcount == 1
+        await cur.close()
+        if inserted:
+            fts_text = _render_fts_text(envelope)
+            cur = await conn.execute(
+                "INSERT OR IGNORE INTO trace_events_fts (id, text) VALUES (?, ?)",
+                (envelope["id"], fts_text),
+            )
+            await cur.close()
+        return inserted
+
+    async def import_envelopes(self, envelopes: list[dict]) -> dict:
+        """Bulk-import pre-built v1 envelopes into the bucket DBs.
+
+        Each envelope is validated with the same rules record() uses (kind in
+        VALID_KINDS, v1 keys present), grouped by bucket (_bucket_key of
+        created_at), and inserted with INSERT OR IGNORE on id so re-running an
+        import is idempotent. Does NOT seal/unseal buckets and does NOT touch
+        the live registry bucket — historical import lands in the DB by
+        construction, never in the .late.jsonl fallback.
+
+        Returns {inserted, duplicates, buckets}."""
+        inserted = 0
+        duplicates = 0
+        buckets: list[str] = []
+        if not envelopes:
+            return {"inserted": 0, "duplicates": 0, "buckets": []}
+
+        # Validate + group up front so a bad envelope fails before any write.
+        grouped: dict[str, list[dict]] = {}
+        for env in envelopes:
+            self._validate_envelope(env)
+            bucket = _bucket_key(env["created_at"])
+            grouped.setdefault(bucket, []).append(env)
+            if bucket not in buckets:
+                buckets.append(bucket)
+
+        async with self._lock:
+            for bucket, envs in grouped.items():
+                conn = await self._open_bucket(bucket)
+                for env in envs:
+                    if await self._insert_envelope(conn, env):
+                        inserted += 1
+                    else:
+                        duplicates += 1
+                await conn.commit()
+            # Deliberately NOT calling _evict_old_buckets here: a bulk
+            # historical import writes to old buckets by design, and eviction
+            # would seal them (chmod 0o400) mid-import, breaking subsequent
+            # writes. import_envelopes does NOT seal/unseal buckets.
+        return {"inserted": inserted, "duplicates": duplicates, "buckets": buckets}
+
+    async def search_text(
+        self,
+        query: str,
+        *,
+        since: float | None = None,
+        until: float | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        """FTS5 text search across this agent's buckets in the time range.
+
+        ``query`` is passed straight to FTS5 (FTS5 query syntax supported).
+        Hits are joined back to trace_events rows and returned newest-first,
+        capped at ``limit`` (max 1000)."""
+        limit = max(1, min(limit, 1000))
+        trace_dir = _agent_trace_dir(self._data_dir, self._slug)
+        if not trace_dir.exists():
+            return []
+        db_files = sorted(trace_dir.glob("*.db"), reverse=True)
+        out: list[dict] = []
+        seen_ids: set[str] = set()
+        async with self._lock:
+            for db_file in db_files:
+                bucket = db_file.stem
+                if not _bucket_overlaps(bucket, since, until):
+                    continue
+                try:
+                    conn = await aiosqlite.connect(
+                        f"file:{_bucket_db_path(self._data_dir, self._slug, bucket)}?mode=ro",
+                        uri=True,
+                    )
+                    try:
+                        cur = await conn.execute(
+                            """SELECT t.id, t.created_at, t.kind, t.payload
+                               FROM trace_events_fts f
+                               JOIN trace_events t ON t.id = f.id
+                               WHERE trace_events_fts MATCH ?
+                               ORDER BY t.created_at DESC""",
+                            (query,),
+                        )
+                        rows = await cur.fetchall()
+                        cols = [d[0] for d in cur.description]
+                        await cur.close()
+                        for r in rows:
+                            ev = dict(zip(cols, r))
+                            try:
+                                ev["payload"] = json.loads(
+                                    ev.get("payload") or "{}"
+                                )
+                            except Exception as exc:
+                                logger.debug(
+                                    "trace_store: search_text payload parse failed for %s: %s",
+                                    ev.get("id"), exc,
+                                )
+                            ev_id = ev.get("id")
+                            if ev_id and ev_id in seen_ids:
+                                continue
+                            if ev_id:
+                                seen_ids.add(ev_id)
+                            out.append(ev)
+                    finally:
+                        await conn.close()
+                except Exception as exc:
+                    logger.warning(
+                        "trace_store: search_text bucket %s skipped: %s",
+                        bucket, exc,
+                    )
+                if len(out) >= limit * 4:
+                    break
+        out.sort(key=lambda e: e.get("created_at") or 0, reverse=True)
+        return out[:limit]
+
+    @staticmethod
+    def _validate_envelope(envelope: dict) -> None:
+        """Validate a pre-built envelope matches the v1 contract.
+
+        Same rules record() enforces: kind in VALID_KINDS and the v1 key set
+        present. Raises ValueError on the first violation."""
+        if not isinstance(envelope, dict):
+            raise TypeError("envelope must be a dict")
+        missing = set(ENVELOPE_V1_SCHEMA["envelope"]) - set(envelope.keys())
+        if missing:
+            raise ValueError(
+                f"envelope missing v1 keys: {sorted(missing)}"
+            )
+        kind = envelope.get("kind")
+        if kind not in VALID_KINDS:
+            raise ValueError(
+                f"unknown kind: {kind!r}; valid: {sorted(VALID_KINDS)}"
+            )
+        if envelope.get("v") != SCHEMA_VERSION:
+            raise ValueError(
+                f"envelope v must be {SCHEMA_VERSION}, got {envelope.get('v')!r}"
+            )
 
     def _seal_bucket(self, bucket: str) -> None:
         """chmod .db and .jsonl to 0o400 (read-only) for the given bucket.

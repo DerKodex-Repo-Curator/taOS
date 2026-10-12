@@ -6,6 +6,7 @@ import json
 import os
 import stat
 import time
+import uuid
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -23,6 +24,7 @@ from tinyagentos.trace_store import (
     SCHEMA_VERSION,
     SEAL_AGE_SECONDS,
     TRACE_SCHEMA,
+    ENVELOPE_V1_SCHEMA,
 )
 
 
@@ -692,3 +694,119 @@ async def test_round_trip_valid_slug_after_safe_slug(tmp_path):
     events = await store.list()
     assert len(events) == 1
     await store.close()
+
+
+# ---------------------------------------------------------------------------
+# 18. Bulk historical import (T2b) — RED tests for import_envelopes / search_text
+# ---------------------------------------------------------------------------
+
+def _envelope(**overrides) -> dict:
+    """Build a valid v1 envelope with sane defaults for import tests."""
+    base = {
+        "v": SCHEMA_VERSION,
+        "id": overrides.pop("id", None) or ("env-" + uuid.uuid4().hex[:12]),
+        "trace_id": overrides.pop("trace_id", None),
+        "parent_id": overrides.pop("parent_id", None),
+        "created_at": overrides.pop("created_at", time.time()),
+        "agent_name": overrides.pop("agent_name", "importer-agent"),
+        "kind": overrides.pop("kind", "tool_result"),
+        "channel_id": overrides.pop("channel_id", None),
+        "thread_id": overrides.pop("thread_id", None),
+        "backend_name": overrides.pop("backend_name", None),
+        "model": overrides.pop("model", None),
+        "duration_ms": overrides.pop("duration_ms", None),
+        "tokens_in": overrides.pop("tokens_in", None),
+        "tokens_out": overrides.pop("tokens_out", None),
+        "cost_usd": overrides.pop("cost_usd", None),
+        "error": overrides.pop("error", None),
+        "payload": overrides.pop("payload", {}),
+    }
+    base.update(overrides)
+    return base
+
+
+@pytest.mark.asyncio
+async def test_import_envelopes_lands_in_bucket_db_not_late_jsonl(tmp_path):
+    """RED: import_envelopes routes 30-day-old events into the bucket DB and
+    writes no .late.jsonl sidecar (the sealed-bucket record() path would)."""
+    store = AgentTraceStore(tmp_path, "importer-agent")
+    now = time.time()
+    old_ts = now - 30 * 86400  # 30 days ago
+    bucket = _bucket_key(old_ts)
+    envelopes = [
+        _envelope(id="imp-1", created_at=old_ts, kind="tool_result",
+                  payload={"tool": "shell", "result": "alpha-token-xyz"}),
+        _envelope(id="imp-2", created_at=old_ts + 5, kind="message_in",
+                  payload={"from": "user", "text": "second event"}),
+        _envelope(id="imp-3", created_at=old_ts + 10, kind="llm_call",
+                  payload={"status": "success", "messages": [], "response": "ok", "metadata": {}}),
+    ]
+    result = await store.import_envelopes(envelopes)
+    assert result["inserted"] == 3
+    assert result["duplicates"] == 0
+    assert bucket in result["buckets"]
+
+    events = await store.list(since=old_ts, until=old_ts + 20, limit=100)
+    ids = {e["id"] for e in events}
+    assert {"imp-1", "imp-2", "imp-3"}.issubset(ids), events
+
+    late_path = _bucket_late_jsonl_path(tmp_path, "importer-agent", bucket)
+    assert not late_path.exists(), "import must not write a .late.jsonl sidecar"
+
+    db_path = _bucket_db_path(tmp_path, "importer-agent", bucket)
+    assert db_path.exists()
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_import_envelopes_idempotent_duplicates(tmp_path):
+    """RED: re-running import_envelopes with the same ids reports duplicates."""
+    store = AgentTraceStore(tmp_path, "importer-agent")
+    now = time.time()
+    old_ts = now - 30 * 86400
+    envelopes = [
+        _envelope(id=f"dup-{i}", created_at=old_ts + i, kind="tool_result",
+                  payload={"tool": "shell", "result": f"r{i}"})
+        for i in range(3)
+    ]
+    first = await store.import_envelopes(envelopes)
+    assert first["inserted"] == 3 and first["duplicates"] == 0
+
+    second = await store.import_envelopes(envelopes)
+    assert second["inserted"] == 0
+    assert second["duplicates"] == 3, second
+
+    events = await store.list(since=old_ts, until=old_ts + 10, limit=100)
+    assert len(events) == 3
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_search_text_finds_unique_token(tmp_path):
+    """RED: search_text finds a unique token from a tool_result and not from
+    another agent's store."""
+    store = AgentTraceStore(tmp_path, "searcher-agent")
+    now = time.time()
+    old_ts = now - 30 * 86400
+    envelopes = [
+        _envelope(id="srch-1", created_at=old_ts, kind="tool_result",
+                  payload={"tool": "shell", "result": "the-unicorn-secret-42"}),
+        _envelope(id="srch-2", created_at=old_ts + 5, kind="message_in",
+                  payload={"from": "user", "text": "unrelated chatter"}),
+    ]
+    await store.import_envelopes(envelopes)
+
+    hits = await store.search_text("unicorn secret", since=old_ts - 10, limit=10)
+    assert any(h.get("id") == "srch-1" for h in hits), hits
+    assert not any(h.get("id") == "srch-2" for h in hits), hits
+    await store.close()
+
+    other = AgentTraceStore(tmp_path, "other-agent")
+    other_envs = [
+        _envelope(id="oth-1", created_at=old_ts, kind="tool_result",
+                  payload={"tool": "shell", "result": "totally different topic"}),
+    ]
+    await other.import_envelopes(other_envs)
+    other_hits = await other.search_text("unicorn secret", since=old_ts - 10, limit=10)
+    assert other_hits == [], other_hits
+    await other.close()
