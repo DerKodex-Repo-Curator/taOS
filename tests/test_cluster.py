@@ -1084,11 +1084,15 @@ async def test_monitor_loop_leave_yielded_alone_no_leases():
     await mgr.register_worker(_make_worker("gpu-box"))
     mgr.heartbeat("gpu-box", status="yielded", drain_reason="gameplay")
 
-    # Simulate monitor loop: yielded workers are skipped
-    now = time.time()
-    for worker in mgr._workers.values():
-        if worker.status == "yielded":
-            # yielded should stay yielded, not be flipped to offline
+    # Run one monitor loop iteration — yielded workers are skipped
+    task = asyncio.create_task(mgr._monitor_loop())
+    try:
+        await asyncio.sleep(0.1)
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
             pass
 
     worker = mgr.get_worker("gpu-box")
