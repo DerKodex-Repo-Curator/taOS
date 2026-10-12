@@ -2012,7 +2012,6 @@ export function MessagesApp({
       if (target?.author_type === "agent") await apiEditAgentReply(msgId, content);
       else await apiEditMessage(msgId, content);
       setEditingMessageId(null);
-      setEditError(null);
     } catch (e) {
       setEditError((e as Error).message);
     }
@@ -2316,7 +2315,7 @@ export function MessagesApp({
             onCancelEdit={() => { setEditingMessageId(null); setEditError(null); }}
             onSaveEdit={handleSaveEdit}
             editError={editError}
-            onEditAgentReply={setEditingMessageId}
+            onEditAgentReply={(id) => { setEditingMessageId(id); setEditError(null); }}
             onToggleReaction={toggleReaction}
             showEmoji={showEmoji}
             onShowEmoji={setShowEmoji}

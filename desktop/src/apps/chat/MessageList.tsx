@@ -142,7 +142,7 @@ export interface MessageListProps {
   /** Start editing the last completed agent reply in place. */
   onEditAgentReply?: (msgId: string) => void;
   /** Error message when saving an edit fails. */
-  editError: string | null;
+  editError?: string | null;
 
   /* ---- reactions ---- */
   onToggleReaction: (messageId: string, emoji: string) => void;
