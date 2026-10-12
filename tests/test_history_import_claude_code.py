@@ -28,9 +28,9 @@ def _is_secret_file_read(path: str) -> bool:
 
 
 class TestIterRecords:
-    def test_yields_eight_records_from_nine_line_fixture(self):
+    def test_yields_nine_records_from_ten_line_fixture(self):
         records = list(iter_records(FIXTURE))
-        assert len(records) == 8
+        assert len(records) == 9
 
     def test_skipped_line_not_present(self):
         records = list(iter_records(FIXTURE))
@@ -171,8 +171,13 @@ class TestToEnvelopes:
     def test_is_meta_user_record_skipped(self):
         env = self._envelopes()
         blob = json.dumps(env)
+        # isMeta records are harness injections, not user prompts: skipped in
+        # the user branch for BOTH content shapes (list of text blocks and a
+        # plain string).
         assert "skill body injection" not in blob
+        assert "command caveat" not in blob
         assert all(e["id"] != "rec-u10" for e in env)
+        assert all(e["id"] != "rec-u11" for e in env)
 
 
 class TestToIndexLines:
@@ -186,7 +191,7 @@ class TestToIndexLines:
         )
         return to_index_lines(env)
 
-    def test_five_index_lines_for_eight_envelopes(self):
+    def test_five_index_lines_for_seven_envelopes(self):
         lines = self._lines()
         assert len(lines) == 5
 
