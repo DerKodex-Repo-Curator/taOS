@@ -572,7 +572,7 @@ class NotificationStore(BaseStore):
         if state == "unread":
             conds.append("COALESCE(nus.read_at, n.read) = 0")
         elif state == "read":
-            conds.append("COALESCE(nus.read_at, n.read) = 1")
+            conds.append("COALESCE(nus.read_at, n.read) != 0")
         elif state == "archived":
             conds.append("(n.archived = 1 OR nus.archived_at IS NOT NULL)")
         elif state == "active":

@@ -136,6 +136,14 @@ class TestNotificationStoreHistory:
         titles = {i["title"] for i in items}
         assert titles == {"read1"}
 
+    async def test_search_state_read_includes_marked_read_broadcast(self, notif_store):
+        await notif_store.add("broadcast-read", "for everyone")
+        broadcast_id = _id_by_title(await notif_store.list(), "broadcast-read")
+        await notif_store.mark_read(broadcast_id, user_id="u1")
+        items = await notif_store.search(user_id="u1", state="read")
+        titles = {i["title"] for i in items}
+        assert "broadcast-read" in titles
+
     async def test_search_state_archived(self, notif_store):
         await notif_store.add("active1", "msg", user_id="u1")
         await notif_store.add("archived1", "msg", user_id="u1")
@@ -458,6 +466,30 @@ class TestNotificationHistoryRoutes:
             titles = {i["title"] for i in items}
             assert "alice-only" in titles
             assert "bob-only" not in titles
+
+    async def test_history_state_read_includes_marked_read_broadcast(self, two_user_app):
+        app, alice_id, alice_token, bob_id, bob_token = two_user_app
+        store = app.state.notifications
+        await store.add("broadcast-read", "for everyone")
+        broadcast_id = _id_by_title(await store.list(), "broadcast-read")
+        await store.mark_read(broadcast_id, user_id=alice_id)
+        async with _alice_client(app, alice_token) as c:
+            resp = await c.get("/api/notifications/history", params={"state": "read"})
+            assert resp.status_code == 200
+            titles = {i["title"] for i in resp.json()["items"]}
+            assert "broadcast-read" in titles
+
+    async def test_history_limit_clamp_keeps_paging(self, two_user_app):
+        app, alice_id, alice_token, bob_id, bob_token = two_user_app
+        store = app.state.notifications
+        for i in range(201):
+            await store.add(f"notif-{i:03d}", f"msg {i}", user_id=alice_id)
+        async with _alice_client(app, alice_token) as c:
+            resp = await c.get("/api/notifications/history", params={"limit": 500})
+            assert resp.status_code == 200
+            data = resp.json()
+            assert len(data["items"]) == 200
+            assert data["next_before"] is not None
 
     async def test_history_both_see_broadcast(self, two_user_app):
         app, alice_id, alice_token, bob_id, bob_token = two_user_app

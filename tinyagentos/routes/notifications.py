@@ -260,6 +260,8 @@ async def list_notification_history(request: Request):
         except (ValueError, AttributeError):
             raise HTTPException(status_code=400, detail="invalid cursor")
 
+    limit = max(1, min(limit, 200))
+
     items = await store.search(
         user_id=user_id,
         q=q,
