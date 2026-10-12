@@ -18,7 +18,7 @@ const { markRemoteSpy, onLocalChangeSpy, disposeSpy, createSceneSyncSpy, flushSp
     dispose: disposeSpy,
     shouldApplyRemote: vi.fn(() => true),
     shouldApplyRemoteDelete: vi.fn(() => true),
-    flush: vi.fn(async () => {}),
+    flush: flushSpy,
   })),
   flushSpy: vi.fn(async () => {}),
 }));
@@ -39,6 +39,7 @@ vi.mock("@excalidraw/excalidraw", () => ({
     theme,
     onChange,
     excalidrawAPI,
+    ...props
   }: {
     initialData?: { elements?: { id?: string }[] };
     viewModeEnabled?: boolean;
@@ -57,6 +58,7 @@ vi.mock("@excalidraw/excalidraw", () => ({
         data-ids={(initialData?.elements ?? []).map((e) => e.id).join(",")}
         data-viewmode={String(!!viewModeEnabled)}
         data-theme={theme}
+        {...props}
       />
     );
   },
@@ -95,6 +97,7 @@ describe("ExcalidrawBoard", () => {
     parseSpy.mockClear();
     markRemoteSpy.mockClear();
     onLocalChangeSpy.mockClear();
+    flushSpy.mockClear();
     disposeSpy.mockClear();
     createSceneSyncSpy.mockClear();
     mockApi.updateScene.mockClear();
@@ -278,10 +281,10 @@ describe("ExcalidrawBoard", () => {
     createSceneSyncSpy.mockReset();
     markRemoteSpy.mockReset();
     onLocalChangeSpy.mockReset();
-    // Note: dispose is a property of the returned sync object, not a standalone spy
-    
+    // dispose is a property of the returned sync object
+
     const getElement = vi.fn((id: string) => ({ id, kind: "note" } as CanvasElement));
-    
+
     const { unmount } = render(
       <ExcalidrawBoard
         projectId="prj-1"
@@ -297,7 +300,10 @@ describe("ExcalidrawBoard", () => {
     unmount();
 
     // The flush and dispose functions should have been called
-    expect(createSceneSyncSpy).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => {
+      expect(flushSpy).toHaveBeenCalledTimes(1);
+      expect(disposeSpy).toHaveBeenCalledTimes(1);
+    });
   });
 
   it("keeps the same SceneSync when getElement changes but projectId stays the same", () => {
@@ -342,7 +348,7 @@ describe("ExcalidrawBoard", () => {
     createSceneSyncSpy.mockReset();
     markRemoteSpy.mockReset();
     onLocalChangeSpy.mockReset();
-    
+
     const { unmount } = render(
       <ExcalidrawBoard
         projectId="prj-1"
@@ -357,7 +363,10 @@ describe("ExcalidrawBoard", () => {
     unmount();
 
     // The flush and dispose functions should have been called
-    expect(createSceneSyncSpy).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => {
+      expect(flushSpy).toHaveBeenCalledTimes(1);
+      expect(disposeSpy).toHaveBeenCalledTimes(1);
+    });
   });
 
   it("api.updateScene receives captureUpdate: CaptureUpdateAction.NEVER", async () => {
