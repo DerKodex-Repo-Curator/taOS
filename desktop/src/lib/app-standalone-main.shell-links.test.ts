@@ -34,8 +34,8 @@ describe("app-standalone-main shell link routing", () => {
       configResolve = resolve;
     });
 
-    fetchMock.mockImplementation((input: RequestInfo | URL) => {
-      const url = String(input);
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.url;
       if (url === TAOS_AGENT_CONFIG_URL) {
         return configPromise;
       }
@@ -58,7 +58,10 @@ describe("app-standalone-main shell link routing", () => {
       booted = true;
     });
 
-    await Promise.resolve();
+    await vi.waitFor(() => {
+      const calls = fetchMock.mock.calls;
+      expect(calls.some(call => call[0] === TAOS_AGENT_CONFIG_URL)).toBe(true);
+    });
 
     expect(booted).toBe(false);
 
@@ -69,5 +72,30 @@ describe("app-standalone-main shell link routing", () => {
     window.open("https://example.com/", "_blank");
 
     expect(openUrlInShellMock).toHaveBeenCalledWith("https://example.com/");
+  });
+
+  it("renders even when the config fetch never resolves", async () => {
+    vi.useFakeTimers();
+    
+    let booted = false;
+    const bootPromise = import("../app-standalone-main").then(() => {
+      booted = true;
+    });
+
+    await vi.waitFor(() => {
+      const calls = fetchMock.mock.calls;
+      expect(calls.some(call => call[0] === TAOS_AGENT_CONFIG_URL)).toBe(true);
+    });
+
+    expect(booted).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(2000);
+
+    await bootPromise;
+
+    expect(booted).toBe(true);
+    expect(document.getElementById('root')).toHaveProperty('children');
+
+    vi.useRealTimers();
   });
 });
