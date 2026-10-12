@@ -1931,12 +1931,12 @@ export function MessagesApp({
       const res = await fetch("/api/chat/channels", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-body: JSON.stringify({
-            name: newChannel.name.trim(),
-            type: newChannel.type,
-            topic: newChannel.topic.trim() || undefined,
-            ...(scope?.projectId ? { project_id: scope.projectId } : {}),
-          }),
+        body: JSON.stringify({
+          name: newChannel.name.trim(),
+          type: newChannel.type,
+          topic: newChannel.topic.trim() || undefined,
+          ...(scope?.projectId ? { project_id: scope.projectId } : {}),
+        }),
       });
       if (res.ok) {
         const ch = await res.json();
@@ -2841,9 +2841,9 @@ className="shrink-0 p-0.5 rounded hover:bg-shell-surface-active transition-color
                 </select>
               </div>
               <div className="space-y-1">
-                <Label htmlFor="new-channel-description-mobile" className="block uppercase tracking-wider">Topic</Label>
+                <Label htmlFor="new-channel-topic-mobile" className="block uppercase tracking-wider">Topic</Label>
                 <Input
-                  id="new-channel-description-mobile"
+                  id="new-channel-topic-mobile"
                   value={newChannel.topic}
                   onChange={(e) => setNewChannel((s) => ({ ...s, topic: e.target.value }))}
                   placeholder="What's this channel about?"
@@ -2895,9 +2895,9 @@ className="shrink-0 p-0.5 rounded hover:bg-shell-surface-active transition-color
                   </select>
                 </div>
                 <div className="space-y-1">
-                  <Label htmlFor="new-channel-description" className="block uppercase tracking-wider">Topic</Label>
+                  <Label htmlFor="new-channel-topic" className="block uppercase tracking-wider">Topic</Label>
                   <Input
-                    id="new-channel-description"
+                    id="new-channel-topic"
                     value={newChannel.topic}
                     onChange={(e) => setNewChannel((s) => ({ ...s, topic: e.target.value }))}
                     placeholder="What's this channel about?"
