@@ -119,6 +119,9 @@ MAX_RETRIES = 3
 RETRY_BACKOFF_BASE = 2.0  # seconds -- grows to 2, 4, 8 for retries 1-3
 ERROR_COOLDOWN = 5.0      # seconds after a final error before accepting new messages
 
+_MAX_INFLIGHT = 4
+_SEMAPHORE = asyncio.Semaphore(_MAX_INFLIGHT)
+
 
 async def fetch_bootstrap(client: httpx.AsyncClient) -> dict:
     url = f"{BRIDGE_URL}/api/openclaw/bootstrap?agent={AGENT_NAME}"
@@ -165,6 +168,16 @@ def _suppress(reply, force):
         return reply
     stripped = (reply or "").strip().lower().strip(".!,;:")
     return None if stripped == "no_response" else reply
+
+async def _run_handle_user_message_limited(
+    client: httpx.AsyncClient,
+    evt: dict,
+    channel: dict,
+    _seen: set,
+    _error_until: list,
+) -> bool:
+    async with _SEMAPHORE:
+        return await handle_user_message(client, evt, channel, _seen, _error_until)
 
 
 async def _thinking(c: httpx.AsyncClient, ch_id, state: str, *,
@@ -337,7 +350,7 @@ async def sse_loop(client: httpx.AsyncClient, channel: dict, stop: asyncio.Event
                         if evt_type == "user_message" and evt_data:
                             try:
                                 evt = json.loads(evt_data)
-                                task = asyncio.create_task(handle_user_message(
+                                task = asyncio.create_task(_run_handle_user_message_limited(
                                     client, evt, channel, seen_ids, error_until))
                                 pending_tasks.add(task)
                                 task.add_done_callback(pending_tasks.discard)

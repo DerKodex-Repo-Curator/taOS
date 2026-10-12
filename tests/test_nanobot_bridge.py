@@ -355,3 +355,56 @@ class TestSeenBounded:
         assert "len(_seen) >= _MAX_SEEN" in BRIDGE_PY, "Missing bound check"
         assert "_seen.clear()" in BRIDGE_PY, "Missing clear on bound"
 
+
+
+# -- bounded concurrency test -------------------------------------------------
+
+class TestBoundedConcurrency:
+    def _make_channel(self):
+        return {
+            "events_url": "http://127.0.0.1:8900/sse",
+            "reply_url": "http://127.0.0.1:8900/reply",
+            "auth_bearer": "token",
+        }
+
+    def _make_evt(self, msg_id):
+        return {"id": msg_id, "trace_id": msg_id, "text": "hi", "force_respond": True}
+
+    def test_user_message_tasks_bounded(self, bridge_ns):
+        """Peak concurrent handle_user_message executions <= _MAX_INFLIGHT (4)."""
+        run_limited = bridge_ns.get("_run_handle_user_message_limited")
+        if run_limited is None:
+            pytest.skip("_run_handle_user_message_limited not found in bridge")
+        client = MagicMock()
+        client.post = AsyncMock(return_value=MagicMock(status_code=200))
+
+        peak = {"n": 0}
+        current = {"n": 0}
+
+        async def slow_call_nanobot(*args, **kwargs):
+            current["n"] += 1
+            if current["n"] > peak["n"]:
+                peak["n"] = current["n"]
+            await asyncio.sleep(0.05)
+            current["n"] -= 1
+            return "ok"
+
+        channel = self._make_channel()
+        events = 10
+
+        async def runner():
+            tasks = []
+            for i in range(events):
+                seen: set = set()
+                error_until: list = [0.0]
+                tasks.append(asyncio.create_task(
+                    run_limited(client, self._make_evt(f"m-{i}"), channel, seen, error_until)
+                ))
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            return results
+
+        with patch.dict(bridge_ns, {"call_nanobot": slow_call_nanobot}):
+            results = asyncio.run(runner())
+
+        assert all(r is True for r in results), results
+        assert peak["n"] <= 4, f"peak concurrent calls {peak['n']} > 4"
