@@ -7,6 +7,7 @@ import { CanvasElement, canvasApi } from "./canvas-api";
 import { elementToSkeleton } from "./element-to-excalidraw";
 import { mermaidToExcalidraw, type ExcalidrawElements } from "./mermaid-to-elements";
 import { createSceneSync, type SyncSceneElement } from "./excalidraw-sync";
+import { isPlaceholder } from "./tldraw-to-excalidraw";
 
 // Read-only Excalidraw view over the canonical CanvasElement scene (tldraw ->
 // Excalidraw migration). Most kinds map synchronously; mermaid/flowchart kinds
@@ -23,10 +24,26 @@ type ExcalidrawAPI = Parameters<
 
 type SkeletonInput = Parameters<typeof convertToExcalidrawElements>[0];
 
+// Branded types from Excalidraw (not exported from main module, use type assertions)
+type FileId = string & { _brand: "FileId" };
+type DataURL = string & { _brand: "DataURL" };
+type AllowedMimeType = 
+  | "image/svg+xml"
+  | "image/png"
+  | "image/jpeg"
+  | "image/gif"
+  | "image/webp"
+  | "image/bmp"
+  | "image/x-icon"
+  | "image/avif"
+  | "image/jfif"
+  | "application/octet-stream";
+
 export interface ExcalidrawBoardProps {
   elements: CanvasElement[];
   theme?: "light" | "dark";
   projectId?: string;
+  projectSlug?: string;
   elementId?: string | null;
   getElement?: (id: string) => CanvasElement | undefined;
   readOnly?: boolean;
@@ -39,26 +56,36 @@ function live(elements: CanvasElement[]): CanvasElement[] {
     .sort((a, b) => (a.z_index || 0) - (b.z_index || 0));
 }
 
+function firstNonEmptyString(...vals: unknown[]): string {
+  for (const v of vals) {
+    if (typeof v === "string" && v.length > 0) return v;
+  }
+  return "";
+}
+
+function a11yLabelFor(el: CanvasElement): string {
+  const p = (el.payload ?? {}) as Record<string, unknown>;
+  const text = firstNonEmptyString(p.text, p.title, p.label);
+  if (text) return `${el.kind}, ${el.author_id}, ${text}`;
+  return `${el.kind}, ${el.author_id}`;
+}
+
 export function ExcalidrawBoard({
   elements,
   theme = "light",
   projectId,
+  projectSlug,
   elementId,
   getElement,
   readOnly,
 }: ExcalidrawBoardProps) {
   const [api, setApi] = useState<ExcalidrawAPI | null>(null);
-  // Converted diagram elements keyed by the CanvasElement id; absent until the
-  // async mermaid conversion resolves.
   const [diagrams, setDiagrams] = useState<Record<string, ExcalidrawElements>>({});
 
-  // Keep the latest getElement in a ref so the sync can always read the current
-  // element map without recreating when the function identity changes.
   const getElementRef = useRef(getElement);
   getElementRef.current = getElement;
   const stableGetElement = useRef((id: string) => getElementRef.current?.(id)).current;
 
-  // Re-run conversion only when a diagram element's id/source/position changes.
   const diagramKey = useMemo(
     () =>
       JSON.stringify(
@@ -77,8 +104,6 @@ export function ExcalidrawBoard({
       return;
     }
     (async () => {
-      // Convert diagrams in parallel: each parse is independent, so the total
-      // wait is the slowest single diagram, not the sum.
       const converted = await Promise.all(
         diagramEls.map(async (el) => {
           const src = String((el.payload || {}).source ?? "");
@@ -90,36 +115,19 @@ export function ExcalidrawBoard({
     return () => {
       cancelled = true;
     };
-    // diagramKey captures the inputs that affect conversion.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [diagramKey]);
 
   const sceneElements = useMemo(() => {
-    // Walk the elements in z_index order (live() sorts them) so cross-kind
-    // layering is preserved: a diagram is not forced above a regular element
-    // that has a higher z_index. A ready diagram contributes its converted
-    // elements; everything else (regular kinds, and a diagram still converting)
-    // maps through the base skeleton.
     const ordered = live(elements);
     const readyDiagram = (el: CanvasElement): ExcalidrawElements | null => {
       const ready = DIAGRAM_KINDS.has(el.kind) ? diagrams[el.id] : undefined;
       return ready && ready.length > 0 ? ready : null;
     };
-    // Every skeleton goes through ONE convertToExcalidrawElements call: an
-    // arrow skeleton (mindmap_edge) binds start/end by the target's id, and the
-    // converter only resolves a binding to an element in the same call, so a
-    // per-element conversion leaves every edge unbound. Ready diagrams are
-    // already converted and are spliced back in below.
     const skeletons = ordered
       .filter((el) => !readyDiagram(el))
       .map((el) => elementToSkeleton(el, { rows: elements }));
     const converted =
       skeletons.length > 0 ? convertToExcalidrawElements(skeletons as unknown as SkeletonInput) : [];
-    // One skeleton can convert to several elements (a container plus its bound
-    // label text), so group by the row id elementToSkeleton stamps into
-    // customData; a label text carries no customData and follows its container.
-    // Map every stamped element first so a label emitted before its container
-    // still finds its row.
     const taosIdOf = (x: ExcalidrawElements[number]): string | undefined => {
       const taosId = (x.customData as { taos_id?: unknown } | undefined)?.taos_id;
       return typeof taosId === "string" ? taosId : undefined;
@@ -140,13 +148,12 @@ export function ExcalidrawBoard({
       if (group) group.push(x);
       else byRow.set(row, [x]);
     }
-    return ordered.flatMap((el) => readyDiagram(el) ?? byRow.get(el.id) ?? []);
+    return { elements: ordered.flatMap((el) => readyDiagram(el) ?? byRow.get(el.id) ?? []), byRow };
   }, [elements, diagrams]);
 
-  // Sync layer: created once per projectId when interactive (not readOnly).
-  // When active it receives every scene the board applies (markRemote) and
-  // every change Excalidraw reports (onLocalChange via onChange), and
-  // determines which writes to issue.
+  const sceneElementsArray = sceneElements.elements;
+  const byRow = sceneElements.byRow;
+
   const sync = useMemo(() => {
     if (!projectId || readOnly) return null;
     return createSceneSync({
@@ -157,39 +164,83 @@ export function ExcalidrawBoard({
     });
   }, [projectId, elementId, readOnly, stableGetElement]);
 
-  // Cleanup sync on unmount or when projectId/readOnly changes.
   useEffect(() => {
     if (!sync) return;
     return () => { const s = sync; void s.flush().catch(() => {}).finally(() => s.dispose()); };
   }, [sync]);
 
-  // Excalidraw reads initialData once at mount; push later scenes (async
-  // diagrams) through the imperative API. Fit the viewport to the content only
-  // on the first non-empty scene -- refitting on every update would yank a
-  // user's pan/zoom back once interactions land.
   const hasFit = useRef(false);
   useEffect(() => {
     if (!api) return;
-    api.updateScene({ elements: sceneElements, captureUpdate: CaptureUpdateAction.NEVER });
-    if (sync) sync.markRemote(sceneElements as unknown as readonly SyncSceneElement[]);
-    if (!hasFit.current && sceneElements.length > 0) {
-      api.scrollToContent(sceneElements, { fitToContent: true, animate: false });
+    api.updateScene({ elements: sceneElementsArray, captureUpdate: CaptureUpdateAction.NEVER });
+    if (sync) sync.markRemote(sceneElementsArray as unknown as readonly SyncSceneElement[]);
+    if (!hasFit.current && sceneElementsArray.length > 0) {
+      api.scrollToContent(sceneElementsArray, { fitToContent: true, animate: false });
       hasFit.current = true;
     }
-  }, [api, sceneElements, sync]);
+  }, [api, sceneElementsArray, sync]);
+
+  // Image fetching: track fetched fileIds to avoid refetching on re-render.
+  const fetchedFileIds = useRef<Set<string>>(new Set());
+  const fileIdToMimeType = useRef<Map<string, string>>(new Map());
+  useEffect(() => {
+    if (!api || !projectSlug) return;
+    const ordered = live(elements);
+    const imageRows = ordered.filter((el) => el.kind === "image");
+    for (const row of imageRows) {
+      const fileId = String((row.payload || {}).file_id ?? "");
+      if (!fileId || fetchedFileIds.current.has(fileId)) continue;
+      fetchedFileIds.current.add(fileId);
+      (async () => {
+        try {
+          const res = await fetch(`/api/projects/${projectSlug}/files/canvas/${fileId}`);
+          if (!res.ok) return;
+          const blob = await res.blob();
+          const mimeType = (blob.type || "image/png") as AllowedMimeType;
+          fileIdToMimeType.current.set(fileId, mimeType);
+          const reader = new FileReader();
+          reader.onload = () => {
+            if (api && reader.result) {
+              api.addFiles([{ id: fileId as FileId, dataURL: reader.result as DataURL, mimeType, created: Date.now() }]);
+            }
+          };
+          reader.readAsDataURL(blob);
+        } catch {
+          // best-effort: ignore fetch/read errors
+        }
+      })();
+    }
+  }, [api, projectSlug, elements]);
 
   const viewModeEnabled = !projectId || !!readOnly;
 
+  const orderedLive = live(elements);
+  const a11yItems = orderedLive.map((el) => {
+    const readyDiagram = DIAGRAM_KINDS.has(el.kind) ? diagrams[el.id] : undefined;
+    const convertedForRow = readyDiagram && readyDiagram.length > 0
+      ? readyDiagram
+      : byRow.get(el.id);
+    const hasPlaceholder = convertedForRow?.some((x) => isPlaceholder(x as any)) ?? false;
+    const label = hasPlaceholder
+      ? `not convertible, element ${el.id}`
+      : a11yLabelFor(el);
+    return <li key={el.id}>{label}</li>;
+  });
+
   return (
     <div style={{ position: "absolute", inset: 0 }} data-testid="excalidraw-board">
+      <ul className="sr-only" aria-label="Canvas elements" role="list">
+        {a11yItems}
+      </ul>
       <Excalidraw
         excalidrawAPI={setApi}
         theme={theme}
         viewModeEnabled={viewModeEnabled}
         zenModeEnabled
+        UIOptions={{ tools: { image: false } }}
         onChange={sync ? (els) => { void sync.onLocalChange(els as unknown as readonly SyncSceneElement[]); } : undefined}
         initialData={{
-          elements: sceneElements,
+          elements: sceneElementsArray,
           appState: {
             viewBackgroundColor: theme === "dark" ? "#0b0f17" : "#ffffff",
           },

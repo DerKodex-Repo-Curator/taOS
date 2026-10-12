@@ -26,7 +26,7 @@ export function CanvasView({
       <AppErrorBoundary key={projectId}>
         <Suspense fallback={null}>
           {getCanvasEngine() === "excalidraw" ? (
-            <ExcalidrawCanvas projectId={projectId} elementId={elementId} />
+            <ExcalidrawCanvas projectId={projectId} projectSlug={projectSlug} elementId={elementId} />
           ) : (
             <CanvasBoard projectId={projectId} projectSlug={projectSlug} elementId={elementId} />
           )}
