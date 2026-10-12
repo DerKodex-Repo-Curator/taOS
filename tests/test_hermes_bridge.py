@@ -165,10 +165,16 @@ class TestHandleUserMessageDedup:
     def _make_channel(self):
         return {"reply_url": "http://x/reply", "auth_bearer": "tok"}
 
+    def _mock_client(self):
+        """Create a client with post_reply mocked to succeed."""
+        client = MagicMock()
+        # Default successful response for post_reply
+        client.post = AsyncMock(return_value=MagicMock(status_code=200))
+        return client
+
     def test_duplicate_message_skipped(self, bridge_ns):
         handle = bridge_ns["handle_user_message"]
-        client = MagicMock()
-        client.post = AsyncMock()
+        client = self._mock_client()
         evt = self._make_evt()
         channel = self._make_channel()
         seen: set = set()
@@ -189,8 +195,7 @@ class TestHandleUserMessageDedup:
 
     def test_error_cooldown_blocks_subsequent_messages(self, bridge_ns):
         handle = bridge_ns["handle_user_message"]
-        client = MagicMock()
-        client.post = AsyncMock()
+        client = self._mock_client()
         channel = self._make_channel()
         seen: set = set()
         error_until: list = [0.0]
@@ -210,8 +215,7 @@ class TestHandleUserMessageDedup:
 
     def test_no_cooldown_for_non_error_reply(self, bridge_ns):
         handle = bridge_ns["handle_user_message"]
-        client = MagicMock()
-        client.post = AsyncMock()
+        client = self._mock_client()
         channel = self._make_channel()
         seen: set = set()
         error_until: list = [0.0]
@@ -227,6 +231,65 @@ class TestHandleUserMessageDedup:
         assert result2 is True
 
 
+# -- seen timing tests (RED-FIRST: these should FAIL on unmodified code) ---------
+
+class TestSeenTiming:
+    """Tests verifying _seen is updated ONLY after successful reply POST."""
+
+    def _make_evt(self, msg_id="msg-1", text="hello", force=False):
+        return {"id": msg_id, "trace_id": msg_id, "text": text, "force_respond": force}
+
+    def _make_channel(self):
+        return {"reply_url": "http://x/reply", "auth_bearer": "tok"}
+
+    def test_cooldown_suppressed_message_not_in_seen(self, bridge_ns):
+        """During error cooldown, handle_user_message returns False and id NOT in seen."""
+        handle = bridge_ns["handle_user_message"]
+        client = MagicMock()
+        client.post = AsyncMock()
+        channel = self._make_channel()
+        seen: set = set()
+        error_until: list = [float('inf')]  # cooldown active
+
+        with patch.dict(bridge_ns, {"call_hermes": AsyncMock(return_value="ok")}):
+            result = asyncio.run(handle(client, self._make_evt("m-cooldown"), channel, seen, error_until))
+
+        assert result is False
+        assert "m-cooldown" not in seen, "Cooldown-suppressed message must NOT be added to _seen"
+
+    def test_reply_post_failure_message_not_in_seen(self, bridge_ns):
+        """When reply POST fails, the id is NOT added to _seen."""
+        handle = bridge_ns["handle_user_message"]
+        client = MagicMock()
+        # Make post_reply fail by having the client.post raise an exception
+        client.post = AsyncMock(side_effect=Exception("network error"))
+        channel = self._make_channel()
+        seen: set = set()
+        error_until: list = [0.0]
+
+        with patch.dict(bridge_ns, {"call_hermes": AsyncMock(return_value="ok")}):
+            result = asyncio.run(handle(client, self._make_evt("m-post-fail"), channel, seen, error_until))
+
+        # The function returns False (reply POST failed)
+        # but the message id should NOT be in seen since POST failed
+        assert "m-post-fail" not in seen, "Message with failed reply POST must NOT be added to _seen"
+
+    def test_successful_reply_adds_to_seen(self, bridge_ns):
+        """On successful reply POST, the id IS added to _seen."""
+        handle = bridge_ns["handle_user_message"]
+        client = MagicMock()
+        client.post = AsyncMock(return_value=MagicMock(status_code=200))
+        channel = self._make_channel()
+        seen: set = set()
+        error_until: list = [0.0]
+
+        with patch.dict(bridge_ns, {"call_hermes": AsyncMock(return_value="ok")}):
+            result = asyncio.run(handle(client, self._make_evt("m-success"), channel, seen, error_until))
+
+        assert result is True
+        assert "m-success" in seen, "Successfully posted message must be added to _seen"
+
+
 # -- bounded _seen test --------------------------------------------------------
 
 class TestSeenBounded:
@@ -235,3 +298,4 @@ class TestSeenBounded:
         assert "_MAX_SEEN" in BRIDGE_PY, "Missing _MAX_SEEN constant"
         assert "len(_seen) >= _MAX_SEEN" in BRIDGE_PY, "Missing bound check"
         assert "_seen.clear()" in BRIDGE_PY, "Missing clear on bound"
+

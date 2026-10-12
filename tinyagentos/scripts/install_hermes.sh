@@ -255,7 +255,7 @@ async def call_hermes(client: httpx.AsyncClient, messages: list) -> str:
 
 
 async def post_reply(client: httpx.AsyncClient, reply_url: str, token: str,
-                     msg_id: str, trace_id: str, content: str, cid=None) -> None:
+                     msg_id: str, trace_id: str, content: str, cid=None) -> bool:
     body = {"kind": "final", "id": msg_id, "trace_id": trace_id, "content": content}
     if cid: body["channel_id"] = cid
     try:
@@ -265,8 +265,11 @@ async def post_reply(client: httpx.AsyncClient, reply_url: str, token: str,
                                   timeout=30)
         if resp.status_code >= 400:
             log.warning("reply POST %s: %s", resp.status_code, resp.text[:300])
+            return False
+        return True
     except Exception as e:
         log.warning("reply POST failed: %s", e)
+        return False
 
 
 async def handle_user_message(client: httpx.AsyncClient, evt: dict, channel: dict,
@@ -288,11 +291,6 @@ async def handle_user_message(client: httpx.AsyncClient, evt: dict, channel: dic
     if msg_id and msg_id in _seen:
         log.info("user_message id=%s already processed — skipping", msg_id)
         return False
-    if msg_id:
-        if len(_seen) >= _MAX_SEEN:
-            # Discard oldest half to keep memory bounded
-            _seen.clear()
-        _seen.add(msg_id)
 
     # Error cooldown: after a final failure, pause before accepting new messages
     now = asyncio.get_event_loop().time()
@@ -326,9 +324,15 @@ async def handle_user_message(client: httpx.AsyncClient, evt: dict, channel: dic
         log.warning("hermes error reply for id=%s — enabling %.1fs cooldown", msg_id, ERROR_COOLDOWN)
         _error_until[0] = asyncio.get_event_loop().time() + ERROR_COOLDOWN
 
-    await post_reply(client, channel["reply_url"], channel["auth_bearer"],
+    # Only mark as seen after successful reply POST
+    posted = await post_reply(client, channel["reply_url"], channel["auth_bearer"],
                      msg_id, trace_id, final, cid)
-    return True
+    if posted and msg_id:
+        if len(_seen) >= _MAX_SEEN:
+            # Discard oldest half to keep memory bounded
+            _seen.clear()
+        _seen.add(msg_id)
+    return posted
 
 
 async def sse_loop(client: httpx.AsyncClient, channel: dict, stop: asyncio.Event) -> None:
