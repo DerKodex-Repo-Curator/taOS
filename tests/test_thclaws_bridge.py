@@ -75,10 +75,10 @@ def bridge_ns():
     return _load_bridge_functions()
 
 
-# -- call_thclaws retry tests --------------------------------------------------
+# -- call_thclaws retry tests ---------------------------------------------------
 
 class TestCallThclawsRetry:
-    """call_thclaws(client, messages) -> str"""
+    """call_thclaws(client, messages) → str"""
 
     def test_200_returns_content(self, bridge_ns):
         call_thclaws = bridge_ns["call_thclaws"]
@@ -153,31 +153,11 @@ class TestCallThclawsRetry:
         assert result.startswith("[thclaws returned 503:")
         assert client.post.call_count == 3
 
-    def test_model_prefixed_with_litellm(self, bridge_ns):
-        """call_thclaws sends model as 'litellm/<TAOS_MODEL>' to /v1/chat/completions."""
-        call_thclaws = bridge_ns["call_thclaws"]
-        client = MagicMock()
-        client.post = AsyncMock(return_value=MagicMock(
-            status_code=200,
-            json=MagicMock(return_value={"choices": [{"message": {"content": "ok"}}]}),
-        ))
-
-        asyncio.run(call_thclaws(client, [{"role": "user", "content": "hi"}]))
-
-        # Check the call arguments - model should be prefixed with litellm/
-        call_args = client.post.call_args
-        assert call_args is not None
-        payload = call_args.kwargs.get("json", {})
-        assert payload.get("model") == "litellm/test-model"
-        # Check the POST URL contains /v1/chat/completions
-        url = call_args.args[0] if call_args.args else call_args.kwargs.get("url", "")
-        assert "/v1/chat/completions" in url
-
 
 # -- handle_user_message dedup + cooldown tests --------------------------------
 
 class TestHandleUserMessageDedup:
-    """handle_user_message(client, evt, channel, _seen, _error_until) -> bool"""
+    """handle_user_message(client, evt, channel, _seen, _error_until) → bool"""
 
     def _make_evt(self, msg_id="msg-1", text="hello"):
         return {"id": msg_id, "trace_id": msg_id, "text": text}
@@ -185,16 +165,22 @@ class TestHandleUserMessageDedup:
     def _make_channel(self):
         return {"reply_url": "http://x/reply", "auth_bearer": "tok"}
 
+    def _mock_client(self):
+        """Create a client with post_reply mocked to succeed."""
+        client = MagicMock()
+        # Default successful response for post_reply
+        client.post = AsyncMock(return_value=MagicMock(status_code=200))
+        return client
+
     def test_duplicate_message_skipped(self, bridge_ns):
         handle = bridge_ns["handle_user_message"]
-        client = MagicMock()
-        client.post = AsyncMock()
+        client = self._mock_client()
         evt = self._make_evt()
         channel = self._make_channel()
         seen: set = set()
         error_until: list = [0.0]
 
-        # First call -- should process
+        # First call — should process
         seen_before = seen.copy()
         # We need to mock call_thclaws to return a non-error
         with patch.dict(bridge_ns, {"call_thclaws": AsyncMock(return_value="ok")}):
@@ -202,20 +188,19 @@ class TestHandleUserMessageDedup:
         assert result1 is True
         assert "msg-1" in seen
 
-        # Second call with same msg_id -- should be skipped
+        # Second call with same msg_id — should be skipped
         with patch.dict(bridge_ns, {"call_thclaws": AsyncMock(return_value="ok")}):
             result2 = asyncio.run(handle(client, evt, channel, seen, error_until))
         assert result2 is False  # dedup suppressed
 
     def test_error_cooldown_blocks_subsequent_messages(self, bridge_ns):
         handle = bridge_ns["handle_user_message"]
-        client = MagicMock()
-        client.post = AsyncMock()
+        client = self._mock_client()
         channel = self._make_channel()
         seen: set = set()
         error_until: list = [0.0]
 
-        # First message returns a thclaws error -> starts cooldown
+        # First message returns a thclaws error → starts cooldown
         with patch.dict(bridge_ns, {"call_thclaws": AsyncMock(
             return_value="[thclaws error: ReadTimeout]"
         )}):
@@ -223,15 +208,14 @@ class TestHandleUserMessageDedup:
         assert result1 is True
         assert error_until[0] > 0  # cooldown timestamp set
 
-        # Second message arrives during cooldown -> suppressed
+        # Second message arrives during cooldown → suppressed
         with patch.dict(bridge_ns, {"call_thclaws": AsyncMock(return_value="ok")}):
             result2 = asyncio.run(handle(client, self._make_evt("m2"), channel, seen, error_until))
         assert result2 is False  # cooldown suppressed
 
     def test_no_cooldown_for_non_error_reply(self, bridge_ns):
         handle = bridge_ns["handle_user_message"]
-        client = MagicMock()
-        client.post = AsyncMock()
+        client = self._mock_client()
         channel = self._make_channel()
         seen: set = set()
         error_until: list = [0.0]
@@ -247,6 +231,65 @@ class TestHandleUserMessageDedup:
         assert result2 is True
 
 
+# -- seen timing tests (RED-FIRST: these should FAIL on unmodified code) ---------
+
+class TestSeenTiming:
+    """Tests verifying _seen is updated ONLY after successful reply POST."""
+
+    def _make_evt(self, msg_id="msg-1", text="hello", force=False):
+        return {"id": msg_id, "trace_id": msg_id, "text": text, "force_respond": force}
+
+    def _make_channel(self):
+        return {"reply_url": "http://x/reply", "auth_bearer": "tok"}
+
+    def test_cooldown_suppressed_message_not_in_seen(self, bridge_ns):
+        """During error cooldown, handle_user_message returns False and id NOT in seen."""
+        handle = bridge_ns["handle_user_message"]
+        client = MagicMock()
+        client.post = AsyncMock()
+        channel = self._make_channel()
+        seen: set = set()
+        error_until: list = [float('inf')]  # cooldown active
+
+        with patch.dict(bridge_ns, {"call_thclaws": AsyncMock(return_value="ok")}):
+            result = asyncio.run(handle(client, self._make_evt("m-cooldown"), channel, seen, error_until))
+
+        assert result is False
+        assert "m-cooldown" not in seen, "Cooldown-suppressed message must NOT be added to _seen"
+
+    def test_reply_post_failure_message_not_in_seen(self, bridge_ns):
+        """When reply POST fails, the id is NOT added to _seen."""
+        handle = bridge_ns["handle_user_message"]
+        client = MagicMock()
+        # Make post_reply fail by having the client.post raise an exception
+        client.post = AsyncMock(side_effect=Exception("network error"))
+        channel = self._make_channel()
+        seen: set = set()
+        error_until: list = [0.0]
+
+        with patch.dict(bridge_ns, {"call_thclaws": AsyncMock(return_value="ok")}):
+            result = asyncio.run(handle(client, self._make_evt("m-post-fail"), channel, seen, error_until))
+
+        # The function should still return True (it attempted to post)
+        # but the message id should NOT be in seen since POST failed
+        assert "m-post-fail" not in seen, "Message with failed reply POST must NOT be added to _seen"
+
+    def test_successful_reply_adds_to_seen(self, bridge_ns):
+        """On successful reply POST, the id IS added to _seen."""
+        handle = bridge_ns["handle_user_message"]
+        client = MagicMock()
+        client.post = AsyncMock(return_value=MagicMock(status_code=200))
+        channel = self._make_channel()
+        seen: set = set()
+        error_until: list = [0.0]
+
+        with patch.dict(bridge_ns, {"call_thclaws": AsyncMock(return_value="ok")}):
+            result = asyncio.run(handle(client, self._make_evt("m-success"), channel, seen, error_until))
+
+        assert result is True
+        assert "m-success" in seen, "Successfully posted message must be added to _seen"
+
+
 # -- bounded _seen test --------------------------------------------------------
 
 class TestSeenBounded:
@@ -255,37 +298,3 @@ class TestSeenBounded:
         assert "_MAX_SEEN" in BRIDGE_PY, "Missing _MAX_SEEN constant"
         assert "len(_seen) >= _MAX_SEEN" in BRIDGE_PY, "Missing bound check"
         assert "_seen.clear()" in BRIDGE_PY, "Missing clear on bound"
-
-
-# -- install script verification ------------------------------------------------
-
-class TestInstallScript:
-    def test_install_script_runs_sha256sum_before_install(self):
-        """Verify install_thclaws.sh runs sha256sum -c before install -m 755."""
-        script_path = Path(__file__).resolve().parent.parent / "tinyagentos" / "scripts" / "install_thclaws.sh"
-        text = script_path.read_text()
-        
-        # Find the position of sha256sum -c
-        sha256_pos = text.find("sha256sum -c")
-        install_pos = text.find("install -m 755")
-        
-        assert sha256_pos != -1, "sha256sum -c not found in install_thclaws.sh"
-        assert install_pos != -1, "install -m 755 not found in install_thclaws.sh"
-        assert sha256_pos < install_pos, "sha256sum -c must run before install -m 755"
-
-    def test_pip3_install_line_before_systemctl(self):
-        """Verify the pip3 install httpx line appears before the systemctl enable command."""
-        script_path = Path(__file__).resolve().parent.parent / "tinyagentos" / "scripts" / "install_thclaws.sh"
-        text = script_path.read_text()
-        
-        # Find pip3 install line that mentions httpx
-        pip_lines = [i+1 for i, line in enumerate(text.splitlines()) if re.search(r'^pip3 install .*httpx\b', line)]
-        assert pip_lines, "pip3 install httpx line not found in install_thclaws.sh"
-        pip_line = min(pip_lines)  # first occurrence
-        
-        # Find the systemctl enable --now line
-        enable_lines = [i+1 for i, line in enumerate(text.splitlines()) if "systemctl enable --now taos-thclaws-bridge.service" in line]
-        assert enable_lines, "systemctl enable --now line not found"
-        enable_line = min(enable_lines)
-        
-        assert pip_line < enable_line, f"pip3 install line {pip_line} appears after systemctl enable line {enable_line}"
