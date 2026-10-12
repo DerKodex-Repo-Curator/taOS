@@ -309,3 +309,88 @@ class TestManifest:
         index_lines = to_index_lines(env)
         m = manifest(FIXTURE, env, index_lines)
         assert m["bytes_in"] == FIXTURE.stat().st_size
+
+
+class TestIterRecordsNonDictLines:
+    """Test that iter_records skips valid JSON lines that are not objects."""
+
+    def test_skips_non_dict_json_lines(self, tmp_path: Path):
+        """Non-dict JSON lines (array, number, string) should be skipped, not crash."""
+        mixed_file = tmp_path / "mixed.jsonl"
+        good_record = {
+            "type": "user",
+            "sessionId": "sess-test",
+            "uuid": "rec-good",
+            "timestamp": "2026-10-10T10:00:00.000Z",
+            "message": {"content": "good"},
+        }
+        mixed_file.write_text(
+            json.dumps(good_record) + "\n"
+            + "[]\n"
+            + "123\n"
+            + '"x"\n',
+            encoding="utf-8",
+        )
+
+        records = list(iter_records(mixed_file))
+        assert len(records) == 1
+        assert records[0]["uuid"] == "rec-good"
+
+    def test_to_envelopes_does_not_raise_on_non_dict_lines(self, tmp_path: Path):
+        """to_envelopes should not raise AttributeError when iter_records yields non-dicts."""
+        mixed_file = tmp_path / "mixed.jsonl"
+        good_record = {
+            "type": "user",
+            "sessionId": "sess-test",
+            "uuid": "rec-good",
+            "timestamp": "2026-10-10T10:00:00.000Z",
+            "message": {"content": "good"},
+        }
+        mixed_file.write_text(
+            json.dumps(good_record) + "\n"
+            + "[]\n"
+            + "123\n"
+            + '"x"\n',
+            encoding="utf-8",
+        )
+
+        records = iter_records(mixed_file)
+        env = to_envelopes(
+            records,
+            agent_name="claude-code",
+            redact=_redact,
+            is_secret_file_read=_is_secret_file_read,
+        )
+        assert len(env) == 1
+        assert env[0]["kind"] == "message_in"
+        assert env[0]["id"] == "rec-good"
+
+    def test_manifest_skipped_lines_counts_non_dict_lines(self, tmp_path: Path):
+        """_count_skipped_lines (via manifest) should count non-dict JSON lines as skipped."""
+        mixed_file = tmp_path / "mixed.jsonl"
+        good_record = {
+            "type": "user",
+            "sessionId": "sess-test",
+            "uuid": "rec-good",
+            "timestamp": "2026-10-10T10:00:00.000Z",
+            "message": {"content": "good"},
+        }
+        mixed_file.write_text(
+            json.dumps(good_record) + "\n"
+            + "[]\n"
+            + "123\n"
+            + '"x"\n',
+            encoding="utf-8",
+        )
+
+        records = list(iter_records(mixed_file))
+        env = to_envelopes(
+            records,
+            agent_name="claude-code",
+            redact=_redact,
+            is_secret_file_read=_is_secret_file_read,
+        )
+        index_lines = to_index_lines(env)
+        m = manifest(mixed_file, env, index_lines)
+        assert m["skipped_lines"] == 3
+        assert m["envelopes"] == 1
