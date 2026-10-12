@@ -948,6 +948,7 @@ export function MessagesApp({
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
   const [overflowMenu, setOverflowMenu] = useState<{ messageId: string; x: number; y: number } | null>(null);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
+  const [editError, setEditError] = useState<string | null>(null);
   const [pinnedPopoverOpen, setPinnedPopoverOpen] = useState(false);
   const [pinnedMessages, setPinnedMessages] = useState<PinnedMessage[]>([]);
   const [showAllThreads, setShowAllThreads] = useState(false);
@@ -2000,17 +2001,19 @@ export function MessagesApp({
   /* ---- overflow menu handlers ---- */
   const handleEdit = (msgId: string) => {
     setEditingMessageId(msgId);
+    setEditError(null);
     setOverflowMenu(null);
   };
 
   const handleSaveEdit = async (msgId: string, content: string) => {
+    setEditError(null);
     try {
       const target = messages.find((m) => m.id === msgId);
       if (target?.author_type === "agent") await apiEditAgentReply(msgId, content);
       else await apiEditMessage(msgId, content);
       setEditingMessageId(null);
     } catch (e) {
-      setSendError((e as Error).message);
+      setEditError((e as Error).message);
     }
   };
 
@@ -2309,9 +2312,10 @@ export function MessagesApp({
             pinnedPopoverOpen={pinnedPopoverOpen}
             onTogglePinnedPopover={() => setPinnedPopoverOpen((o) => !o)}
             editingMessageId={editingMessageId}
-            onCancelEdit={() => setEditingMessageId(null)}
+            onCancelEdit={() => { setEditingMessageId(null); setEditError(null); }}
             onSaveEdit={handleSaveEdit}
-            onEditAgentReply={setEditingMessageId}
+            editError={editError}
+            onEditAgentReply={(id) => { setEditingMessageId(id); setEditError(null); }}
             onToggleReaction={toggleReaction}
             showEmoji={showEmoji}
             onShowEmoji={setShowEmoji}

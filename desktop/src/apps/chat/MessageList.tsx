@@ -141,6 +141,8 @@ export interface MessageListProps {
   onSaveEdit: (msgId: string, content: string) => void;
   /** Start editing the last completed agent reply in place. */
   onEditAgentReply?: (msgId: string) => void;
+  /** Error message when saving an edit fails. */
+  editError?: string | null;
 
   /* ---- reactions ---- */
   onToggleReaction: (messageId: string, emoji: string) => void;
@@ -220,6 +222,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(funct
   onCancelEdit,
   onSaveEdit,
   onEditAgentReply,
+  editError,
   onToggleReaction,
   showEmoji,
   onShowEmoji,
@@ -587,6 +590,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(funct
                       initial={msg.content}
                       onSave={(content) => onSaveEdit(msg.id, content)}
                       onCancel={onCancelEdit}
+                      error={editError}
                     />
                   ) : (
                     <div className="relative">
