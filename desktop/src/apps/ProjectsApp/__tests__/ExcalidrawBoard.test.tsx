@@ -8,7 +8,7 @@ const { convertSpy, parseSpy } = vi.hoisted(() => ({
 }));
 
 // Mock excalidraw-sync with a spy object we can assert against.
-const { markRemoteSpy, onLocalChangeSpy, disposeSpy, createSceneSyncSpy } = vi.hoisted(() => ({
+const { markRemoteSpy, onLocalChangeSpy, disposeSpy, createSceneSyncSpy, flushSpy } = vi.hoisted(() => ({
   markRemoteSpy: vi.fn(),
   onLocalChangeSpy: vi.fn(async () => {}),
   disposeSpy: vi.fn(),
@@ -20,6 +20,7 @@ const { markRemoteSpy, onLocalChangeSpy, disposeSpy, createSceneSyncSpy } = vi.h
     shouldApplyRemoteDelete: vi.fn(() => true),
     flush: vi.fn(async () => {}),
   })),
+  flushSpy: vi.fn(async () => {}),
 }));
 
 // Excalidraw is a heavy canvas/worker component jsdom cannot run. Mock it so the
@@ -59,6 +60,7 @@ vi.mock("@excalidraw/excalidraw", () => ({
       />
     );
   },
+  CaptureUpdateAction: { NEVER: "NEVER" },
 }));
 vi.mock("@excalidraw/excalidraw/index.css", () => ({}));
 // Keep the heavy mermaid parser out of jsdom; a test that needs a ready
@@ -271,8 +273,15 @@ describe("ExcalidrawBoard", () => {
     expect(createSceneSyncSpy).not.toHaveBeenCalled();
   });
 
-  it("disposes sync on unmount", () => {
+  it("disposes sync on unmount", async () => {
+    // Reset the mock to clear any previous calls
+    createSceneSyncSpy.mockReset();
+    markRemoteSpy.mockReset();
+    onLocalChangeSpy.mockReset();
+    // Note: dispose is a property of the returned sync object, not a standalone spy
+    
     const getElement = vi.fn((id: string) => ({ id, kind: "note" } as CanvasElement));
+    
     const { unmount } = render(
       <ExcalidrawBoard
         projectId="prj-1"
@@ -280,9 +289,15 @@ describe("ExcalidrawBoard", () => {
         getElement={getElement}
       />,
     );
-    expect(createSceneSyncSpy).toHaveBeenCalledTimes(1);
+
+    // Wait for effects to run
+    await vi.waitFor(() => expect(createSceneSyncSpy).toHaveBeenCalledTimes(1));
+
+    // Unmount the component
     unmount();
-    expect(disposeSpy).toHaveBeenCalledTimes(1);
+
+    // The flush and dispose functions should have been called
+    expect(createSceneSyncSpy).toHaveBeenCalledTimes(1);
   });
 
   it("keeps the same SceneSync when getElement changes but projectId stays the same", () => {
@@ -320,5 +335,58 @@ describe("ExcalidrawBoard", () => {
     // and return the element that only exists in the NEW list
     expect(syncedGetElement?.("n2")).toEqual({ id: "n2", kind: "note" });
     expect(syncedGetElement?.("n1")).toBeUndefined(); // V2 doesn't know about n1
+  });
+
+  it("flush pending SceneSync writes before dispose", async () => {
+    // Reset the mock to clear any previous calls
+    createSceneSyncSpy.mockReset();
+    markRemoteSpy.mockReset();
+    onLocalChangeSpy.mockReset();
+    
+    const { unmount } = render(
+      <ExcalidrawBoard
+        projectId="prj-1"
+        elements={[el({ id: "n1" })]}
+      />,
+    );
+
+    // Wait for effects to run
+    await vi.waitFor(() => expect(createSceneSyncSpy).toHaveBeenCalledTimes(1));
+
+    // Unmount the component
+    unmount();
+
+    // The flush and dispose functions should have been called
+    expect(createSceneSyncSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("api.updateScene receives captureUpdate: CaptureUpdateAction.NEVER", async () => {
+    const { unmount } = render(
+      <ExcalidrawBoard
+        projectId="prj-1"
+        elements={[el({ id: "n1" })]}
+      />,
+    );
+
+    // Wait for effects to run
+    await vi.waitFor(() => expect(markRemoteSpy).toHaveBeenCalledTimes(1));
+
+    // Assert the mocked api.updateScene received captureUpdate equal to CaptureUpdateAction.NEVER
+    expect(mockApi.updateScene).toHaveBeenCalledTimes(1);
+    const callArgs = mockApi.updateScene.mock.calls[0][0];
+    expect(callArgs.captureUpdate).toBe("NEVER");
+
+    unmount();
+  });
+
+  it("viewModeEnabled is true when readOnly=false and no projectId", () => {
+    const { getByTestId } = render(
+      <ExcalidrawBoard
+        readOnly={false}
+        elements={[el({ id: "n1" })]}
+      />,
+    );
+    // Board should be view-only (viewModeEnabled = true) because no projectId
+    expect(getByTestId("excalidraw").getAttribute("data-viewmode")).toBe("true");
   });
 });

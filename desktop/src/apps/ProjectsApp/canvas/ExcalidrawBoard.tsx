@@ -1,7 +1,7 @@
 import "./excalidraw-assets";
 import { useMemo, useState, useEffect, useRef } from "react";
 import type { ComponentProps } from "react";
-import { Excalidraw, convertToExcalidrawElements } from "@excalidraw/excalidraw";
+import { Excalidraw, convertToExcalidrawElements, CaptureUpdateAction } from "@excalidraw/excalidraw";
 import "@excalidraw/excalidraw/index.css";
 import { CanvasElement, canvasApi } from "./canvas-api";
 import { elementToSkeleton } from "./element-to-excalidraw";
@@ -160,7 +160,7 @@ export function ExcalidrawBoard({
   // Cleanup sync on unmount or when projectId/readOnly changes.
   useEffect(() => {
     if (!sync) return;
-    return () => sync.dispose();
+    return () => { const s = sync; void s.flush().catch(() => {}).finally(() => s.dispose()); };
   }, [sync]);
 
   // Excalidraw reads initialData once at mount; push later scenes (async
@@ -170,7 +170,7 @@ export function ExcalidrawBoard({
   const hasFit = useRef(false);
   useEffect(() => {
     if (!api) return;
-    api.updateScene({ elements: sceneElements });
+    api.updateScene({ elements: sceneElements, captureUpdate: CaptureUpdateAction.NEVER });
     if (sync) sync.markRemote(sceneElements as unknown as readonly SyncSceneElement[]);
     if (!hasFit.current && sceneElements.length > 0) {
       api.scrollToContent(sceneElements, { fitToContent: true, animate: false });
@@ -178,7 +178,7 @@ export function ExcalidrawBoard({
     }
   }, [api, sceneElements, sync]);
 
-  const viewModeEnabled = readOnly ?? !projectId;
+  const viewModeEnabled = !projectId || !!readOnly;
 
   return (
     <div style={{ position: "absolute", inset: 0 }} data-testid="excalidraw-board">
