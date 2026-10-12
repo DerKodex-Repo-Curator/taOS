@@ -1,0 +1,2 @@
+### Fixed
+- SceneSync is no longer disposed and recreated on every canvas update when `getElement` changes, preventing silent loss of pending local edits (shape drags, text changes). The sync now lives for the lifetime of `(projectId, elementId, readOnly)` and receives a stable `getElement` that always forwards to the latest element map.

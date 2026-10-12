@@ -52,6 +52,12 @@ export function ExcalidrawBoard({
   // async mermaid conversion resolves.
   const [diagrams, setDiagrams] = useState<Record<string, ExcalidrawElements>>({});
 
+  // Keep the latest getElement in a ref so the sync can always read the current
+  // element map without recreating when the function identity changes.
+  const getElementRef = useRef(getElement);
+  getElementRef.current = getElement;
+  const stableGetElement = useRef((id: string) => getElementRef.current?.(id)).current;
+
   // Re-run conversion only when a diagram element's id/source/position changes.
   const diagramKey = useMemo(
     () =>
@@ -147,9 +153,9 @@ export function ExcalidrawBoard({
       projectId,
       elementId: elementId ?? null,
       api: canvasApi,
-      getElement,
+      getElement: stableGetElement,
     });
-  }, [projectId, elementId, getElement, readOnly]);
+  }, [projectId, elementId, readOnly, stableGetElement]);
 
   // Cleanup sync on unmount or when projectId/readOnly changes.
   useEffect(() => {

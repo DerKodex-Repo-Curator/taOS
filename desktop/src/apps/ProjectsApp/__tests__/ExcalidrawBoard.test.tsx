@@ -203,9 +203,11 @@ describe("ExcalidrawBoard", () => {
     expect(getByTestId("excalidraw").getAttribute("data-viewmode")).toBe("false");
     // Sync should have been created once.
     expect(createSceneSyncSpy).toHaveBeenCalledTimes(1);
-    expect(createSceneSyncSpy).toHaveBeenCalledWith(
-      expect.objectContaining({ projectId: "prj-1", elementId: null, getElement }),
-    );
+    // The sync receives a stable getElement wrapper that forwards to the latest getElement.
+    const createCall = createSceneSyncSpy.mock.calls[0][0] as { getElement?: (id: string) => CanvasElement | undefined };
+    expect(typeof createCall.getElement).toBe("function");
+    // Verify the wrapper forwards to the provided getElement.
+    expect(createCall.getElement?.("n1")).toEqual({ id: "n1", kind: "note" });
     // Call the exposed onChange (simulating Excalidraw firing onChange).
     const onChange = (window as unknown as { __excalidrawOnChange?: (els: unknown[]) => void }).__excalidrawOnChange;
     expect(onChange).toBeDefined();
@@ -281,5 +283,42 @@ describe("ExcalidrawBoard", () => {
     expect(createSceneSyncSpy).toHaveBeenCalledTimes(1);
     unmount();
     expect(disposeSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the same SceneSync when getElement changes but projectId stays the same", () => {
+    const getElementV1 = vi.fn((id: string) => (id === "n1" ? ({ id, kind: "note" } as CanvasElement) : undefined));
+    const { rerender } = render(
+      <ExcalidrawBoard
+        projectId="prj-1"
+        elements={[el({ id: "n1" })]}
+        getElement={getElementV1}
+      />,
+    );
+    expect(createSceneSyncSpy).toHaveBeenCalledTimes(1);
+    expect(disposeSpy).not.toHaveBeenCalled();
+
+    // Capture the getElement that was passed to createSceneSync
+    const createCall = createSceneSyncSpy.mock.calls[0][0] as { getElement?: (id: string) => CanvasElement | undefined };
+    const syncedGetElement = createCall.getElement;
+
+    // Rerender with a NEW element list and a NEW getElement function (same projectId)
+    const getElementV2 = vi.fn((id: string) => (id === "n2" ? ({ id, kind: "note" } as CanvasElement) : undefined));
+    rerender(
+      <ExcalidrawBoard
+        projectId="prj-1"
+        elements={[el({ id: "n1" }), el({ id: "n2" })]}
+        getElement={getElementV2}
+      />,
+    );
+
+    // createSceneSync should NOT be called again (still exactly once total)
+    expect(createSceneSyncSpy).toHaveBeenCalledTimes(1);
+    // dispose should NOT have been called
+    expect(disposeSpy).not.toHaveBeenCalled();
+
+    // The getElement passed to createSceneSync should now forward to the latest (V2) map
+    // and return the element that only exists in the NEW list
+    expect(syncedGetElement?.("n2")).toEqual({ id: "n2", kind: "note" });
+    expect(syncedGetElement?.("n1")).toBeUndefined(); // V2 doesn't know about n1
   });
 });
