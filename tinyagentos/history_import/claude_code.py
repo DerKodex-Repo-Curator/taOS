@@ -112,7 +112,7 @@ def _short_arg(args: dict) -> str:
 
 
 def _count_skipped_lines(path) -> int:
-    """Count non-blank lines in *path* that fail JSON decoding."""
+    """Count non-blank lines in *path* that fail JSON decoding or are not objects."""
     count = 0
     with open(path, encoding="utf-8") as f:
         for line in f:
@@ -120,8 +120,11 @@ def _count_skipped_lines(path) -> int:
             if not line:
                 continue
             try:
-                json.loads(line)
+                value = json.loads(line)
             except json.JSONDecodeError:
+                count += 1
+                continue
+            if not isinstance(value, dict):
                 count += 1
     return count
 
@@ -134,7 +137,7 @@ def _count_skipped_lines(path) -> int:
 def iter_records(path) -> Iterator[dict]:
     """Yield parsed JSON records from a Claude Code .jsonl session file.
 
-    Lines that fail JSON decoding are silently skipped.
+    Lines that fail JSON decoding or are not JSON objects are silently skipped.
     """
     with open(path, encoding="utf-8") as f:
         for line in f:
@@ -142,9 +145,12 @@ def iter_records(path) -> Iterator[dict]:
             if not line:
                 continue
             try:
-                yield json.loads(line)
+                value = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if not isinstance(value, dict):
+                continue
+            yield value
 
 
 def to_envelopes(
