@@ -97,6 +97,9 @@ torrent = ["libtorrent>=2.0.9"]
 # bluetooth_unavailable when it (or an adapter) is missing, instead of every
 # install failing to boot without it.
 ble = ["bleak>=0.22.0"]
+# Cloud agent MCP endpoint (S4): streamable-HTTP MCP server for external agents.
+# The official MCP Python SDK is optional; without it the route answers 503.
+mcp = ["mcp==2.3.0"]
 # DEPRECATED, intentionally empty. The LiteLLM process is gone (#3313), but the
 # updater that RUNS an update is the OLD code already on the box, and before
 # #3313 it called `uv sync --frozen --extra proxy`. uv refuses an undefined
