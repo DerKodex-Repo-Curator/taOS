@@ -138,8 +138,10 @@ export interface ScopeRequest {
   requested_scopes: string[];
   project_id: string | null;
   reason: string;
+  duration_secs: number | null;
   status: string;
   created_ts: string;
+  decided_ts: string | null;
 }
 
 /**
@@ -258,6 +260,171 @@ function PendingScopeRequests({
 }
 
 /* ------------------------------------------------------------------ */
+/*  ProjectGrantsPanel                                                  */
+/*                                                                      */
+/*  Per-project grant surface: shows the active grants an agent holds   */
+/*  on each project (grouped by project) and offers a per-scope revoke  */
+/*  button that calls POST                                             */
+/*  /api/projects/{project_id}/members/revoke-agent, the same endpoint  */
+/*  used by assign-agent reconcile. (taOS #2148 follow-up / #2985)      */
+/* ------------------------------------------------------------------ */
+
+interface GrantRow {
+  canonical_id: string;
+  scope: string;
+  tier: string;
+  project_id: string | null;
+  granted_at: string;
+  expires_at: string | null;
+}
+
+async function revokeAgentScopeFromProject(
+  canonicalId: string,
+  projectId: string,
+  scope: string,
+): Promise<void> {
+  const res = await fetch(
+    `/api/projects/${encodeURIComponent(projectId)}/members/revoke-agent`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ canonical_id: canonicalId, scopes: [scope] }),
+    },
+  );
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error((err as { error?: string }).error ?? `HTTP ${res.status}`);
+  }
+}
+
+function ProjectGrantsPanel({
+  canonicalId,
+  agentLabel,
+  onRevoked,
+}: {
+  canonicalId: string;
+  agentLabel: string;
+  onRevoked: () => void;
+}) {
+  // Admin-only surface. The data comes from GET /api/agents/registry/grants,
+  // which is admin-gated (or a registry feed JWT), and the revoke button posts
+  // to the owner-or-admin revoke-agent route. A non-admin project owner has no
+  // readable source for these rows, so the parent renders this panel for
+  // admins only rather than showing an owner a guaranteed 403.
+  const [grants, setGrants] = useState<GrantRow[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [revokingScope, setRevokingScope] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(
+        `/api/agents/registry/grants?canonical_id=${encodeURIComponent(canonicalId)}`,
+        { credentials: "include" },
+      );
+      if (!res.ok) {
+        setError(`Failed to load grants (${res.status})`);
+        setGrants([]);
+        return;
+      }
+      const data = (await res.json()) as { grants?: GrantRow[] };
+      setGrants(Array.isArray(data.grants) ? data.grants : []);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Network error");
+    } finally {
+      setLoading(false);
+    }
+  }, [canonicalId]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  // Group grants by project_id.
+  const byProject = new Map<string | null, GrantRow[]>();
+  for (const g of grants) {
+    const key = g.project_id;
+    const arr = byProject.get(key) ?? [];
+    arr.push(g);
+    byProject.set(key, arr);
+  }
+
+  async function handleRevoke(scope: string, projectId: string | null) {
+    if (projectId === null) return; // Global grants are revoked via the registry entry revoke button.
+    if (!window.confirm(`Revoke \`${scope}\` from ${agentLabel} on this project?`)) return;
+    setRevokingScope(scope);
+    try {
+      await revokeAgentScopeFromProject(canonicalId, projectId, scope);
+      void load();
+      onRevoked();
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Network error");
+    } finally {
+      setRevokingScope(null);
+    }
+  }
+
+  return (
+    <section
+      className="mt-2 pt-2 border-t border-white/5"
+      aria-label={`Project grants for ${agentLabel}`}
+    >
+      <div className="flex items-center gap-2 text-[10px] text-shell-text-tertiary uppercase mb-1.5">
+        <ScrollText size={10} />
+        <span>Project grants</span>
+      </div>
+      {loading && (
+        <div className="text-[11px] text-shell-text-tertiary py-1">Loading grants…</div>
+      )}
+      {error && (
+        <div className="text-[11px] text-red-400" role="alert">{error}</div>
+      )}
+      {byProject.size === 0 && !loading && !error && (
+        <div className="text-[11px] text-shell-text-tertiary py-1">
+          No project-bound grants.
+        </div>
+      )}
+      {[...byProject.entries()].map(([projectId, scopes]) => (
+        <div
+          key={projectId ?? "global"}
+          className="mb-2 last:mb-0"
+        >
+          <div className="text-[10px] text-shell-text-tertiary mb-1">
+            {projectId ? `Project: ${projectId}` : "Global"}
+          </div>
+          <div className="flex flex-wrap gap-1">
+            {scopes.map((g) => (
+              <span
+                key={`${g.scope}-${projectId}`}
+                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] bg-white/5 border border-white/10"
+                title={`Granted ${g.granted_at}`}
+              >
+                <code className="font-mono">{g.scope}</code>
+                {projectId && (
+                  <button
+                    type="button"
+                    onClick={() => handleRevoke(g.scope, projectId)}
+                    disabled={revokingScope === g.scope}
+                    className="hover:text-red-400 disabled:opacity-50"
+                    aria-label={`Revoke ${g.scope} from ${agentLabel}`}
+                    title="Revoke this scope"
+                  >
+                    <XCircle size={10} />
+                  </button>
+                )}
+              </span>
+            ))}
+          </div>
+        </div>
+      ))}
+    </section>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /*  RegistryEntryRow                                                    */
 /* ------------------------------------------------------------------ */
 
@@ -269,6 +436,7 @@ function RegistryEntryRow({
   onAssign,
   onGrants,
   onPatchHandle,
+  onRevoke,
 }: {
   entry: RegistryEntry;
   isAdmin: boolean;
@@ -277,6 +445,7 @@ function RegistryEntryRow({
   onAssign: (entry: RegistryEntry) => void;
   onGrants: (entry: RegistryEntry) => void;
   onPatchHandle: (id: string, handle: string) => Promise<void>;
+  onRevoke: () => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -523,6 +692,13 @@ function RegistryEntryRow({
         <PendingScopeRequests
           canonicalId={entry.canonical_id}
           agentLabel={stripAt(entry.display_name) || entry.canonical_id}
+        />
+      )}
+      {entry.status === "active" && isAdmin && (
+        <ProjectGrantsPanel
+          canonicalId={entry.canonical_id}
+          agentLabel={stripAt(entry.display_name) || entry.canonical_id}
+          onRevoked={onRevoke}
         />
       )}
     </Card>
@@ -1022,6 +1198,11 @@ export function RegistryPanel() {
     await load({ quiet: true });
   }
 
+  // Reloads the registry after a per-project grant revoke (taOS #2985 Part 2).
+  function handleGrantRevoked() {
+    void load({ quiet: true });
+  }
+
   const pendingCount = entries.filter((e) => e.status === "pending").length;
   // Anything not explicitly retired (revoked/rejected/suspended) is visible
   // by default so future RegistryStatus values are never silently hidden.
@@ -1093,6 +1274,7 @@ export function RegistryPanel() {
                 onAssign={setAssignEntry}
                 onGrants={setGrantsEntry}
                 onPatchHandle={handlePatchHandle}
+                onRevoke={handleGrantRevoked}
               />
             ))}
 
@@ -1114,6 +1296,7 @@ export function RegistryPanel() {
                       onAssign={setAssignEntry}
                       onGrants={setGrantsEntry}
                       onPatchHandle={handlePatchHandle}
+                      onRevoke={handleGrantRevoked}
                     />
                   ))}
                 </div>
@@ -1151,6 +1334,7 @@ export function RegistryPanel() {
                       onAssign={setAssignEntry}
                       onGrants={setGrantsEntry}
                       onPatchHandle={handlePatchHandle}
+                      onRevoke={handleGrantRevoked}
                     />
                   ))}
                 </div>
