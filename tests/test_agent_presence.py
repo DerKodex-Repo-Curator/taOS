@@ -148,10 +148,15 @@ class TestAgentPresenceStore:
 
     async def test_stamp_failure_does_not_raise(self, presence_store):
         """A stamp failure (e.g. DB locked) is logged but does not raise."""
-        # Close the DB to simulate a failure
-        await presence_store.close()
-        # Should not raise
-        await presence_store.stamp("grok", "prj-1", "poll")
+        # Patch execute to raise an exception to exercise the swallow path
+        original_execute = presence_store._db.execute
+
+        async def failing_execute(*args, **kwargs):
+            raise RuntimeError("simulated DB failure")
+
+        with patch.object(presence_store._db, "execute", side_effect=failing_execute):
+            # Should not raise
+            await presence_store.stamp("grok", "prj-1", "poll")
 
 
 @pytest.mark.asyncio
@@ -430,5 +435,5 @@ class TestAgentPresenceThrottleIntegration:
         )
         row = await rows.fetchone()
         assert row is not None
-        # If we get here without assertion errors, the throttle worked
-        # The exact write_count depends on implementation details
+        # Two calls within 60s should result in exactly one DB write (INSERT)
+        assert write_count == 1

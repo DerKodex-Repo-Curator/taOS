@@ -263,10 +263,14 @@ async def bus_messages(request: Request):
     200 and nothing else cannot tell a typo from a quiet channel, and stays
     silent forever believing it is connected.
     """
-    agent_info = await _authorize_bus_read_agent(request)
-    if agent_info:
-        canonical_id, project_id = agent_info
-        # Stamp presence for agent callers (transport=poll)
+    await _authorize_bus_read(request)
+
+    # Stamp presence for agent-JWT callers only (transport=poll)
+    from tinyagentos.agent_token_auth import _verify_agent_scope
+    agent_result = await _verify_agent_scope(request, "a2a_receive")
+    if agent_result:
+        canonical_id, payload = agent_result
+        project_id = payload.get("project_id") or ""
         presence_store = getattr(request.app.state, "agent_presence", None)
         if presence_store and project_id:
             registry = getattr(request.app.state, "agent_registry", None)
@@ -421,10 +425,14 @@ async def bus_stream(
     upstream, so the bus streams events from every thread. ``since`` is the cursor
     and is a message ``ts`` (a float), NOT an id -- any other query param is a 400.
     """
-    agent_info = await _authorize_bus_read_agent(request)
-    if agent_info:
-        canonical_id, project_id = agent_info
-        # Stamp presence for agent callers (transport=stream)
+    await _authorize_bus_read(request)
+
+    # Stamp presence for agent-JWT callers only (transport=stream)
+    from tinyagentos.agent_token_auth import _verify_agent_scope
+    agent_result = await _verify_agent_scope(request, "a2a_receive")
+    if agent_result:
+        canonical_id, payload = agent_result
+        project_id = payload.get("project_id") or ""
         presence_store = getattr(request.app.state, "agent_presence", None)
         if presence_store and project_id:
             registry = getattr(request.app.state, "agent_registry", None)
@@ -607,6 +615,11 @@ async def _resolve_send_identity(
       identity. ``check_agent_scope`` raises 401/403; ``check_human_identity``
       raises 401/403; a missing Bearer header returns None from both and is
       rejected here as 403 (fail closed).
+
+    Attribution is the identity the bus can actually check, and the readable
+    handle stays a display/alias concern (taOS #2156).  The bus's
+    principal-spelling policy for humans is not settled (taosmd
+    a2a-bus-auth-transition), so a human assertion is never forwarded.
     """
     if getattr(request.state, "is_admin", False):
         handle = _sanitise_handle(body_from or "")
@@ -623,6 +636,8 @@ async def _resolve_send_identity(
         handle = ((record or {}).get("handle") or "").strip()
         if not handle:
             raise HTTPException(status_code=403, detail="agent has no bus handle")
+        # Agent credential and `from` (canonical_id) travel together: the bus
+        # verifies the signature and then requires `token sub == from` (taOS #2156).
         return _BusIdentity(canonical_id, _bearer_token(request)), project_id
 
     human_id = await check_human_identity(request)
@@ -633,6 +648,10 @@ async def _resolve_send_identity(
         if not username:
             raise HTTPException(status_code=403, detail="human has no username")
         handle = _sanitise_handle(f"@{username}")
+        # Human assertion is NOT forwarded: its `sub` is the user_id while its
+        # bus `from` is `@<username>`, and the bus's principal-spelling policy
+        # for humans is not settled (taosmd a2a-bus-auth-transition). Forwarding
+        # it would present a credential that cannot match its own `from`.
         return _BusIdentity(handle if handle != "@" else "@operator"), None
 
     raise HTTPException(status_code=403, detail="forbidden")
