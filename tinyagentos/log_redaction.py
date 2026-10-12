@@ -163,10 +163,10 @@ def redact_for_archive(text: str, known_values: "list[str] | None" = None) -> st
     _IPV4_RE = re.compile(
         r'(?:'
         r'10\.\d{1,3}\.\d{1,3}\.\d{1,3}|'
-        r'100\.(6[0-9]|7[0-9]|8[0-9]|9[0-9]|1[0-1][0-9]|12[0-7])\.\d{1,3}\.\d{1,3}|'
+        r'100\.(6[4-9]|7[0-9]|8[0-9]|9[0-9]|1[0-1][0-9]|12[0-7])\.\d{1,3}\.\d{1,3}|'
         r'172\.(1[6-9]|2[0-9]|3[0-1])\.\d{1,3}\.\d{1,3}|'
         r'192\.168\.\d{1,3}\.\d{1,3}'
-        r')',
+        r')\b',
         re.IGNORECASE,
     )
     text = _IPV4_RE.sub(PLACEHOLDER, text)
@@ -179,7 +179,7 @@ def redact_for_archive(text: str, known_values: "list[str] | None" = None) -> st
     _INVITE_RE = re.compile(r'/i/\S+', re.IGNORECASE)
     text = _INVITE_RE.sub(PLACEHOLDER, text)
 
-    _PIN_RE = re.compile(r'(?i)(PIN|pin)\s+\d{6,8}')
+    _PIN_RE = re.compile(r'(?i)(PIN|pin)(?:\s+\S+){0,3}\s+\d{6,8}')
     text = _PIN_RE.sub(PLACEHOLDER, text)
 
     return text
@@ -206,8 +206,7 @@ def is_secret_file_read(path: str) -> bool:
 
     # is named config under a .taos-team directory
     path_parts = path.replace("\\", "/").split("/")
-    for i, part in enumerate(path_parts):
-        if part == ".taos-team" and i + 1 < len(path_parts) and path_parts[i + 1] == basename and basename == "config":
-            return True
+    if basename == "config" and ".taos-team" in path_parts:
+        return True
 
     return False
