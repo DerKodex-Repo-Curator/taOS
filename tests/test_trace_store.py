@@ -826,7 +826,7 @@ async def test_search_text_finds_unique_token(tmp_path):
 @pytest.mark.asyncio
 async def test_search_text_handles_card_ids_and_special_chars(tmp_path):
     """RED: search_text should find card IDs like 'tsk-abc123' and handle
-    apostrophes like "it's" without raising FTS5 syntax errors."""
+    apostrophes like \"it's\" without raising FTS5 syntax errors."""
     store = AgentTraceStore(tmp_path, "search-fix-agent")
     now = time.time()
     old_ts = _hour_anchor(now - 30 * 86400)
@@ -907,7 +907,7 @@ async def test_import_envelopes_sealed_bucket_new_envelope_raises_valueerror(tmp
     os.chmod(str(db_path), 0o400)
 
     # Also create a current bucket with some data
-    current_ts = _hour_anchor(now)
+    current_ts = now
     current_bucket = _bucket_key(current_ts)
     current_envelopes = [
         _envelope(id=f"curr-{i}", created_at=current_ts + i, kind="tool_result",
@@ -948,39 +948,37 @@ async def test_import_envelopes_sealed_bucket_new_envelope_raises_valueerror(tmp
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_import_envelopes_sealed_bucket_works_near_hour_boundary(tmp_path):
+async def test_import_envelopes_sealed_bucket_works_near_hour_boundary(tmp_path, monkeypatch):
     """Regression test: with hour-anchored timestamps, the sealed-bucket check
     works correctly even when the test runs near an hour boundary.
     Pins time.time() to 50s before an hour boundary and verifies ValueError
     is raised for new envelopes targeting a sealed bucket."""
-    import time as real_time
-
     # Pin wall-clock to 50 seconds before the next UTC hour.
-    real_now = real_time.time()
+    real_now = time.time()
     pinned_now = (int(real_now) // 3600 + 1) * 3600 - 50
 
     store = AgentTraceStore(tmp_path, "flake-demo-agent")
 
-    with patch("tinyagentos.trace_store.time") as mock_time:
-        mock_time.time.return_value = pinned_now
+    monkeypatch.setattr(time, "time", lambda: pinned_now)
 
-        # Use the FIXED hour-anchored computation (same as the other tests now).
-        now = pinned_now
-        old_ts = _hour_anchor(now - 30 * 86400)
-        bucket = _bucket_key(old_ts)
+    # Use the FIXED hour-anchored computation (same as the other tests now).
+    now = pinned_now
+    old_ts = _hour_anchor(now - 30 * 86400)
+    bucket = _bucket_key(old_ts)
 
-        # Import old envelopes
-        old_envelopes = [
-            _envelope(id=f"old-{i}", created_at=old_ts + i, kind="tool_result",
-                      payload={"tool": "shell", "result": f"old-{i}"})
-            for i in range(3)
-        ]
-        await store.import_envelopes(old_envelopes)
+    # Import old envelopes
+    old_envelopes = [
+        _envelope(id=f"old-{i}", created_at=old_ts + i, kind="tool_result",
+                  payload={"tool": "shell", "result": f"old-{i}"})
+        for i in range(3)
+    ]
+    await store.import_envelopes(old_envelopes)
 
-        # Seal the old bucket
-        db_path = _bucket_db_path(tmp_path, "flake-demo-agent", bucket)
-        os.chmod(str(db_path), 0o400)
+    # Seal the old bucket
+    db_path = _bucket_db_path(tmp_path, "flake-demo-agent", bucket)
+    os.chmod(str(db_path), 0o400)
 
+    try:
         # Current bucket (also hour-anchored)
         current_ts = _hour_anchor(now)
         current_bucket = _bucket_key(current_ts)
@@ -1003,7 +1001,7 @@ async def test_import_envelopes_sealed_bucket_works_near_hour_boundary(tmp_path)
         # This SHOULD raise ValueError and now it DOES with the fix
         with pytest.raises(ValueError, match="sealed bucket"):
             await store.import_envelopes(mixed_envelopes)
-
-    # Restore for cleanup
-    os.chmod(str(db_path), 0o600)
-    await store.close()
+    finally:
+        # Restore for cleanup
+        os.chmod(str(db_path), 0o600)
+        await store.close()
