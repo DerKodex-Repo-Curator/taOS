@@ -621,6 +621,10 @@ async def client(app, tmp_data_dir):
     if project_invites._db is not None:
         await project_invites.close()
     await project_invites.init()
+    agent_presence = app.state.agent_presence
+    if agent_presence._db is not None:
+        await agent_presence.close()
+    await agent_presence.init()
     board_audit = app.state.board_audit
     if board_audit._db is not None:
         await board_audit.close()
@@ -801,6 +805,7 @@ async def client(app, tmp_data_dir):
     await board_audit.close()
     await project_store.close()
     await project_invites.close()
+    await agent_presence.close()
     await chat_channels.close()
     await chat_messages.close()
     await expert_agents.close()
@@ -962,6 +967,10 @@ async def client_with_qmd(app_with_qmd):
     if project_store._db is not None:
         await project_store.close()
     await project_store.init()
+    agent_presence = app_with_qmd.state.agent_presence
+    if agent_presence._db is not None:
+        await agent_presence.close()
+    await agent_presence.init()
     board_audit = app_with_qmd.state.board_audit
     if board_audit._db is not None:
         await board_audit.close()
@@ -1003,6 +1012,7 @@ async def client_with_qmd(app_with_qmd):
     await routine_store.close()
     await board_audit.close()
     await project_store.close()
+    await agent_presence.close()
     await chat_channels.close()
     await chat_messages.close()
     await expert_agents.close()

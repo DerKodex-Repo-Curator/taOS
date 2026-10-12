@@ -460,8 +460,10 @@ def create_app(data_dir: Path | None = None, catalog_dir: Path | None = None) ->
     from tinyagentos.projects.canvas.snapshotter import CanvasSnapshotter
     from tinyagentos.projects.doc_review_store import DocReviewStore
     from tinyagentos.projects.invite_store import ProjectInviteStore
+    from tinyagentos.projects.agent_presence_store import AgentPresenceStore
     project_store = ProjectStore(data_dir / "projects.db")
     project_invite_store = ProjectInviteStore(data_dir / "project_invites.db")
+    agent_presence_store = AgentPresenceStore(data_dir / "agent_presence.db")
     project_event_broker = ProjectEventBroker()
     from tinyagentos.desktop_control import DesktopCommandBroker
     desktop_command_broker = DesktopCommandBroker()
@@ -1839,6 +1841,7 @@ def create_app(data_dir: Path | None = None, catalog_dir: Path | None = None) ->
     app.state.project_store = project_store
     app.state.dispatcher_store = dispatcher_store
     app.state.project_invites = project_invite_store
+    app.state.agent_presence = agent_presence_store
     app.state.board_audit = board_audit_store
     app.state.receipt_store = receipt_store
     app.state.task_strikes = strike_store

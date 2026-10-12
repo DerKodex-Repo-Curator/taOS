@@ -374,7 +374,30 @@ async def list_members(
         return JSONResponse({"error": "not found"}, status_code=404)
     if not user.is_admin and user.user_id != p["user_id"]:
         return JSONResponse({"error": "not found"}, status_code=404)
-    return {"items": await store.list_members(project_id)}
+    members = await store.list_members(project_id)
+    # Attach presence for each member
+    presence_store = getattr(request.app.state, "agent_presence", None)
+    registry = getattr(request.app.state, "agent_registry", None)
+    if presence_store and registry:
+        for member in members:
+            member_id = member.get("member_id", "")
+            member_kind = member.get("member_kind", "")
+            # Agent members (native/clone) have canonical_id as member_id; look up handle
+            if member_kind in ("native", "clone") and member_id:
+                record = await registry.get(member_id)
+                handle = (record or {}).get("handle", "").strip()
+                if handle:
+                    presence = await presence_store.get_presence(handle, project_id)
+                    member["presence"] = presence
+                else:
+                    member["presence"] = None
+            else:
+                # Human members (hub:xxx) or members without registry record have no presence
+                member["presence"] = None
+    else:
+        for member in members:
+            member["presence"] = None
+    return {"items": members}
 
 
 class ProjectLeadIn(BaseModel):
@@ -768,6 +791,30 @@ async def _require_active_element(
     return el
 
 
+async def _stamp_agent_presence(request: Request, actor_id: str, is_agent: bool, project_id: str) -> None:
+    """Stamp agent presence for agent callers (transport=rest).
+
+    Called after successful authorization in task routes. Only stamps for
+    registry-JWT agents, never for admin sessions or local tokens.
+    """
+    if not is_agent:
+        return
+    presence_store = getattr(request.app.state, "agent_presence", None)
+    if not presence_store:
+        return
+    registry = getattr(request.app.state, "agent_registry", None)
+    if not registry:
+        return
+    record = await registry.get(actor_id)
+    handle = (record or {}).get("handle", "").strip()
+    if not handle:
+        return
+    try:
+        await presence_store.stamp(handle, project_id, "rest")
+    except Exception:  # noqa: BLE001 - never fails the request
+        pass
+
+
 # ---------------------------------------------------------------------------
 # Task routes — order matters: /tasks/ready before /tasks/{task_id}
 # ---------------------------------------------------------------------------
@@ -795,7 +842,8 @@ async def create_task(
     )
     if isinstance(actor_or_err, JSONResponse):
         return actor_or_err
-    actor_id, _is_agent, _project = actor_or_err
+    actor_id, is_agent, _project = actor_or_err
+    await _stamp_agent_presence(request, actor_id, is_agent, project_id)
     if payload.parent_task_id is not None:
         parent = await store.get_task(payload.parent_task_id)
         if parent is None or parent["project_id"] != project_id:
@@ -832,6 +880,8 @@ async def list_tasks(
     auth = await _authorize_task_actor(request, pstore, project_id)
     if isinstance(auth, JSONResponse):
         return auth
+    actor_id, is_agent, _project = auth
+    await _stamp_agent_presence(request, actor_id, is_agent, project_id)
     store = request.app.state.project_task_store
     return {"items": await store.list_tasks(project_id=project_id, status=status, element_id=element_id)}
 
@@ -980,6 +1030,8 @@ async def ready_tasks(
     auth = await _authorize_task_actor(request, pstore, project_id)
     if isinstance(auth, JSONResponse):
         return auth
+    actor_id, is_agent, _project = auth
+    await _stamp_agent_presence(request, actor_id, is_agent, project_id)
     store = request.app.state.project_task_store
     return {"items": await store.list_ready_tasks(
         project_id=project_id, element_id=element_id, limit=limit
@@ -996,6 +1048,8 @@ async def get_task(
     auth = await _authorize_task_actor(request, pstore, project_id)
     if isinstance(auth, JSONResponse):
         return auth
+    actor_id, is_agent, _project = auth
+    await _stamp_agent_presence(request, actor_id, is_agent, project_id)
     store = request.app.state.project_task_store
     t = await store.get_task(task_id)
     if t is None or t["project_id"] != project_id:
@@ -1031,6 +1085,7 @@ async def update_task(
     if isinstance(auth, JSONResponse):
         return auth
     actor_id, is_agent, project = auth
+    await _stamp_agent_presence(request, actor_id, is_agent, project_id)
     store = request.app.state.project_task_store
     existing = await store.get_task(task_id)
     if existing is None or existing["project_id"] != project_id:
@@ -1114,6 +1169,7 @@ async def claim_task(
     if isinstance(auth, JSONResponse):
         return auth
     actor_id, is_agent, _project = auth
+    await _stamp_agent_presence(request, actor_id, is_agent, project_id)
     claimer_id = _resolve_actor(is_agent, actor_id, payload.claimer_id)
     if isinstance(claimer_id, JSONResponse):
         return claimer_id
@@ -1172,7 +1228,8 @@ async def mark_task_claimable(
     auth = await _authorize_project_lead(request, pstore, project_id)
     if isinstance(auth, JSONResponse):
         return auth
-    actor_id, _is_agent, _project = auth
+    actor_id, is_agent, _project = auth
+    await _stamp_agent_presence(request, actor_id, is_agent, project_id)
     store = request.app.state.project_task_store
     existing = await store.get_task(task_id)
     if existing is None or existing["project_id"] != project_id:
@@ -1215,6 +1272,7 @@ async def release_task(
     if isinstance(auth, JSONResponse):
         return auth
     actor_id, is_agent, _project = auth
+    await _stamp_agent_presence(request, actor_id, is_agent, project_id)
     releaser_id = _resolve_actor(is_agent, actor_id, payload.releaser_id)
     if isinstance(releaser_id, JSONResponse):
         return releaser_id
@@ -1241,6 +1299,7 @@ async def close_task(
     if isinstance(auth, JSONResponse):
         return auth
     actor_id, is_agent, project = auth
+    await _stamp_agent_presence(request, actor_id, is_agent, project_id)
     closed_by = _resolve_actor(is_agent, actor_id, payload.closed_by)
     if isinstance(closed_by, JSONResponse):
         return closed_by
@@ -1298,6 +1357,7 @@ async def reopen_task(
     if isinstance(auth, JSONResponse):
         return auth
     actor_id, is_agent, _project = auth
+    await _stamp_agent_presence(request, actor_id, is_agent, project_id)
     body_actor = payload.reopened_by if payload and payload.reopened_by else None
     resolved = _resolve_actor(is_agent, actor_id, body_actor)
     if isinstance(resolved, JSONResponse):
@@ -1336,7 +1396,8 @@ async def unquarantine_task(
     auth = await _authorize_project_lead(request, pstore, project_id)
     if isinstance(auth, JSONResponse):
         return auth
-    actor_id, _is_agent, _project = auth
+    actor_id, is_agent, _project = auth
+    await _stamp_agent_presence(request, actor_id, is_agent, project_id)
     store = request.app.state.project_task_store
     existing = await store.get_task(task_id)
     if existing is None or existing["project_id"] != project_id:
@@ -1413,6 +1474,8 @@ async def task_context(
     auth = await _authorize_task_actor(request, pstore, task["project_id"])
     if isinstance(auth, JSONResponse):
         return auth
+    actor_id, is_agent, _project = auth
+    await _stamp_agent_presence(request, actor_id, is_agent, task["project_id"])
     return await store.get_task_context(task_id)
 
 
@@ -1480,7 +1543,8 @@ async def create_checklist_item(
     )
     if isinstance(auth, JSONResponse):
         return auth
-    actor_id, _is_agent, _project = auth
+    actor_id, is_agent, _project = auth
+    await _stamp_agent_presence(request, actor_id, is_agent, project_id)
     store = request.app.state.project_task_store
     t = await _require_task_in_project(store, project_id, task_id)
     if isinstance(t, JSONResponse):
@@ -1513,6 +1577,8 @@ async def list_checklist_items(
     auth = await _authorize_task_actor(request, pstore, project_id)
     if isinstance(auth, JSONResponse):
         return auth
+    actor_id, is_agent, _project = auth
+    await _stamp_agent_presence(request, actor_id, is_agent, project_id)
     store = request.app.state.project_task_store
     guard = await _require_task_in_project(store, project_id, task_id)
     if isinstance(guard, JSONResponse):
@@ -1536,6 +1602,7 @@ async def add_comment(
     if isinstance(auth, JSONResponse):
         return auth
     actor_id, is_agent, _project = auth
+    await _stamp_agent_presence(request, actor_id, is_agent, project_id)
     # Invariant 3: an agent authors a comment only as itself. A comment author is
     # an actor id just like the lifecycle fields, so bind it to the token id and
     # 403 a mismatched body value (a session owner keeps its provided author_id).
@@ -1571,6 +1638,8 @@ async def list_comments(
     auth = await _authorize_task_actor(request, pstore, project_id)
     if isinstance(auth, JSONResponse):
         return auth
+    actor_id, is_agent, _project = auth
+    await _stamp_agent_presence(request, actor_id, is_agent, project_id)
     store = request.app.state.project_task_store
     guard = await _require_task_in_project(store, project_id, task_id)
     if isinstance(guard, JSONResponse):

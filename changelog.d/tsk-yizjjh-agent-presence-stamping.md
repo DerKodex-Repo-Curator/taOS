@@ -1,0 +1,3 @@
+### Added
+
+- Agent presence stamping: tracks agent activity via `agent_presence` table (handle, project_id, transport, last_seen_at). Stamps on agent-JWT calls to A2A bus endpoints (stream=poll, messages=poll, send=rest) and project task routes (rest), with 60s write throttle per (handle, project_id). Presence exposed on GET /api/projects/{pid}/members as `presence: {transport, last_seen_at}` or null per member.

@@ -177,6 +177,23 @@ async def _authorize_bus_read(request: Request) -> None:
         raise HTTPException(status_code=403, detail="forbidden")
 
 
+async def _authorize_bus_read_agent(request: Request) -> tuple[str, str] | None:
+    """Like _authorize_bus_read but returns (canonical_id, project_id) for agent callers.
+
+    Returns None for admin/local-token callers. Raises 401/403 on invalid tokens.
+    """
+    if getattr(request.state, "is_admin", False):
+        return None
+    # Re-use the shared verifier to get the payload (which carries project_id claim)
+    from tinyagentos.agent_token_auth import _verify_agent_scope
+    result = await _verify_agent_scope(request, "a2a_receive")
+    if result is None:
+        raise HTTPException(status_code=403, detail="forbidden")
+    canonical_id, payload = result
+    project_id = payload.get("project_id") or ""
+    return canonical_id, project_id
+
+
 @router.get("/api/a2a/bus/channels")
 async def bus_channels(request: Request):
     """List coordination-bus channels, sorted by last activity (newest first).
@@ -246,7 +263,21 @@ async def bus_messages(request: Request):
     200 and nothing else cannot tell a typo from a quiet channel, and stays
     silent forever believing it is connected.
     """
-    await _authorize_bus_read(request)
+    agent_info = await _authorize_bus_read_agent(request)
+    if agent_info:
+        canonical_id, project_id = agent_info
+        # Stamp presence for agent callers (transport=poll)
+        presence_store = getattr(request.app.state, "agent_presence", None)
+        if presence_store and project_id:
+            registry = getattr(request.app.state, "agent_registry", None)
+            if registry:
+                record = await registry.get(canonical_id)
+                handle = (record or {}).get("handle", "").strip()
+                if handle:
+                    try:
+                        await presence_store.stamp(handle, project_id, "poll")
+                    except Exception:  # noqa: BLE001 - never fails the request
+                        pass
 
     unknown = sorted(set(request.query_params.keys()) - _MESSAGES_PARAMS)
     if unknown:
@@ -390,7 +421,21 @@ async def bus_stream(
     upstream, so the bus streams events from every thread. ``since`` is the cursor
     and is a message ``ts`` (a float), NOT an id -- any other query param is a 400.
     """
-    await _authorize_bus_read(request)
+    agent_info = await _authorize_bus_read_agent(request)
+    if agent_info:
+        canonical_id, project_id = agent_info
+        # Stamp presence for agent callers (transport=stream)
+        presence_store = getattr(request.app.state, "agent_presence", None)
+        if presence_store and project_id:
+            registry = getattr(request.app.state, "agent_registry", None)
+            if registry:
+                record = await registry.get(canonical_id)
+                handle = (record or {}).get("handle", "").strip()
+                if handle:
+                    try:
+                        await presence_store.stamp(handle, project_id, "stream")
+                    except Exception:  # noqa: BLE001 - never fails the request
+                        pass
 
     unknown = sorted(set(request.query_params.keys()) - _STREAM_PARAMS)
     if unknown:
@@ -543,8 +588,11 @@ def _bearer_token(request: Request) -> str | None:
 
 async def _resolve_send_identity(
     request: Request, body_from: str | None
-) -> _BusIdentity:
+) -> tuple[_BusIdentity, str | None]:
     """Return the identity (and credential) authorized for this send, or raise.
+
+    Also returns the project_id for agent callers (from the token claim), or None
+    for admin/human callers.
 
     - Admin (session cookie or local token): may set an explicit ``from``
       (operator posts as any handle); defaults to ``@operator`` when omitted.
@@ -562,27 +610,20 @@ async def _resolve_send_identity(
     """
     if getattr(request.state, "is_admin", False):
         handle = _sanitise_handle(body_from or "")
-        return _BusIdentity(handle or "@operator")
+        return _BusIdentity(handle or "@operator"), None
 
-    caller = await check_agent_scope(request, "a2a_send")
-    if caller is not None:
+    # For agent callers, use the shared verifier to get the payload (for project_id)
+    from tinyagentos.agent_token_auth import _verify_agent_scope
+    result = await _verify_agent_scope(request, "a2a_send")
+    if result is not None:
+        canonical_id, payload = result
+        project_id = payload.get("project_id") or ""
         registry = getattr(request.app.state, "agent_registry", None)
-        record = await registry.get(caller) if registry is not None else None
+        record = await registry.get(canonical_id) if registry is not None else None
         handle = ((record or {}).get("handle") or "").strip()
         if not handle:
-            # Kept deliberately: a registry record with no handle is an
-            # incomplete bus identity (the handle is what every reader and the
-            # alias layer resolves, taOS #2156), and relaxing an access
-            # condition is not this change's business.
             raise HTTPException(status_code=403, detail="agent has no bus handle")
-        # Attribute the message to the registry ``canonical_id`` (the token's
-        # ``sub``), not to the display handle. The bus derives identity from the
-        # credential: it verifies the signature and then requires
-        # ``token sub == from``. A handle-spelled ``from`` can never satisfy
-        # that, so an authenticated agent's post would still be recorded as
-        # unverifiable -- the exact gap this closes. The readable handle is
-        # resolved from the same identity for display (taOS #2156).
-        return _BusIdentity(caller, _bearer_token(request))
+        return _BusIdentity(canonical_id, _bearer_token(request)), project_id
 
     human_id = await check_human_identity(request)
     if human_id is not None:
@@ -591,15 +632,8 @@ async def _resolve_send_identity(
         username = ((user or {}).get("username") or "").strip()
         if not username:
             raise HTTPException(status_code=403, detail="human has no username")
-        # The assertion is NOT forwarded: a human assertion's ``sub`` is the
-        # user_id while its bus ``from`` is ``@<username>``, and the bus's
-        # principal-spelling policy for humans is not settled yet (taosmd
-        # a2a-bus-auth-transition, open question 1). Forwarding it today would
-        # present a credential whose sub cannot match the from it accompanies.
-        # A username of only non-printable characters sanitises to a bare "@";
-        # fall back to "@operator" exactly as the admin branch does.
         handle = _sanitise_handle(f"@{username}")
-        return _BusIdentity(handle if handle != "@" else "@operator")
+        return _BusIdentity(handle if handle != "@" else "@operator"), None
 
     raise HTTPException(status_code=403, detail="forbidden")
 
@@ -624,7 +658,23 @@ async def bus_send(request: Request, body: BusSendBody):
     Unlike the read endpoints, a bus failure surfaces as 502: a caller must know
     when its message did not land.
     """
-    identity = await _resolve_send_identity(request, body.from_)
+    identity, project_id = await _resolve_send_identity(request, body.from_)
+
+    # Stamp presence for agent callers (transport=rest)
+    if project_id:
+        presence_store = getattr(request.app.state, "agent_presence", None)
+        if presence_store:
+            # For agent callers, identity.from_handle is the canonical_id;
+            # look up the display handle from the registry
+            registry = getattr(request.app.state, "agent_registry", None)
+            if registry:
+                record = await registry.get(identity.from_handle)
+                handle = (record or {}).get("handle", "").strip()
+                if handle:
+                    try:
+                        await presence_store.stamp(handle, project_id, "rest")
+                    except Exception:  # noqa: BLE001 - never fails the request
+                        pass
 
     thread = body.thread.strip()
     text = body.body.strip()
