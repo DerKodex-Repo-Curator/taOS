@@ -429,7 +429,7 @@ chmod +x /opt/taos/taos-hermes-bridge.py
 
 cat > /etc/systemd/system/taos-hermes-bridge.service <<UNIT
 [Unit]
-Description=taOS-Hermes bridge (SSE -> Hermes /v1/chat/completions)
+Description=taOS-Hermes bridge (SSE → Hermes /v1/chat/completions)
 After=hermes-gateway.service network.target
 Wants=hermes-gateway.service
 [Service]

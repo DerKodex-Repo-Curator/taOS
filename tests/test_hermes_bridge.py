@@ -316,9 +316,8 @@ class TestBoundedConcurrency:
 
     def test_user_message_tasks_bounded(self, bridge_ns):
         """Peak concurrent handle_user_message executions <= _MAX_INFLIGHT (4)."""
-        run_limited = bridge_ns.get("_run_handle_user_message_limited")
-        if run_limited is None:
-            pytest.skip("_run_handle_user_message_limited not found in bridge")
+        assert "_run_handle_user_message_limited" in bridge_ns
+        run_limited = bridge_ns["_run_handle_user_message_limited"]
         handle = bridge_ns["handle_user_message"]
         client = MagicMock()
         client.post = AsyncMock(return_value=MagicMock(status_code=200))
