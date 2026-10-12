@@ -47,6 +47,20 @@ def _redact_text(redact, text: str) -> str:
     return redact(text)
 
 
+def _redact_args(redact, value: Any) -> Any:
+    """Return a copy of *value* with every str leaf passed through _redact_text.
+
+    Recurses into dict values and list items; other types are returned unchanged.
+    """
+    if isinstance(value, str):
+        return _redact_text(redact, value)
+    if isinstance(value, dict):
+        return {k: _redact_args(redact, v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_args(redact, item) for item in value]
+    return value
+
+
 def _block_text(content: Any) -> str:
     """Flatten a Claude Code content field (str or list of blocks) to text."""
     if isinstance(content, str):
@@ -100,7 +114,7 @@ def _short_arg(args: dict) -> str:
 def _count_skipped_lines(path) -> int:
     """Count non-blank lines in *path* that fail JSON decoding."""
     count = 0
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -122,7 +136,7 @@ def iter_records(path) -> Iterator[dict]:
 
     Lines that fail JSON decoding are silently skipped.
     """
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -170,7 +184,7 @@ def to_envelopes(
             continue
         if rtype == "user" and record.get("isMeta"):
             continue
-        trace_id = record.get("session_id")
+        trace_id = record.get("sessionId") or record.get("session_id")
         rid = record.get("uuid")
         created_at = _epoch(record.get("timestamp"))
         message = record.get("message") or {}
@@ -254,7 +268,7 @@ def to_envelopes(
                             None,
                             {
                                 "tool": redacted_name,
-                                "args": tool_input,
+                                "args": _redact_args(redact, tool_input),
                                 "caller": agent_name,
                             },
                         )

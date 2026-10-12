@@ -42,7 +42,7 @@ class TestIterRecords:
         records = list(iter_records(FIXTURE))
         first = records[0]
         assert first["type"] == "user"
-        assert first["session_id"] == "sess-1"
+        assert first["sessionId"] == "sess-1"
         assert first["uuid"] == "rec-u1"
         assert first["timestamp"] == "2026-10-10T10:00:00.000Z"
 
@@ -178,6 +178,50 @@ class TestToEnvelopes:
         assert "command caveat" not in blob
         assert all(e["id"] != "rec-u10" for e in env)
         assert all(e["id"] != "rec-u11" for e in env)
+
+    def test_trace_id_read_from_camelcase_session_id(self):
+        env = self._envelopes()
+        for e in env:
+            assert e["trace_id"] == "sess-1", f"envelope {e['id']} has trace_id {e['trace_id']}"
+
+    def test_tool_call_args_are_redacted(self):
+        def _redact_r(text: str) -> str:
+            return text.replace("SECRET", "[R]")
+
+        records = [
+            {
+                "type": "assistant",
+                "sessionId": "sess-test",
+                "uuid": "rec-test",
+                "timestamp": "2026-10-10T10:00:00.000Z",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "tu-bash-secret",
+                            "name": "Bash",
+                            "input": {"command": "echo SECRET_TOKEN"},
+                        }
+                    ]
+                },
+            }
+        ]
+        env = to_envelopes(
+            records,
+            agent_name="claude-code",
+            redact=_redact_r,
+            is_secret_file_read=None,
+        )
+        tc = env[0]
+        assert tc["kind"] == "tool_call"
+        assert tc["payload"]["args"] == {"command": "echo [R]_TOKEN"}
+        assert "SECRET" not in tc["payload"]["args"]["command"]
+        assert "[R]" in tc["payload"]["args"]["command"]
+
+        lines = to_index_lines(env)
+        tool_line = lines[0]
+        assert "[R]" in tool_line["text"]
+        assert "SECRET" not in tool_line["text"]
 
 
 class TestToIndexLines:
