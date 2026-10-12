@@ -7,7 +7,7 @@ Triggers yield_resources() on the resource manager to throttle the worker.
 Platform support:
   - Linux: checks /proc for known game engines, monitors X11/Wayland
     fullscreen state via xdotool/xprop
-  - Windows: checks for fullscreen DirectX/Vulkan processes via psutil,
+  - Windows: enumerates processes via psutil and matches game patterns,
     detects fullscreen window via Win32 API, monitors GPU via nvidia-smi
   - macOS: checks for fullscreen NSApplication state (future)
 
@@ -74,6 +74,7 @@ def detect_game_processes() -> list[dict]:
             return found
 
         for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+            pid = None
             try:
                 info = proc.info
                 pid = info.get("pid")
