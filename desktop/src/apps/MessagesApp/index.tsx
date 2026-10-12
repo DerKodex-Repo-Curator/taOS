@@ -74,6 +74,7 @@ import { getApp } from "@/registry/app-registry";
 import { CodeBlock } from "@/components/CodeBlock";
 import { ToolCallBlock } from "@/components/ToolCallBlock";
 import { StatusBlock } from "@/components/StatusBlock";
+import { GateGrantDetails } from "@/components/GateGrantDetails";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { SearchPanel } from "../chat/SearchPanel";
@@ -475,6 +476,8 @@ interface DecisionData {
   status: DecisionBlockStatus;
   answer?: { value: unknown; answered_by?: string; answered_at?: number } | null;
   created_at: number | string;
+  // Grant-bearing metadata for a server-raised gate decision (tsk-mul5pa).
+  metadata?: Record<string, unknown> | null;
 }
 
 function decisionTypeLabel(t: string): string {
@@ -667,6 +670,7 @@ export function DecisionBlock({ block }: { block: DecisionContentBlock }): React
       {/* header: question + type badge + state */}
       <div className="flex flex-col gap-1 px-3">
         <p className="text-sm font-semibold text-shell-text">{decision.question}</p>
+        <GateGrantDetails metadata={decision.metadata} />
         {decision.context && (
           <p className="text-xs leading-relaxed text-shell-text-secondary">
             {decision.context}
@@ -1928,12 +1932,12 @@ export function MessagesApp({
       const res = await fetch("/api/chat/channels", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-body: JSON.stringify({
-            name: newChannel.name.trim(),
-            type: newChannel.type,
-            topic: newChannel.topic.trim() || undefined,
-            ...(scope?.projectId ? { project_id: scope.projectId } : {}),
-          }),
+        body: JSON.stringify({
+          name: newChannel.name.trim(),
+          type: newChannel.type,
+          topic: newChannel.topic.trim() || undefined,
+          ...(scope?.projectId ? { project_id: scope.projectId } : {}),
+        }),
       });
       if (res.ok) {
         const ch = await res.json();
@@ -2841,9 +2845,9 @@ className="shrink-0 p-0.5 rounded hover:bg-shell-surface-active transition-color
                 </select>
               </div>
               <div className="space-y-1">
-                <Label htmlFor="new-channel-description-mobile" className="block uppercase tracking-wider">Topic</Label>
+                <Label htmlFor="new-channel-topic-mobile" className="block uppercase tracking-wider">Topic</Label>
                 <Input
-                  id="new-channel-description-mobile"
+                  id="new-channel-topic-mobile"
                   value={newChannel.topic}
                   onChange={(e) => setNewChannel((s) => ({ ...s, topic: e.target.value }))}
                   placeholder="What's this channel about?"
@@ -2895,9 +2899,9 @@ className="shrink-0 p-0.5 rounded hover:bg-shell-surface-active transition-color
                   </select>
                 </div>
                 <div className="space-y-1">
-                  <Label htmlFor="new-channel-description" className="block uppercase tracking-wider">Topic</Label>
+                  <Label htmlFor="new-channel-topic" className="block uppercase tracking-wider">Topic</Label>
                   <Input
-                    id="new-channel-description"
+                    id="new-channel-topic"
                     value={newChannel.topic}
                     onChange={(e) => setNewChannel((s) => ({ ...s, topic: e.target.value }))}
                     placeholder="What's this channel about?"

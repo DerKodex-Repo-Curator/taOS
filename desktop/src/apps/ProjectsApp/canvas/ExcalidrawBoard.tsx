@@ -1,11 +1,12 @@
 import "./excalidraw-assets";
 import { useMemo, useState, useEffect, useRef } from "react";
 import type { ComponentProps } from "react";
-import { Excalidraw, convertToExcalidrawElements } from "@excalidraw/excalidraw";
+import { Excalidraw, convertToExcalidrawElements, CaptureUpdateAction } from "@excalidraw/excalidraw";
 import "@excalidraw/excalidraw/index.css";
-import { CanvasElement } from "./canvas-api";
+import { CanvasElement, canvasApi } from "./canvas-api";
 import { elementToSkeleton } from "./element-to-excalidraw";
 import { mermaidToExcalidraw, type ExcalidrawElements } from "./mermaid-to-elements";
+import { createSceneSync, type SyncSceneElement } from "./excalidraw-sync";
 
 // Read-only Excalidraw view over the canonical CanvasElement scene (tldraw ->
 // Excalidraw migration). Most kinds map synchronously; mermaid/flowchart kinds
@@ -25,6 +26,10 @@ type SkeletonInput = Parameters<typeof convertToExcalidrawElements>[0];
 export interface ExcalidrawBoardProps {
   elements: CanvasElement[];
   theme?: "light" | "dark";
+  projectId?: string;
+  elementId?: string | null;
+  getElement?: (id: string) => CanvasElement | undefined;
+  readOnly?: boolean;
 }
 
 function live(elements: CanvasElement[]): CanvasElement[] {
@@ -34,11 +39,24 @@ function live(elements: CanvasElement[]): CanvasElement[] {
     .sort((a, b) => (a.z_index || 0) - (b.z_index || 0));
 }
 
-export function ExcalidrawBoard({ elements, theme = "light" }: ExcalidrawBoardProps) {
+export function ExcalidrawBoard({
+  elements,
+  theme = "light",
+  projectId,
+  elementId,
+  getElement,
+  readOnly,
+}: ExcalidrawBoardProps) {
   const [api, setApi] = useState<ExcalidrawAPI | null>(null);
   // Converted diagram elements keyed by the CanvasElement id; absent until the
   // async mermaid conversion resolves.
   const [diagrams, setDiagrams] = useState<Record<string, ExcalidrawElements>>({});
+
+  // Keep the latest getElement in a ref so the sync can always read the current
+  // element map without recreating when the function identity changes.
+  const getElementRef = useRef(getElement);
+  getElementRef.current = getElement;
+  const stableGetElement = useRef((id: string) => getElementRef.current?.(id)).current;
 
   // Re-run conversion only when a diagram element's id/source/position changes.
   const diagramKey = useMemo(
@@ -82,14 +100,68 @@ export function ExcalidrawBoard({ elements, theme = "light" }: ExcalidrawBoardPr
     // that has a higher z_index. A ready diagram contributes its converted
     // elements; everything else (regular kinds, and a diagram still converting)
     // maps through the base skeleton.
-    return live(elements).flatMap((el) => {
-      if (DIAGRAM_KINDS.has(el.kind)) {
-        const ready = diagrams[el.id];
-        if (ready && ready.length > 0) return ready;
-      }
-      return convertToExcalidrawElements([elementToSkeleton(el, { rows: elements })] as unknown as SkeletonInput);
-    });
+    const ordered = live(elements);
+    const readyDiagram = (el: CanvasElement): ExcalidrawElements | null => {
+      const ready = DIAGRAM_KINDS.has(el.kind) ? diagrams[el.id] : undefined;
+      return ready && ready.length > 0 ? ready : null;
+    };
+    // Every skeleton goes through ONE convertToExcalidrawElements call: an
+    // arrow skeleton (mindmap_edge) binds start/end by the target's id, and the
+    // converter only resolves a binding to an element in the same call, so a
+    // per-element conversion leaves every edge unbound. Ready diagrams are
+    // already converted and are spliced back in below.
+    const skeletons = ordered
+      .filter((el) => !readyDiagram(el))
+      .map((el) => elementToSkeleton(el, { rows: elements }));
+    const converted =
+      skeletons.length > 0 ? convertToExcalidrawElements(skeletons as unknown as SkeletonInput) : [];
+    // One skeleton can convert to several elements (a container plus its bound
+    // label text), so group by the row id elementToSkeleton stamps into
+    // customData; a label text carries no customData and follows its container.
+    // Map every stamped element first so a label emitted before its container
+    // still finds its row.
+    const taosIdOf = (x: ExcalidrawElements[number]): string | undefined => {
+      const taosId = (x.customData as { taos_id?: unknown } | undefined)?.taos_id;
+      return typeof taosId === "string" ? taosId : undefined;
+    };
+    const rowOf = new Map<string, string>();
+    for (const x of converted) {
+      const taosId = taosIdOf(x);
+      if (taosId) rowOf.set(x.id, taosId);
+    }
+    const byRow = new Map<string, ExcalidrawElements[number][]>();
+    let lastRow: string | undefined;
+    for (const x of converted) {
+      const containerId = "containerId" in x ? x.containerId : null;
+      const row = taosIdOf(x) ?? (containerId && rowOf.get(containerId)) ?? lastRow;
+      if (!row) continue;
+      lastRow = row;
+      const group = byRow.get(row);
+      if (group) group.push(x);
+      else byRow.set(row, [x]);
+    }
+    return ordered.flatMap((el) => readyDiagram(el) ?? byRow.get(el.id) ?? []);
   }, [elements, diagrams]);
+
+  // Sync layer: created once per projectId when interactive (not readOnly).
+  // When active it receives every scene the board applies (markRemote) and
+  // every change Excalidraw reports (onLocalChange via onChange), and
+  // determines which writes to issue.
+  const sync = useMemo(() => {
+    if (!projectId || readOnly) return null;
+    return createSceneSync({
+      projectId,
+      elementId: elementId ?? null,
+      api: canvasApi,
+      getElement: stableGetElement,
+    });
+  }, [projectId, elementId, readOnly, stableGetElement]);
+
+  // Cleanup sync on unmount or when projectId/readOnly changes.
+  useEffect(() => {
+    if (!sync) return;
+    return () => { const s = sync; void s.flush().catch(() => {}).finally(() => s.dispose()); };
+  }, [sync]);
 
   // Excalidraw reads initialData once at mount; push later scenes (async
   // diagrams) through the imperative API. Fit the viewport to the content only
@@ -98,20 +170,24 @@ export function ExcalidrawBoard({ elements, theme = "light" }: ExcalidrawBoardPr
   const hasFit = useRef(false);
   useEffect(() => {
     if (!api) return;
-    api.updateScene({ elements: sceneElements });
+    api.updateScene({ elements: sceneElements, captureUpdate: CaptureUpdateAction.NEVER });
+    if (sync) sync.markRemote(sceneElements as unknown as readonly SyncSceneElement[]);
     if (!hasFit.current && sceneElements.length > 0) {
       api.scrollToContent(sceneElements, { fitToContent: true, animate: false });
       hasFit.current = true;
     }
-  }, [api, sceneElements]);
+  }, [api, sceneElements, sync]);
+
+  const viewModeEnabled = !projectId || !!readOnly;
 
   return (
     <div style={{ position: "absolute", inset: 0 }} data-testid="excalidraw-board">
       <Excalidraw
         excalidrawAPI={setApi}
         theme={theme}
-        viewModeEnabled
+        viewModeEnabled={viewModeEnabled}
         zenModeEnabled
+        onChange={sync ? (els) => { void sync.onLocalChange(els as unknown as readonly SyncSceneElement[]); } : undefined}
         initialData={{
           elements: sceneElements,
           appState: {
