@@ -1,2 +1,0 @@
-### Added
-- `docs/design/taostalk-parity-audit.md`: capability parity table comparing Messages App vs taOStalk guest path (ConnectWizard) across 10 rows (multiple-choice questions, fenced code blocks, attachments, threads, @mentions, unanswered-mention tracking, search, todo links, read receipts, agent presence) with status and file:line evidence (tsk-nvkmzl).
