@@ -810,3 +810,124 @@ async def test_search_text_finds_unique_token(tmp_path):
     other_hits = await other.search_text("unicorn secret", since=old_ts - 10, limit=10)
     assert other_hits == [], other_hits
     await other.close()
+
+
+# ---------------------------------------------------------------------------
+# 19. RED tests for tsk-yeyspv fixes
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_search_text_handles_card_ids_and_special_chars(tmp_path):
+    """RED: search_text should find card IDs like 'tsk-abc123' and handle
+    apostrophes like \"it's\" without raising FTS5 syntax errors."""
+    store = AgentTraceStore(tmp_path, "search-fix-agent")
+    now = time.time()
+    old_ts = now - 30 * 86400
+    envelopes = [
+        _envelope(id="card-1", created_at=old_ts, kind="tool_result",
+                  payload={"tool": "shell", "result": "task completed: tsk-abc123"}),
+        _envelope(id="card-2", created_at=old_ts + 5, kind="message_in",
+                  payload={"from": "user", "text": "it's working now"}),
+    ]
+    await store.import_envelopes(envelopes)
+
+    # Card ID search should work (not raise "no such column")
+    hits = await store.search_text("tsk-abc123", since=old_ts - 10, limit=10)
+    assert any(h.get("id") == "card-1" for h in hits), f"expected card-1 in hits: {hits}"
+
+    # Apostrophe search should work (not raise "fts5: syntax error")
+    hits = await store.search_text("it's", since=old_ts - 10, limit=10)
+    assert isinstance(hits, list), f"expected list, got {type(hits)}: {hits}"
+    # Should find the event with "it's working now"
+    assert any(h.get("id") == "card-2" for h in hits), f"expected card-2 in hits: {hits}"
+
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_import_envelopes_sealed_bucket_reimport_returns_duplicates(tmp_path):
+    """RED: Re-importing into a sealed bucket should return duplicates=3,
+    inserted=0 without raising 'readonly database' error."""
+    store = AgentTraceStore(tmp_path, "sealed-reimport-agent")
+    now = time.time()
+    old_ts = now - 30 * 86400
+    bucket = _bucket_key(old_ts)
+    envelopes = [
+        _envelope(id=f"sealed-{i}", created_at=old_ts + i, kind="tool_result",
+                  payload={"tool": "shell", "result": f"output-{i}"})
+        for i in range(3)
+    ]
+    # First import
+    result1 = await store.import_envelopes(envelopes)
+    assert result1["inserted"] == 3
+    assert result1["duplicates"] == 0
+
+    # Seal the bucket
+    db_path = _bucket_db_path(tmp_path, "sealed-reimport-agent", bucket)
+    os.chmod(str(db_path), 0o400)
+
+    try:
+        # Re-import same envelopes - should report duplicates, not raise
+        result2 = await store.import_envelopes(envelopes)
+        assert result2["inserted"] == 0, f"expected inserted=0, got {result2}"
+        assert result2["duplicates"] == 3, f"expected duplicates=3, got {result2}"
+    finally:
+        # Restore for cleanup
+        os.chmod(str(db_path), 0o600)
+
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_import_envelopes_sealed_bucket_new_envelope_raises_valueerror(tmp_path):
+    """RED: Importing a NEW envelope into a sealed bucket should raise ValueError
+    before writing to ANY bucket."""
+    store = AgentTraceStore(tmp_path, "sealed-new-agent")
+    now = time.time()
+    old_ts = now - 30 * 86400
+    bucket = _bucket_key(old_ts)
+
+    # Import 3 envelopes into old bucket
+    old_envelopes = [
+        _envelope(id=f"old-{i}", created_at=old_ts + i, kind="tool_result",
+                  payload={"tool": "shell", "result": f"old-{i}"})
+        for i in range(3)
+    ]
+    await store.import_envelopes(old_envelopes)
+
+    # Seal the old bucket
+    db_path = _bucket_db_path(tmp_path, "sealed-new-agent", bucket)
+    os.chmod(str(db_path), 0o400)
+
+    # Also create a current bucket with some data
+    current_ts = now
+    current_bucket = _bucket_key(current_ts)
+    current_envelopes = [
+        _envelope(id=f"curr-{i}", created_at=current_ts + i, kind="tool_result",
+                  payload={"tool": "shell", "result": f"curr-{i}"})
+        for i in range(2)
+    ]
+    await store.import_envelopes(current_envelopes)
+
+    # Now try to import a mix: existing old envelopes (duplicates) + ONE new envelope for the sealed bucket
+    new_sealed_envelope = _envelope(id="new-sealed-1", created_at=old_ts + 100, kind="tool_result",
+                                    payload={"tool": "shell", "result": "new-in-sealed"})
+    mixed_envelopes = old_envelopes + [new_sealed_envelope]
+
+    try:
+        with pytest.raises(ValueError, match="sealed bucket"):
+            await store.import_envelopes(mixed_envelopes)
+    finally:
+        os.chmod(str(db_path), 0o600)
+
+    # Verify the NEW envelope was NOT written to the sealed bucket
+    events = await store.list(since=old_ts, until=old_ts + 200, limit=100)
+    ids = {e["id"] for e in events}
+    assert "new-sealed-1" not in ids, f"new-sealed-1 should not have been written: {ids}"
+
+    # Verify current bucket was not touched either (no partial commit)
+    current_events = await store.list(since=current_ts, until=current_ts + 10, limit=100)
+    current_ids = {e["id"] for e in current_events}
+    assert current_ids == {"curr-0", "curr-1"}, f"current bucket should be unchanged: {current_ids}"
+
+    await store.close()

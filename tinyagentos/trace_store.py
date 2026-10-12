@@ -210,7 +210,7 @@ def _render_fts_text(envelope: dict) -> str:
 
     Concatenates the payload's text/content/tool/args/result fields plus the
     top-level kind and error, capped at FTS_TEXT_CAP bytes. Idempotent for the
-    same envelope — the same input always produces the same string."""
+    same envelope -- the same input always produces the same string."""
     parts: list[str] = []
     kind = envelope.get("kind")
     if kind:
@@ -241,6 +241,20 @@ def _envelope_to_row(envelope: dict) -> tuple:
         envelope["tokens_in"], envelope["tokens_out"], envelope["cost_usd"],
         envelope["error"], json.dumps(envelope["payload"], default=str),
     )
+
+
+def _fts_phrase_query(query: str) -> str:
+    """Convert a plain-text query into an FTS5 phrase query.
+
+    Splits on whitespace, wraps each term in double quotes with internal
+    double quotes escaped by doubling, and joins with a space
+    (implicit AND). Empty or whitespace-only input returns an empty string.
+    """
+    terms = query.strip().split()
+    if not terms:
+        return ""
+    escaped = [f'"{term.replace(chr(34), chr(34)*2)}"' for term in terms]
+    return " ".join(escaped)
 
 
 class AgentTraceStore:
@@ -391,7 +405,7 @@ class AgentTraceStore:
         """Insert one envelope into the bucket DB + FTS index.
 
         Returns True if the row was inserted, False if it was a duplicate
-        (INSERT OR IGNORE on id). Does NOT commit — the caller batches."""
+        (INSERT OR IGNORE on id). Does NOT commit -- the caller batches."""
         row = _envelope_to_row(envelope)
         cur = await conn.execute(
             """INSERT OR IGNORE INTO trace_events
@@ -419,7 +433,7 @@ class AgentTraceStore:
         VALID_KINDS, v1 keys present), grouped by bucket (_bucket_key of
         created_at), and inserted with INSERT OR IGNORE on id so re-running an
         import is idempotent. Does NOT seal/unseal buckets and does NOT touch
-        the live registry bucket — historical import lands in the DB by
+        the live registry bucket -- historical import lands in the DB by
         construction, never in the .late.jsonl fallback.
 
         Returns {inserted, duplicates, buckets}."""
@@ -438,10 +452,60 @@ class AgentTraceStore:
             if bucket not in buckets:
                 buckets.append(bucket)
 
+        # Before any write, check sealed buckets for missing ids.
+        # A sealed bucket has .db file that is not writable.
+        sealed_buckets_missing: dict[str, list[str]] = {}
+        existing_ids_by_bucket: dict[str, set[str]] = {}
+        for bucket in buckets:
+            db_path = _bucket_db_path(self._data_dir, self._slug, bucket)
+            if db_path.exists() and not os.access(str(db_path), os.W_OK):
+                # Sealed bucket: open read-only and collect existing ids.
+                existing_ids: set[str] = set()
+                try:
+                    conn = await aiosqlite.connect(
+                        f"file:{db_path}?mode=ro",
+                        uri=True,
+                    )
+                    try:
+                        cur = await conn.execute("SELECT id FROM trace_events")
+                        rows = await cur.fetchall()
+                        await cur.close()
+                        for row in rows:
+                            existing_ids.add(row[0])
+                    finally:
+                        await conn.close()
+                except Exception as exc:
+                    logger.warning(
+                        "trace_store: import_envelopes could not read sealed bucket %s: %s",
+                        bucket, exc,
+                    )
+                existing_ids_by_bucket[bucket] = existing_ids
+                # Check which envelopes for this bucket are missing.
+                missing = [env["id"] for env in grouped[bucket] if env["id"] not in existing_ids]
+                if missing:
+                    sealed_buckets_missing[bucket] = missing
+
+        if sealed_buckets_missing:
+            # Format error message with bucket names and missing ids.
+            details = ", ".join(
+                f"{b}: {len(ids)} missing" for b, ids in sealed_buckets_missing.items()
+            )
+            raise ValueError(
+                f"import_envelopes: sealed buckets have new envelopes (would require write): {details}"
+            )
+
         async with self._lock:
             for bucket, envs in grouped.items():
+                # Skip envelopes whose ids already exist in a sealed bucket.
+                existing_ids = existing_ids_by_bucket.get(bucket, set())
+                envs_to_write = [env for env in envs if env["id"] not in existing_ids]
+                duplicates += len(envs) - len(envs_to_write)
+
+                if not envs_to_write:
+                    continue
+
                 conn = await self._open_bucket(bucket)
-                for env in envs:
+                for env in envs_to_write:
                     if await self._insert_envelope(conn, env):
                         inserted += 1
                     else:
@@ -463,9 +527,13 @@ class AgentTraceStore:
     ) -> list[dict]:
         """FTS5 text search across this agent's buckets in the time range.
 
-        ``query`` is passed straight to FTS5 (FTS5 query syntax supported).
+        ``query`` is a plain-text string (not FTS5 syntax). Terms are split on
+        whitespace, each term is phrase-matched, and all terms are ANDed.
         Hits are joined back to trace_events rows and returned newest-first,
         capped at ``limit`` (max 1000)."""
+        fts_query = _fts_phrase_query(query)
+        if not fts_query:
+            return []
         limit = max(1, min(limit, 1000))
         trace_dir = _agent_trace_dir(self._data_dir, self._slug)
         if not trace_dir.exists():
@@ -490,7 +558,7 @@ class AgentTraceStore:
                                JOIN trace_events t ON t.id = f.id
                                WHERE trace_events_fts MATCH ?
                                ORDER BY t.created_at DESC""",
-                            (query,),
+                            (fts_query,),
                         )
                         rows = await cur.fetchall()
                         cols = [d[0] for d in cur.description]
