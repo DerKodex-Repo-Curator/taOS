@@ -341,6 +341,9 @@ def register_all_routers(app):
     from tinyagentos.routes.mcp import router as mcp_router
     app.include_router(mcp_router, dependencies=_csrf)
 
+    from tinyagentos.routes.mcp_agent import router as mcp_agent_router
+    app.include_router(mcp_agent_router, dependencies=_csrf)
+
     from tinyagentos.routes.trace import router as trace_router
     app.include_router(trace_router, dependencies=_csrf)
 

@@ -118,6 +118,12 @@ _OBSERVATORY_PATHS = frozenset({
     "/api/observatory/fleet",
     "/api/observatory/wake-budget",
 })
+# Cloud agent MCP endpoint (S4): streamable-HTTP MCP server for external agents.
+# The route verifies the agent JWT + scope grants itself; the middleware only
+# passes the Bearer through. No session cookie path, no local-token path.
+_MCP_AGENT_PATHS = frozenset({
+    "/api/mcp/agent",
+})
 # Container provisioning request: an agent may POST its own registry JWT
 # (identity verified by check_agent_identity in the route; no scope grant
 # required since any active agent may request its own container). The route
@@ -160,6 +166,7 @@ _AGENT_TOKEN_PATHS = (
     | _A2A_GPU_WRITE_PATHS
     | _OBSERVATORY_PATHS
     | _CONTAINER_REQUEST_PATHS
+    | _MCP_AGENT_PATHS
     | frozenset({
         "/api/agents/me/models",
         "/api/agents/me/model",
