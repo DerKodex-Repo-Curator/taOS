@@ -28,9 +28,9 @@ def _is_secret_file_read(path: str) -> bool:
 
 
 class TestIterRecords:
-    def test_yields_six_records_from_seven_line_fixture(self):
+    def test_yields_eight_records_from_nine_line_fixture(self):
         records = list(iter_records(FIXTURE))
-        assert len(records) == 6
+        assert len(records) == 8
 
     def test_skipped_line_not_present(self):
         records = list(iter_records(FIXTURE))
@@ -62,12 +62,13 @@ class TestToEnvelopes:
         env = self._envelopes()
         kinds = [e["kind"] for e in env]
         assert kinds == [
-            "message_in",  # rec-u1: user text
+            "message_in",  # rec-u1: user text (list)
             "message_out",  # rec-a1: assistant text (thinking dropped, image replaced)
             "tool_call",  # rec-a2: Bash
             "tool_result",  # rec-u2: Bash result
             "tool_call",  # rec-a3: Read
             "tool_result",  # rec-u3: Read result (secret)
+            "message_in",  # rec-u9: user text (string)
         ]
 
     def test_envelope_top_level_fields(self):
@@ -156,6 +157,23 @@ class TestToEnvelopes:
         assert read_result["payload"]["result"] != "[secret file read omitted]"
         assert "SUPERSECRET" not in read_result["payload"]["result"]
 
+    def test_string_content_user_prompt_becomes_message_in(self):
+        env = self._envelopes()
+        msg_in = [
+            e for e in env
+            if e["kind"] == "message_in" and e["payload"]["text"] == "plain string prompt"
+        ]
+        assert len(msg_in) == 1
+        assert msg_in[0]["payload"]["from"] == "user"
+        assert msg_in[0]["payload"]["text"] == "plain string prompt"
+        assert msg_in[0]["id"] == "rec-u9"
+
+    def test_is_meta_user_record_skipped(self):
+        env = self._envelopes()
+        blob = json.dumps(env)
+        assert "skill body injection" not in blob
+        assert all(e["id"] != "rec-u10" for e in env)
+
 
 class TestToIndexLines:
     def _lines(self):
@@ -168,9 +186,9 @@ class TestToIndexLines:
         )
         return to_index_lines(env)
 
-    def test_four_index_lines_for_six_envelopes(self):
+    def test_five_index_lines_for_eight_envelopes(self):
         lines = self._lines()
-        assert len(lines) == 4
+        assert len(lines) == 5
 
     def test_no_tool_result_lines(self):
         lines = self._lines()
@@ -185,10 +203,11 @@ class TestToIndexLines:
     def test_message_in_index_line(self):
         lines = self._lines()
         msg_in = [l for l in lines if l["role"] == "user"]
-        assert len(msg_in) == 1
+        assert len(msg_in) == 2
         assert msg_in[0]["trace_id"] == "sess-1"
         assert "[REDACTED]" in msg_in[0]["text"]
         assert "SECRET" not in msg_in[0]["text"]
+        assert msg_in[1]["text"] == "plain string prompt"
 
     def test_message_out_index_line(self):
         lines = self._lines()
@@ -222,8 +241,8 @@ class TestManifest:
         )
         index_lines = to_index_lines(env)
         m = manifest(FIXTURE, env, index_lines)
-        assert m["envelopes"] == 6
-        assert m["index_lines"] == 4
+        assert m["envelopes"] == 7
+        assert m["index_lines"] == 5
         assert m["skipped_lines"] == 1
         assert isinstance(m["bytes_in"], int)
         assert m["bytes_in"] > 0

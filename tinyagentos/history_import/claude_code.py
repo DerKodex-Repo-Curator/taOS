@@ -152,11 +152,14 @@ def to_envelopes(
     - ``parent_id`` of a tool_result = its tool_use id
     - ``created_at`` = record ``timestamp`` as epoch float
 
-    Thinking blocks are dropped.  Image bytes are replaced with
-    ``{"text": "[image omitted]"}``.  Every text field passes through the
-    injected ``redact`` callable.  A tool_result whose matching tool_call
-    read a path where ``is_secret_file_read(path)`` is True gets
-    ``result`` replaced with ``"[secret file read omitted]"``.
+    A typed user prompt whose ``message.content`` is a plain string is emitted
+    as a single ``message_in``.  Records carrying ``"isMeta": true`` are
+    harness injections (skill bodies, command caveats), not user prompts, and
+    are skipped in the user branch.  Thinking blocks are dropped.  Image bytes
+    are replaced with ``{"text": "[image omitted]"}``.  Every text field
+    passes through the injected ``redact`` callable.  A tool_result whose
+    matching tool_call read a path where ``is_secret_file_read(path)`` is
+    True gets ``result`` replaced with ``"[secret file read omitted]"``.
     """
     envelopes: list[dict] = []
     tool_calls: dict[str, tuple[str, dict]] = {}
@@ -165,6 +168,8 @@ def to_envelopes(
         rtype = record.get("type")
         if not rtype:
             continue
+        if rtype == "user" and record.get("isMeta"):
+            continue
         trace_id = record.get("session_id")
         rid = record.get("uuid")
         created_at = _epoch(record.get("timestamp"))
@@ -172,6 +177,21 @@ def to_envelopes(
         blocks = message.get("content") or []
 
         if rtype == "user":
+            if isinstance(blocks, str):
+                text = _redact_text(redact, blocks)
+                if text:
+                    envelopes.append(
+                        _envelope(
+                            agent_name,
+                            "message_in",
+                            created_at,
+                            trace_id,
+                            rid,
+                            None,
+                            {"from": "user", "text": text},
+                        )
+                    )
+                continue
             for block in blocks:
                 if not isinstance(block, dict):
                     continue
