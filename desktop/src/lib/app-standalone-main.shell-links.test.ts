@@ -1,6 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-
-const CONFIG_URL = "/api/taos-agent/config";
+import { TAOS_AGENT_CONFIG_URL } from "./taos-agent-api";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -37,7 +36,7 @@ describe("app-standalone-main shell link routing", () => {
 
     fetchMock.mockImplementation((input: RequestInfo | URL) => {
       const url = String(input);
-      if (url === CONFIG_URL) {
+      if (url === TAOS_AGENT_CONFIG_URL) {
         return configPromise;
       }
       return Promise.reject(new Error(`unexpected fetch ${url}`));
@@ -54,27 +53,21 @@ describe("app-standalone-main shell link routing", () => {
   });
 
   it("awaits device-class prime before routing links: window.open after boot routes through openUrlInShell on mobile", async () => {
-    // Start booting the standalone app (this starts and awaits the prime)
-    const bootPromise = import("./app-standalone-main");
+    let booted = false;
+    const bootPromise = import("../app-standalone-main").then(() => {
+      booted = true;
+    });
 
-    // Give it time to start the prime
     await Promise.resolve();
 
-    // Now resolve the config as mobile
+    expect(booted).toBe(false);
+
     configResolve!(jsonResponse({ device_class: "mobile" }));
 
-    // Wait for the prime to complete
-    await configPromise;
-    await Promise.resolve();
-    await Promise.resolve();
-
-    // Now await the import (which was waiting for the prime)
     await bootPromise;
 
-    // Fire window.open AFTER the prime resolves and boot completes
     window.open("https://example.com/", "_blank");
 
-    // With the fix (awaiting prime before installShellLinks), this should route through openUrlInShell
     expect(openUrlInShellMock).toHaveBeenCalledWith("https://example.com/");
   });
 });
