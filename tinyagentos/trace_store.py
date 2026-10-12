@@ -2,7 +2,7 @@
 
 Every LLM call, tool invocation, and agent message boundary is captured
 here. Files live on a dedicated host path that is bind-mounted into the
-container at /root/.taos/trace/ — the single persistent trace mount in
+container at /root/.taos/trace/ -- the single persistent trace mount in
 the Phase 2 snapshot model (docs/design/architecture-pivot-v2.md §3.3).
 
 Layout:
@@ -11,12 +11,12 @@ Layout:
         YYYY-MM-DDTHH.jsonl    # fallback: appended only on DB failure
 
 Bucket routing uses the EVENT's created_at, not wall-clock at write
-time, so rollover never drops events — a 14:59:59.999 event routed at
+time, so rollover never drops events -- a 14:59:59.999 event routed at
 15:00:00.001 lands in the T14 file. The registry keeps the current
 bucket open per agent (and the previous hour briefly, for late events);
 older buckets close automatically.
 
-Envelope v1 — stable, see the module-level ENVELOPE_V1_SCHEMA dict for
+Envelope v1 -- stable, see the module-level ENVELOPE_V1_SCHEMA dict for
 the full shape. Kinds and their payload shapes are documented there.
 Consumers (taOSmd librarian) rely on this contract; bump v if it ever
 has to change and provide a migration path.
@@ -80,9 +80,9 @@ VALID_KINDS = frozenset({
     "message_in", "message_out", "llm_call", "tool_call",
     "tool_result", "reasoning", "error", "lifecycle",
     # Phase 1 observability: post-hoc reasoning judge result (§4.7 / §7).
-    # Never emitted as an OTel span — it is an internal eval artifact.
+    # Never emitted as an OTel span -- it is an internal eval artifact.
     "reasoning_audit",
-    # Registry governance audit events (PR1 — lifecycle state machine).
+    # Registry governance audit events (PR1 -- lifecycle state machine).
     # Payload shape: {action, canonical_id, actor_user_id, before_status, after_status}
     "governance",
     # GPU work queue per-op audit record (taOS #1864). One per op on
@@ -90,7 +90,7 @@ VALID_KINDS = frozenset({
     "gpu_op",
 })
 
-# Documented envelope schema — the librarian parses against this.
+# Documented envelope schema -- the librarian parses against this.
 # Keep this dict in sync with the columns + docstring. If you change
 # any field name, bump SCHEMA_VERSION and document the migration.
 ENVELOPE_V1_SCHEMA = {
@@ -109,10 +109,10 @@ ENVELOPE_V1_SCHEMA = {
         "reasoning": {"text": "str", "block_type": "str?"},
         "error": {"stage": "str", "message": "str", "traceback": "str?"},
         "lifecycle": {"event": "str", "reason": "str?"},
-        # Phase 1 observability — judge result written by tinyagentos/otel/judge.py (Phase 4).
+        # Phase 1 observability -- judge result written by tinyagentos/otel/judge.py (Phase 4).
         # Payload shape: {verdict: "pass"|"warn"|"fail", flags: list[str], model: str, latency_ms: int}
         "reasoning_audit": {"verdict": "pass|warn|fail", "flags": "list[str]", "model": "str", "latency_ms": "int"},
-        # Registry governance audit (PR1 — lifecycle state machine).
+        # Registry governance audit (PR1 -- lifecycle state machine).
         "governance": {
             "action": "str",
             "canonical_id": "str",
@@ -258,7 +258,7 @@ def _fts_phrase_query(query: str) -> str:
 
 
 class AgentTraceStore:
-    """One agent's trace store — manages hourly bucket DBs + JSONL fallback."""
+    """One agent's trace store -- manages hourly bucket DBs + JSONL fallback."""
 
     def __init__(self, data_dir: Path, slug: str):
         self._data_dir = data_dir
@@ -356,11 +356,11 @@ class AgentTraceStore:
         filled). On SQLite failure, falls back to JSONL in the same bucket.
 
         Caller can supply ``id`` for idempotency; if omitted, a fresh uuid
-        is minted. Unknown kinds raise ValueError — catch in the route."""
+        is minted. Unknown kinds raise ValueError -- catch in the route."""
         envelope = _build_envelope(self._slug, kind, fields)
         bucket = _bucket_key(envelope["created_at"])
         async with self._lock:
-            # Route sealed buckets straight to the late sidecar — attempting
+            # Route sealed buckets straight to the late sidecar -- attempting
             # SQLite on a read-only file would raise "readonly database".
             if self._is_sealed_bucket(bucket):
                 self._append_late(bucket, envelope)
@@ -373,14 +373,14 @@ class AgentTraceStore:
                 await conn.commit()
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
-                    "trace_store: DB write failed for %s/%s — appending to JSONL (%s)",
+                    "trace_store: DB write failed for %s/%s -- appending to JSONL (%s)",
                     self._slug, bucket, exc,
                 )
                 self._append_fallback(bucket, envelope)
-            # Opportunistic eviction — cheap, runs under our lock.
+            # Opportunistic eviction -- cheap, runs under our lock.
             now_bucket = _bucket_key(time.time())
             await self._evict_old_buckets(now_bucket)
-        # OTel emission is a side-effect of record() — D5: NOT routed via bus.py.
+        # OTel emission is a side-effect of record() -- D5: NOT routed via bus.py.
         # Fire-and-forget; any emission error is silently dropped.
         if self._emitter is not None:
             try:
@@ -454,6 +454,11 @@ class AgentTraceStore:
 
         # Before any write, check sealed buckets for missing ids.
         # A sealed bucket has .db file that is not writable.
+        # NOTE: This pre-check runs outside self._lock (TOCTOU window). A bucket
+        # sealed concurrently after the check but before the write under the lock
+        # could still be written via the cached writable connection from
+        # _open_bucket. Acceptable per card spec; the check is a best-effort
+        # guard to catch the common case of pre-sealed buckets.
         sealed_buckets_missing: dict[str, list[str]] = {}
         existing_ids_by_bucket: dict[str, set[str]] = {}
         for bucket in buckets:
@@ -617,7 +622,7 @@ class AgentTraceStore:
 
     def _seal_bucket(self, bucket: str) -> None:
         """chmod .db and .jsonl to 0o400 (read-only) for the given bucket.
-        Idempotent — skips files that are already read-only."""
+        Idempotent -- skips files that are already read-only."""
         db_path = _bucket_db_path(self._data_dir, self._slug, bucket)
         jsonl_path = _bucket_jsonl_path(self._data_dir, self._slug, bucket)
         for path in (db_path, jsonl_path):
@@ -657,7 +662,7 @@ class AgentTraceStore:
                 f.write(json.dumps(envelope, default=str) + "\n")
         except Exception as exc:  # noqa: BLE001
             logger.error(
-                "trace_store: LATE WRITE FAILED for %s/%s: %s — EVENT LOST",
+                "trace_store: LATE WRITE FAILED for %s/%s: %s -- EVENT LOST",
                 self._slug, bucket, exc,
             )
 
@@ -669,7 +674,7 @@ class AgentTraceStore:
                 f.write(json.dumps(envelope, default=str) + "\n")
         except Exception as exc:  # noqa: BLE001
             logger.error(
-                "trace_store: FALLBACK WRITE FAILED for %s/%s: %s — EVENT LOST",
+                "trace_store: FALLBACK WRITE FAILED for %s/%s: %s -- EVENT LOST",
                 self._slug, bucket, exc,
             )
 
@@ -809,7 +814,7 @@ def _bucket_overlaps(bucket: str, since: float | None, until: float | None) -> b
     try:
         dt = datetime.strptime(bucket, "%Y-%m-%dT%H").replace(tzinfo=timezone.utc)
     except ValueError:
-        return True  # Non-standard name — don't skip, let the normal filter reject.
+        return True  # Non-standard name -- don't skip, let the normal filter reject.
     start = dt.timestamp()
     end = start + 3600
     if since is not None and end < since:

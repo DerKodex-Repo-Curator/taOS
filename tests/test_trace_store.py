@@ -910,9 +910,12 @@ async def test_import_envelopes_sealed_bucket_new_envelope_raises_valueerror(tmp
     await store.import_envelopes(current_envelopes)
 
     # Now try to import a mix: existing old envelopes (duplicates) + ONE new envelope for the sealed bucket
+    # AND a new envelope for the current bucket - this exercises the no-partial-commit guarantee
     new_sealed_envelope = _envelope(id="new-sealed-1", created_at=old_ts + 100, kind="tool_result",
                                     payload={"tool": "shell", "result": "new-in-sealed"})
-    mixed_envelopes = old_envelopes + [new_sealed_envelope]
+    new_current_envelope = _envelope(id="new-curr-1", created_at=current_ts + 10, kind="tool_result",
+                                     payload={"tool": "shell", "result": "new-in-current"})
+    mixed_envelopes = old_envelopes + [new_sealed_envelope, new_current_envelope]
 
     try:
         with pytest.raises(ValueError, match="sealed bucket"):
@@ -926,7 +929,7 @@ async def test_import_envelopes_sealed_bucket_new_envelope_raises_valueerror(tmp
     assert "new-sealed-1" not in ids, f"new-sealed-1 should not have been written: {ids}"
 
     # Verify current bucket was not touched either (no partial commit)
-    current_events = await store.list(since=current_ts, until=current_ts + 10, limit=100)
+    current_events = await store.list(since=current_ts, until=current_ts + 20, limit=100)
     current_ids = {e["id"] for e in current_events}
     assert current_ids == {"curr-0", "curr-1"}, f"current bucket should be unchanged: {current_ids}"
 

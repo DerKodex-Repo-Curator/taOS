@@ -5,5 +5,4 @@
 
 ### Fixed
 
-- `search_text()` now accepts plain-text queries (not FTS5 syntax); card IDs like `tsk-abc123` and apostrophes like `it's` no longer raise FTS5 syntax errors.
-- `import_envelopes()` now pre-checks sealed (read-only) buckets: re-importing existing ids reports them as duplicates without raising "readonly database", and importing new envelopes into a sealed bucket raises `ValueError` before any write occurs (no partial commit across buckets).
+- `search_text()` accepts plain-text queries (card IDs like `tsk-abc123`, apostrophes like `it's`); `import_envelopes()` pre-checks sealed buckets: re-imports report duplicates, new envelopes raise `ValueError` before any write (no partial commit).
