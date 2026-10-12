@@ -1271,6 +1271,14 @@ request gets a 429 carrying `Retry-After` in whole seconds:
   a browser gets a minimal HTML page. No PIN check here; it only advertises the
   contract.
 
+The invite create body accepts a `kind` field (default `agent`; valid values
+`agent` or `cloud_agent`; any other value returns 400 with the valid list).
+For `cloud_agent` the controller must have `TAOS_CONTROLLER_RELAY_URL` set to a
+safe public `https://` URL or minting fails with "set up taOSgo first".
+`cloud_agent` defaults `check_interval_secs` to 900 (the `agent` kind keeps its
+existing default of 1800). The redeemed `cloud_agent` bundle carries ONLY relay
+endpoints (LAN and mesh are stripped).
+
 The redeem response carries a **connection bundle** (design section 4 plus the
 Approved-build addendum). It contains NO token or secret (the token still
 arrives via the status poll). The bundle has:
