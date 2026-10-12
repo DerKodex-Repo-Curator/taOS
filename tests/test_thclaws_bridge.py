@@ -78,7 +78,7 @@ def bridge_ns():
 # -- call_thclaws retry tests ---------------------------------------------------
 
 class TestCallThclawsRetry:
-    """call_thclaws(client, messages) → str"""
+    """call_thclaws(client, messages) -> str"""
 
     def test_200_returns_content(self, bridge_ns):
         call_thclaws = bridge_ns["call_thclaws"]
@@ -153,11 +153,31 @@ class TestCallThclawsRetry:
         assert result.startswith("[thclaws returned 503:")
         assert client.post.call_count == 3
 
+    def test_model_prefixed_with_litellm(self, bridge_ns):
+        """call_thclaws sends model as 'litellm/<TAOS_MODEL>' to /v1/chat/completions."""
+        call_thclaws = bridge_ns["call_thclaws"]
+        client = MagicMock()
+        client.post = AsyncMock(return_value=MagicMock(
+            status_code=200,
+            json=MagicMock(return_value={"choices": [{"message": {"content": "ok"}}]}),
+        ))
+
+        asyncio.run(call_thclaws(client, [{"role": "user", "content": "hi"}]))
+
+        # Check the call arguments - model should be prefixed with litellm/
+        call_args = client.post.call_args
+        assert call_args is not None
+        payload = call_args.kwargs.get("json", {})
+        assert payload.get("model") == "litellm/test-model"
+        # Check the POST URL contains /v1/chat/completions
+        url = call_args.args[0] if call_args.args else call_args.kwargs.get("url", "")
+        assert "/v1/chat/completions" in url
+
 
 # -- handle_user_message dedup + cooldown tests --------------------------------
 
 class TestHandleUserMessageDedup:
-    """handle_user_message(client, evt, channel, _seen, _error_until) → bool"""
+    """handle_user_message(client, evt, channel, _seen, _error_until) -> bool"""
 
     def _make_evt(self, msg_id="msg-1", text="hello"):
         return {"id": msg_id, "trace_id": msg_id, "text": text}
@@ -180,7 +200,7 @@ class TestHandleUserMessageDedup:
         seen: set = set()
         error_until: list = [0.0]
 
-        # First call — should process
+        # First call -- should process
         seen_before = seen.copy()
         # We need to mock call_thclaws to return a non-error
         with patch.dict(bridge_ns, {"call_thclaws": AsyncMock(return_value="ok")}):
@@ -188,7 +208,7 @@ class TestHandleUserMessageDedup:
         assert result1 is True
         assert "msg-1" in seen
 
-        # Second call with same msg_id — should be skipped
+        # Second call with same msg_id -- should be skipped
         with patch.dict(bridge_ns, {"call_thclaws": AsyncMock(return_value="ok")}):
             result2 = asyncio.run(handle(client, evt, channel, seen, error_until))
         assert result2 is False  # dedup suppressed
@@ -200,7 +220,7 @@ class TestHandleUserMessageDedup:
         seen: set = set()
         error_until: list = [0.0]
 
-        # First message returns a thclaws error → starts cooldown
+        # First message returns a thclaws error -> starts cooldown
         with patch.dict(bridge_ns, {"call_thclaws": AsyncMock(
             return_value="[thclaws error: ReadTimeout]"
         )}):
@@ -208,7 +228,7 @@ class TestHandleUserMessageDedup:
         assert result1 is True
         assert error_until[0] > 0  # cooldown timestamp set
 
-        # Second message arrives during cooldown → suppressed
+        # Second message arrives during cooldown -> suppressed
         with patch.dict(bridge_ns, {"call_thclaws": AsyncMock(return_value="ok")}):
             result2 = asyncio.run(handle(client, self._make_evt("m2"), channel, seen, error_until))
         assert result2 is False  # cooldown suppressed
@@ -270,8 +290,8 @@ class TestSeenTiming:
         with patch.dict(bridge_ns, {"call_thclaws": AsyncMock(return_value="ok")}):
             result = asyncio.run(handle(client, self._make_evt("m-post-fail"), channel, seen, error_until))
 
-        # The function should still return True (it attempted to post)
-        # but the message id should NOT be in seen since POST failed
+        # The function returns False (reply POST failed)
+        # and the message id should NOT be in seen since POST failed
         assert "m-post-fail" not in seen, "Message with failed reply POST must NOT be added to _seen"
 
     def test_successful_reply_adds_to_seen(self, bridge_ns):
@@ -298,3 +318,37 @@ class TestSeenBounded:
         assert "_MAX_SEEN" in BRIDGE_PY, "Missing _MAX_SEEN constant"
         assert "len(_seen) >= _MAX_SEEN" in BRIDGE_PY, "Missing bound check"
         assert "_seen.clear()" in BRIDGE_PY, "Missing clear on bound"
+
+
+# -- install script verification ------------------------------------------------
+
+class TestInstallScript:
+    def test_install_script_runs_sha256sum_before_install(self):
+        """Verify install_thclaws.sh runs sha256sum -c before install -m 755."""
+        script_path = Path(__file__).resolve().parent.parent / "tinyagentos" / "scripts" / "install_thclaws.sh"
+        text = script_path.read_text()
+        
+        # Find the position of sha256sum -c
+        sha256_pos = text.find("sha256sum -c")
+        install_pos = text.find("install -m 755")
+        
+        assert sha256_pos != -1, "sha256sum -c not found in install_thclaws.sh"
+        assert install_pos != -1, "install -m 755 not found in install_thclaws.sh"
+        assert sha256_pos < install_pos, "sha256sum -c must run before install -m 755"
+
+    def test_pip3_install_line_before_systemctl(self):
+        """Verify the pip3 install httpx line appears before the systemctl enable command."""
+        script_path = Path(__file__).resolve().parent.parent / "tinyagentos" / "scripts" / "install_thclaws.sh"
+        text = script_path.read_text()
+        
+        # Find pip3 install line that mentions httpx
+        pip_lines = [i+1 for i, line in enumerate(text.splitlines()) if re.search(r'^pip3 install .*httpx\b', line)]
+        assert pip_lines, "pip3 install httpx line not found in install_thclaws.sh"
+        pip_line = min(pip_lines)  # first occurrence
+        
+        # Find the systemctl enable --now line
+        enable_lines = [i+1 for i, line in enumerate(text.splitlines()) if "systemctl enable --now taos-thclaws-bridge.service" in line]
+        assert enable_lines, "systemctl enable --now line not found"
+        enable_line = min(enable_lines)
+        
+        assert pip_line < enable_line, f"pip3 install line {pip_line} appears after systemctl enable line {enable_line}"

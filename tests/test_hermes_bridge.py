@@ -270,7 +270,7 @@ class TestSeenTiming:
         with patch.dict(bridge_ns, {"call_hermes": AsyncMock(return_value="ok")}):
             result = asyncio.run(handle(client, self._make_evt("m-post-fail"), channel, seen, error_until))
 
-        # The function should still return True (it attempted to post)
+        # The function returns False (reply POST failed)
         # but the message id should NOT be in seen since POST failed
         assert "m-post-fail" not in seen, "Message with failed reply POST must NOT be added to _seen"
 
@@ -298,3 +298,4 @@ class TestSeenBounded:
         assert "_MAX_SEEN" in BRIDGE_PY, "Missing _MAX_SEEN constant"
         assert "len(_seen) >= _MAX_SEEN" in BRIDGE_PY, "Missing bound check"
         assert "_seen.clear()" in BRIDGE_PY, "Missing clear on bound"
+
