@@ -1,0 +1,2 @@
+### Fixed
+- app-standalone-main now awaits device-class prime before installing shell link routing and rendering, so links opened immediately after boot correctly route through Firefox on taOSmobile handsets.

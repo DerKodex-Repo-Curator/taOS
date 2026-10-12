@@ -17,7 +17,7 @@ installAuthGuard();
 
 // This window is a taOSmobile shell window when device_class says so: learn
 // that, then send links it opens in a new window to Firefox.
-void primeDeviceClass();
+await primeDeviceClass();
 installShellLinks();
 
 // Apply the user's persisted theme on boot, same as chat-main.tsx.
