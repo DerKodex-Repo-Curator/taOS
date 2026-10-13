@@ -1883,8 +1883,48 @@ snapshot, not a lock.
   capabilities and loaded models, and those are not reachable capacity, so an
   offline node's retained capabilities land in `installed_nodes` instead.
   Capability strings are reported as the workers and catalog manifests write
-  them (`chat`, `image-generation`, `llm-chat`, ...); the endpoint does not
-  invent a normalised vocabulary.
+   them (`chat`, `image-generation`, `llm-chat`, ...); the endpoint does not
+   invent a normalised vocabulary.
+
+## Cluster resource inventory (`GET /api/cluster/resources`, admin-only)
+
+Route module `tinyagentos/routes/cluster_resources.py`. **Admin session only**:
+the auth middleware answers `401` to a cookie-less caller (this path is not in the
+exempt list) and `_require_admin` answers `403` to a signed-in non-admin, so no
+agent scope reaches it. Read-only by construction --- it owns no state, adds no
+methods to `ClusterManager`, and aggregates per request from existing getters
+(`config.agents`, `cluster_manager.get_workers()`, `installed_apps.list_installed()`
+plus `list_containers`), so it cannot drift from the routing/scheduling source of
+truth.
+
+- `resources` -- one flat row per resource taOS runs across the whole mesh:
+  - `agent`: one row per agent record in config, joined to its incus container
+    (`container_name` or the `taos-agent-<name>` fallback) via
+    `list_containers(prefix="taos-agent-")`. Worker is always `"local"` (the
+    agent record's `host` is a container IP, not a worker name). `project` is
+    the agent record's `project` field when one exists, else null. `state` is
+    mapped from the incus status (`running`/`stopped`/`frozen`, else `unknown`).
+  - `backend`: one row per backend declared by each registered worker
+    (`worker.backends`, walked exactly as `cluster_map` does). `state` is
+    `running` when the backend status is in `RUNNING_BACKEND_STATUS` (`ok`,
+    `running`, `healthy`) *and* the worker's heartbeat health is `online` or
+    `stale`; otherwise `stopped`. A backend on an offline worker reports
+    `stopped`.
+  - `app`: one row per installed app (`installed_apps.list_installed()`),
+    mirroring `GET /api/apps/installed`: `state` is `running` when the app has
+    a runtime host + port, else `unknown`. If `installed_apps` is None, no app
+    rows and no error.
+  - `controller`: exactly one row (`controller:local`, always `running`).
+- `errors` -- names of sources that failed during aggregation (e.g.
+  `containers` when `list_containers` raises). A failing source does not 500
+  the response: its rows fall back to safe defaults (`agent` rows get
+  `state` `unknown`) and the rest of the inventory still ships.
+- `generated_at` -- Unix timestamp of the snapshot.
+
+Each row has exactly: `id` (`<type>:<name>`), `type`, `name`, `worker`,
+`project` (string or null), `state`, `cpu_cores` (int or null),
+`memory_mb` (int or null), and `warnings` (list of short strings, may be
+empty). Rows are sorted by `(type, worker, name)`.
 
 ## Controller generation echo (split-brain protection)
 
