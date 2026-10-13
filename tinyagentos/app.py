@@ -120,7 +120,6 @@ from tinyagentos.mcp import MCPServerStore, MCPSupervisor
 from tinyagentos.mcp.marketplace import (
     MCPMarketplace,
     MCPRegistry,
-    default_registry_dir,
 )
 from tinyagentos.frameworks import FRAMEWORKS, FrameworkManifestError, validate_framework_manifest
 
@@ -358,8 +357,10 @@ def create_app(data_dir: Path | None = None, catalog_dir: Path | None = None) ->
     # the package; loading is deferred, so building it here costs nothing at
     # boot.  The supervisor is attached by the lifespan (the install path only
     # needs the store; uninstall uses the supervisor when one is wired).
+    # Resolved from catalog_dir (not the source tree) so a relocated catalog
+    # — e.g. create_app(catalog_dir=...) in tests — serves its own registry.
     mcp_marketplace = MCPMarketplace(
-        registry=MCPRegistry(default_registry_dir()),
+        registry=MCPRegistry(catalog_dir / "mcp-registry"),
         store=mcp_store,
         # Where a manifest's `{workspace}` placeholder is expanded to, and the
         # directory the install flow creates for it.  Deliberately NOT data_dir
