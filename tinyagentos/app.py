@@ -509,6 +509,8 @@ def create_app(data_dir: Path | None = None, catalog_dir: Path | None = None) ->
     chat_hub = ChatHub()
     canvas_store = CanvasStore(data_dir / "canvas.db")
     desktop_settings = DesktopSettingsStore(data_dir / "desktop.db")
+    from tinyagentos.taos_agent_actions import TaosAgentActionStore
+    taos_agent_actions = TaosAgentActionStore(data_dir / "taos_agent_actions.db")
     from tinyagentos.device_store import DeviceStore
     device_store = DeviceStore(data_dir / "devices.db")
     from tinyagentos.device_pair_requests_store import DevicePairRequestsStore
@@ -721,6 +723,7 @@ def create_app(data_dir: Path | None = None, catalog_dir: Path | None = None) ->
         projects_root.mkdir(parents=True, exist_ok=True)
         await canvas_store.init()
         await desktop_settings.init()
+        await taos_agent_actions.init()
         await device_store.init()
         await device_pair_requests_store.init()
         await user_memory.init()
@@ -1602,6 +1605,7 @@ def create_app(data_dir: Path | None = None, catalog_dir: Path | None = None) ->
         await install_registry_store.close()
         await user_memory.close()
         await desktop_settings.close()
+        await taos_agent_actions.close()
         await device_store.close()
         await device_pair_requests_store.close()
         # Close the APNs sender's httpx client (self-created by HttpApnsSender);
@@ -1873,6 +1877,10 @@ def create_app(data_dir: Path | None = None, catalog_dir: Path | None = None) ->
     app.state.typing = None
     app.state.canvas_store = canvas_store
     app.state.desktop_settings = desktop_settings
+    # taOS Agent action gate (spec section 3.1): pending/confirmed rows plus
+    # the per-kind executors that run a confirmed action exactly once.
+    app.state.taos_agent_actions = taos_agent_actions
+    app.state.taos_agent_action_executors = {}
     # Which harness runs the system taOS Agent (opencode, or PicoClaw on a
     # taOSmobile handset). Decided now so the lock screen and the config
     # endpoint report it from the first request; a PicoClaw key left over

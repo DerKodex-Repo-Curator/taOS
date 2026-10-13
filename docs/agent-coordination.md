@@ -2307,3 +2307,38 @@ The agent's own A2A identity token (`.taos_agent_token`) is a2a-only
 (scope `a2a_send` + `a2a_receive`) and covers none of the above endpoints.
 Leaving PicoClaw, or any controller start into opencode, revokes the old
 credential and mints a fresh one.
+
+## taOS Agent action gate (pending, confirm, execute)
+
+Every tier-B operation the taOS Agent wants to perform (an external write such
+as a GitHub PR or issue, or an irreversible local change) goes through a
+two-step gate in `tinyagentos/routes/taos_agent_actions.py`. The gate is a
+server-side mechanism, so it binds every harness the same way.
+
+- `POST /api/taos-agent/actions` `{kind, summary, payload}` stores the action
+  and answers `{action_id, kind, summary, state, confirmed_by}`. Under the
+  default `ask` policy the state is `pending` and a `taos_agent.action_pending`
+  event (`{action_id, kind, summary}`) goes to the owner's `user:<id>` event
+  channel for the chat confirm card. Under `auto` the state is `confirmed`,
+  `confirmed_by` is `auto`, and no card is shown.
+- `GET /api/taos-agent/actions?state=pending` lists the caller's own actions
+  (`{actions: [...]}`, oldest first, optional `state` filter), so a confirm
+  card lost to a restart or a failed event publish can be shown again.
+- `POST /api/taos-agent/actions/{id}/confirm` and `/decline` answer a pending
+  action (`confirmed_by` becomes `user` or `declined`). A second answer is a
+  409. Both are refused with 403 for anything but a signed-in browser session:
+  an agent credential can ask, never answer for the user.
+- `POST /api/taos-agent/actions/{id}/execute` runs the executor registered for
+  the action's kind (`app.state.taos_agent_action_executors[kind]`) exactly
+  once. The row reads `executing` while the executor runs and `executed` only
+  after it returns. Anything not `confirmed` is a 409 (pending, declined,
+  executing, executed or failed); a kind with no executor is a 422. A raising
+  executor marks the action `failed` (502) and it is never re-run. A row left
+  `executing` by a stopped process is never replayed either, because the
+  external write may already have happened: it stays visible in the list.
+- `PUT /api/taos-agent/actions/policy` `{kind, policy: ask|auto}` (browser
+  session only) sets `action_policy[kind]` in the signed-in user's own
+  `(<user id>, "taos_agent")` preference blob, so one account's `auto` never
+  skips the card for another account. Every kind defaults to `ask`.
+
+Another user's action answers 404. Rows live in `taos_agent_actions.db`.
