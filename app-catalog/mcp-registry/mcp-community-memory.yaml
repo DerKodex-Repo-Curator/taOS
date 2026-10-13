@@ -3,7 +3,7 @@ name: Memory
 description: >-
   A knowledge-graph memory server: store entities, relations and observations
   and recall them in later sessions.
-version: 2025.7.1
+version: 2025.8.4
 author: modelcontextprotocol
 homepage: https://github.com/modelcontextprotocol/servers
 license: MIT
@@ -24,4 +24,8 @@ run:
   command:
     - npx
     - "-y"
-    - "@modelcontextprotocol/server-memory"
+    - "@modelcontextprotocol/server-memory@2025.8.4"
+  # Without this the server writes its knowledge graph into the npx cache;
+  # point it at the provisioned workspace instead.
+  env:
+    MEMORY_FILE_PATH: "{workspace}/memory.jsonl"

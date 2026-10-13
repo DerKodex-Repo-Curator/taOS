@@ -25,6 +25,6 @@ run:
   command:
     - npx
     - "-y"
-    - "@modelcontextprotocol/server-filesystem"
+    - "@modelcontextprotocol/server-filesystem@2025.7.1"
   args:
     - "{workspace}"
