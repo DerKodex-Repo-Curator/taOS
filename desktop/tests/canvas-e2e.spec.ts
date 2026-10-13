@@ -61,7 +61,7 @@ async function openProjectCanvas(page: Page, projectName: string) {
     .click();
   // Excalidraw mounts its canvas and the accessible element list before the
   // test can assert on content.
-  await expect(page.locator("[data-testid=excalidraw]")).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator(".excalidraw")).toBeVisible({ timeout: 15_000 });
 }
 
 test.describe("Project canvas board", () => {
