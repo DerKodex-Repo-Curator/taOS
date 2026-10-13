@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, waitFor, act } from "@testing-library/react";
+import { render, waitFor, act, screen } from "@testing-library/react";
 
 // Hoisted so the vi.mock factories below can close over them.
 const { convertSpy, parseSpy } = vi.hoisted(() => ({
@@ -30,6 +30,7 @@ const { markRemoteSpy, onLocalChangeSpy, disposeSpy, createSceneSyncSpy, flushSp
 const mockApi = {
   updateScene: vi.fn(),
   scrollToContent: vi.fn(),
+  addFiles: vi.fn(),
 };
 vi.mock("@excalidraw/excalidraw", () => ({
   convertToExcalidrawElements: convertSpy,
@@ -39,6 +40,7 @@ vi.mock("@excalidraw/excalidraw", () => ({
     theme,
     onChange,
     excalidrawAPI,
+    UIOptions,
     ...props
   }: {
     initialData?: { elements?: { id?: string }[] };
@@ -46,11 +48,13 @@ vi.mock("@excalidraw/excalidraw", () => ({
     theme?: string;
     onChange?: (els: unknown[]) => void;
     excalidrawAPI?: (api: typeof mockApi) => void;
+    UIOptions?: Record<string, unknown>;
   }) => {
+    // Call the excalidrawAPI callback so the board gets the imperative API.
+    // This runs during render but React 18 in tests allows it with act().
+    excalidrawAPI?.(mockApi);
     // Expose onChange so tests can call it.
     (window as unknown as { __excalidrawOnChange?: (els: unknown[]) => void }).__excalidrawOnChange = onChange;
-    // Call the excalidrawAPI callback so the board gets the imperative API.
-    excalidrawAPI?.(mockApi);
     return (
       <div
         data-testid="excalidraw"
@@ -58,6 +62,7 @@ vi.mock("@excalidraw/excalidraw", () => ({
         data-ids={(initialData?.elements ?? []).map((e) => e.id).join(",")}
         data-viewmode={String(!!viewModeEnabled)}
         data-theme={theme}
+        data-uioptions={JSON.stringify(UIOptions ?? {})}
         {...props}
       />
     );
@@ -397,5 +402,99 @@ describe("ExcalidrawBoard", () => {
     );
     // Board should be view-only (viewModeEnabled = true) because no projectId
     expect(getByTestId("excalidraw").getAttribute("data-viewmode")).toBe("true");
+  });
+
+  it("the accessible list has one entry per live row", () => {
+    const rows = [
+      el({ id: "n1", kind: "note", author_id: "user-1", payload: { text: "hello" } }),
+      el({ id: "t1", kind: "text", author_id: "agent-2", payload: { text: "idea" } }),
+      el({ id: "gone", deleted_at: 1 }),
+      el({ id: "l1", kind: "link", author_id: "user-1", payload: { title: "link-title", url: "http://x" } }),
+    ];
+    render(<ExcalidrawBoard elements={rows} />);
+    const list = screen.getByRole("list", { name: /canvas elements/i });
+    const items = list.getElementsByTagName("li");
+    expect(items).toHaveLength(3);
+    expect(items[0].textContent).toBe("note, user-1, hello");
+    expect(items[1].textContent).toBe("text, agent-2, idea");
+    expect(items[2].textContent).toBe("link, user-1, link-title");
+  });
+
+  it("a legacy user_shape with a malformed blob shows a placeholder list entry carrying its element id", () => {
+    const rows = [
+      el({
+        id: "legacy-1",
+        kind: "user_shape",
+        author_id: "user-1",
+        payload: { tldraw_shape: { type: "image", props: {} } },
+      }),
+    ];
+    // Override convertSpy to return a placeholder skeleton with taos_placeholder
+    convertSpy.mockImplementation((skeletons) =>
+      skeletons.map((s: any) => ({
+        ...s,
+        customData: { ...s.customData, taos_placeholder: true },
+        label: { text: `tldraw image: not convertible (element ${s.id})` },
+      })),
+    );
+    render(<ExcalidrawBoard elements={rows} />);
+    const list = screen.getByRole("list", { name: /canvas elements/i });
+    const items = list.getElementsByTagName("li");
+    expect(items).toHaveLength(1);
+    expect(items[0].textContent).toBe("not convertible, element legacy-1");
+  });
+
+  it("an image row is fetched once and handed to addFiles", async () => {
+    const fileId = "file-123";
+    const rows = [
+      el({ id: "img-1", kind: "image", author_id: "user-1", payload: { file_id: fileId } }),
+    ];
+    const mockFetch = vi.fn((url: string) =>
+      Promise.resolve({
+        ok: true,
+        blob: () => Promise.resolve(new Blob(["fake-image-data"], { type: "image/png" })),
+      })
+    );
+    Object.defineProperty(globalThis, "fetch", { value: mockFetch, writable: true, configurable: true });
+
+    // Capture the FileReader instance created by the component
+    let capturedFileReader: { readAsDataURL: ReturnType<typeof vi.fn>; result: string; onload: ((ev: ProgressEvent<FileReader>) => void) | null; onerror: null } | null = null;
+    class MockFileReader {
+      readAsDataURL = vi.fn();
+      result = "data:image/png;base64,fake";
+      onload = null as ((ev: ProgressEvent<FileReader>) => void) | null;
+      onerror = null;
+      constructor() {
+        capturedFileReader = this;
+      }
+    }
+    vi.stubGlobal("FileReader", MockFileReader);
+
+    const { rerender } = render(<ExcalidrawBoard elements={rows} projectSlug="test-slug" />);
+    await act(async () => {});
+
+    // Wait for the fetch to be called (effect runs after render)
+    await waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(1));
+    expect(mockFetch).toHaveBeenCalledWith("/api/projects/test-slug/files/canvas/file-123");
+
+    // Simulate FileReader onload on the captured instance
+    act(() => { capturedFileReader?.onload?.({} as any); });
+
+    await waitFor(() => expect(mockApi.addFiles).toHaveBeenCalledTimes(1));
+    const addFilesCall = mockApi.addFiles.mock.calls[0][0];
+    expect(addFilesCall).toHaveLength(1);
+    expect(addFilesCall[0].id).toBe(fileId);
+    expect(addFilesCall[0].dataURL).toBe("data:image/png;base64,fake");
+    expect(addFilesCall[0].mimeType).toBe("image/png");
+    expect(typeof addFilesCall[0].created).toBe("number");
+
+    // Re-render with same elements - should not refetch
+    mockFetch.mockClear();
+    mockApi.addFiles.mockClear();
+    await act(async () => {
+      rerender(<ExcalidrawBoard elements={rows} projectSlug="test-slug" />);
+    });
+    await waitFor(() => expect(mockFetch).not.toHaveBeenCalled());
+    expect(mockApi.addFiles).not.toHaveBeenCalled();
   });
 });
