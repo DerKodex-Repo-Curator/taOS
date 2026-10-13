@@ -159,6 +159,55 @@ class ProjectCanvasStore(ProjectsDBStore):
                 return None
             return _row_to_element(row, cur.description)
 
+    async def get_element_any(
+        self, element_id: str, *, project_id: str
+    ) -> dict | None:
+        sql = (
+            "SELECT * FROM project_canvas_elements "
+            "WHERE id = ? AND project_id = ?"
+        )
+        args = (element_id, project_id)
+        async with self._read(sql, args) as cur:
+            row = await cur.fetchone()
+            if row is None:
+                return None
+            return _row_to_element(row, cur.description)
+
+    async def list_legacy(
+        self, project_id: str, include_deleted: bool = False
+    ) -> list[dict]:
+        sql = (
+            "SELECT id, project_id, kind, author_kind, author_id, "
+            "x, y, w, h, rotation, z_index, payload, created_at, updated_at, deleted_at, element_id "
+            "FROM project_canvas_elements "
+            "WHERE project_id = ? AND json_extract(payload, '$.tldraw_shape') IS NOT NULL"
+        )
+        args: list = [project_id]
+        if not include_deleted:
+            sql += " AND deleted_at IS NULL"
+        sql += " ORDER BY z_index ASC, created_at ASC"
+        async with self._read(sql, args) as cur:
+            rows = await cur.fetchall()
+            desc = cur.description
+        results = []
+        for row in rows:
+            el = _row_to_element(row, desc)
+            payload = el.get("payload") or {}
+            tldraw_shape = payload.get("tldraw_shape")
+            if not isinstance(tldraw_shape, dict):
+                continue
+            results.append({
+                "element_id": el["id"],
+                "kind": el["kind"],
+                "deleted_at": el.get("deleted_at"),
+                "type": tldraw_shape.get("type"),
+                "x": el["x"],
+                "y": el["y"],
+                "w": el["w"],
+                "h": el["h"],
+            })
+        return results
+
     async def add_element(
         self,
         *,
@@ -219,6 +268,8 @@ class ProjectCanvasStore(ProjectsDBStore):
         self,
         project_id: str,
         element_id: "str | None" = None,
+        *,
+        include_deleted: bool = False,
     ) -> list[dict]:
         """Canvas items for a project, optionally scoped to one element.
 
@@ -226,11 +277,14 @@ class ProjectCanvasStore(ProjectsDBStore):
         ``None`` returns every (non-deleted) item, ``"none"`` returns only
         untagged items (``element_id IS NULL``), and any other string returns
         items tagged with that element id.
+
+        ``include_deleted`` is the manual-recovery path (the canvas raw JSON
+        backup): soft-deleted rows are returned too, and every row carries a
+        boolean ``deleted`` flag so a restore can tell them apart.
         """
-        sql = (
-            "SELECT * FROM project_canvas_elements "
-            "WHERE project_id = ? AND deleted_at IS NULL"
-        )
+        sql = "SELECT * FROM project_canvas_elements WHERE project_id = ?"
+        if not include_deleted:
+            sql += " AND deleted_at IS NULL"
         params: list = [project_id]
         if element_id == "none":
             sql += " AND element_id IS NULL"
@@ -241,7 +295,11 @@ class ProjectCanvasStore(ProjectsDBStore):
         async with self._read(sql, params) as cur:
             rows = await cur.fetchall()
             desc = cur.description
-        return [_row_to_element(r, desc) for r in rows]
+        elements = [_row_to_element(r, desc) for r in rows]
+        if include_deleted:
+            for e in elements:
+                e["deleted"] = e.get("deleted_at") is not None
+        return elements
 
     async def _check_edit_permission(
         self, project_id: str, author_kind: str, author_id: str
