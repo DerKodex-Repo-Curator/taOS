@@ -9,12 +9,11 @@ import { mermaidToExcalidraw, type ExcalidrawElements } from "./mermaid-to-eleme
 import { createSceneSync, type SyncSceneElement } from "./excalidraw-sync";
 import { isPlaceholder } from "./tldraw-to-excalidraw";
 
-// Read-only Excalidraw view over the canonical CanvasElement scene (tldraw ->
-// Excalidraw migration). Most kinds map synchronously; mermaid/flowchart kinds
-// render their real diagram via mermaid-to-excalidraw, falling back to the
-// placeholder rectangle while the (async) conversion runs or if it fails. The
-// board is not yet wired into CanvasView; write-back interactions and the swap
-// that retires tldraw are later slices.
+// Excalidraw view over the canonical CanvasElement scene. Most kinds map
+// synchronously; mermaid/flowchart kinds render their real diagram via
+// mermaid-to-excalidraw, falling back to the placeholder rectangle while the
+// (async) conversion runs or if it fails. Legacy user_shape rows carrying a
+// tldraw_shape blob are converted at read time via tldraw-to-excalidraw.
 
 const DIAGRAM_KINDS = new Set(["mermaid", "flowchart"]);
 
