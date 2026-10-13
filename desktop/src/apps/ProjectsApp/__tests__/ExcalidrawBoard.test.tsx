@@ -497,4 +497,80 @@ describe("ExcalidrawBoard", () => {
     await waitFor(() => expect(mockFetch).not.toHaveBeenCalled());
     expect(mockApi.addFiles).not.toHaveBeenCalled();
   });
+
+  it("an image row retries fetch after a failed response", async () => {
+    const fileId = "file-retry";
+    const rows = [
+      el({ id: "img-1", kind: "image", author_id: "user-1", payload: { file_id: fileId } }),
+    ];
+    let fetchCallCount = 0;
+    const mockFetch = vi.fn((url: string) => {
+      fetchCallCount++;
+      if (fetchCallCount === 1) {
+        // First call fails with ok: false
+        return Promise.resolve({
+          ok: false,
+          status: 500,
+          blob: () => Promise.resolve(new Blob(["error"], { type: "text/plain" })),
+        });
+      }
+      // Second call succeeds
+      return Promise.resolve({
+        ok: true,
+        blob: () => Promise.resolve(new Blob(["fake-image-data"], { type: "image/png" })),
+      });
+    });
+    Object.defineProperty(globalThis, "fetch", { value: mockFetch, writable: true, configurable: true });
+
+    // Capture the FileReader instance created by the component
+    let capturedFileReader: { readAsDataURL: ReturnType<typeof vi.fn>; result: string; onload: ((ev: ProgressEvent<FileReader>) => void) | null; onerror: null } | null = null;
+    class MockFileReader {
+      readAsDataURL = vi.fn();
+      result = "data:image/png;base64,fake";
+      onload = null as ((ev: ProgressEvent<FileReader>) => void) | null;
+      onerror = null;
+      constructor() {
+        capturedFileReader = this;
+      }
+    }
+    vi.stubGlobal("FileReader", MockFileReader);
+
+    const { rerender } = render(<ExcalidrawBoard elements={rows} projectSlug="test-slug" />);
+    await act(async () => {});
+
+    // Wait for the first fetch to be called and fail
+    await waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(1));
+    expect(mockFetch).toHaveBeenCalledWith("/api/projects/test-slug/files/canvas/file-retry");
+    expect(mockApi.addFiles).not.toHaveBeenCalled();
+
+    // Re-render with same elements - should retry fetch
+    mockFetch.mockClear();
+    await act(async () => {
+      rerender(<ExcalidrawBoard elements={[...rows]} projectSlug="test-slug" />);
+    });
+    await waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(1));
+    expect(mockFetch).toHaveBeenCalledWith("/api/projects/test-slug/files/canvas/file-retry");
+
+    // Simulate FileReader onload on the captured instance
+    act(() => { capturedFileReader?.onload?.({} as any); });
+
+    await waitFor(() => expect(mockApi.addFiles).toHaveBeenCalledTimes(1));
+    const addFilesCall = mockApi.addFiles.mock.calls[0][0];
+    expect(addFilesCall).toHaveLength(1);
+    expect(addFilesCall[0].id).toBe(fileId);
+    expect(addFilesCall[0].dataURL).toBe("data:image/png;base64,fake");
+    expect(addFilesCall[0].mimeType).toBe("image/png");
+  });
+
+  it("an image row with payload.alt appears in the accessible list", () => {
+    const rows = [
+      el({ id: "img-1", kind: "image", author_id: "user-1", payload: { file_id: "file-1", alt: "Sunset photo" } }),
+    ];
+    render(<ExcalidrawBoard elements={rows} />);
+    const list = screen.getByRole("list", { name: /canvas elements/i });
+    const items = list.getElementsByTagName("li");
+    expect(items).toHaveLength(1);
+    expect(items[0].textContent).toContain("Sunset photo");
+    expect(items[0].textContent).toBe("image, user-1, Sunset photo");
+  });
 });
