@@ -53,6 +53,7 @@ import { MessageList, type MessageListHandle } from "../chat/MessageList";
 import {
   pinMessage, unpinMessage, listPins,
   editMessage as apiEditMessage, deleteMessage as apiDeleteMessage,
+  editAgentReply as apiEditAgentReply,
   markUnread as apiMarkUnread,
 } from "@/lib/chat-messages-api";
 import { getReceipts, markSeen, type Receipt } from "@/lib/a2a-receipts-api";
@@ -947,6 +948,7 @@ export function MessagesApp({
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
   const [overflowMenu, setOverflowMenu] = useState<{ messageId: string; x: number; y: number } | null>(null);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
+  const [editError, setEditError] = useState<string | null>(null);
   const [pinnedPopoverOpen, setPinnedPopoverOpen] = useState(false);
   const [pinnedMessages, setPinnedMessages] = useState<PinnedMessage[]>([]);
   const [showAllThreads, setShowAllThreads] = useState(false);
@@ -1931,12 +1933,12 @@ export function MessagesApp({
       const res = await fetch("/api/chat/channels", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-body: JSON.stringify({
-            name: newChannel.name.trim(),
-            type: newChannel.type,
-            topic: newChannel.topic.trim() || undefined,
-            ...(scope?.projectId ? { project_id: scope.projectId } : {}),
-          }),
+        body: JSON.stringify({
+          name: newChannel.name.trim(),
+          type: newChannel.type,
+          topic: newChannel.topic.trim() || undefined,
+          ...(scope?.projectId ? { project_id: scope.projectId } : {}),
+        }),
       });
       if (res.ok) {
         const ch = await res.json();
@@ -1999,15 +2001,19 @@ body: JSON.stringify({
   /* ---- overflow menu handlers ---- */
   const handleEdit = (msgId: string) => {
     setEditingMessageId(msgId);
+    setEditError(null);
     setOverflowMenu(null);
   };
 
   const handleSaveEdit = async (msgId: string, content: string) => {
+    setEditError(null);
     try {
-      await apiEditMessage(msgId, content);
+      const target = messages.find((m) => m.id === msgId);
+      if (target?.author_type === "agent") await apiEditAgentReply(msgId, content);
+      else await apiEditMessage(msgId, content);
       setEditingMessageId(null);
     } catch (e) {
-      setSendError((e as Error).message);
+      setEditError((e as Error).message);
     }
   };
 
@@ -2306,8 +2312,10 @@ body: JSON.stringify({
             pinnedPopoverOpen={pinnedPopoverOpen}
             onTogglePinnedPopover={() => setPinnedPopoverOpen((o) => !o)}
             editingMessageId={editingMessageId}
-            onCancelEdit={() => setEditingMessageId(null)}
+            onCancelEdit={() => { setEditingMessageId(null); setEditError(null); }}
             onSaveEdit={handleSaveEdit}
+            editError={editError}
+            onEditAgentReply={(id) => { setEditingMessageId(id); setEditError(null); }}
             onToggleReaction={toggleReaction}
             showEmoji={showEmoji}
             onShowEmoji={setShowEmoji}
@@ -2841,9 +2849,9 @@ className="shrink-0 p-0.5 rounded hover:bg-shell-surface-active transition-color
                 </select>
               </div>
               <div className="space-y-1">
-                <Label htmlFor="new-channel-description-mobile" className="block uppercase tracking-wider">Topic</Label>
+                <Label htmlFor="new-channel-topic-mobile" className="block uppercase tracking-wider">Topic</Label>
                 <Input
-                  id="new-channel-description-mobile"
+                  id="new-channel-topic-mobile"
                   value={newChannel.topic}
                   onChange={(e) => setNewChannel((s) => ({ ...s, topic: e.target.value }))}
                   placeholder="What's this channel about?"
@@ -2895,9 +2903,9 @@ className="shrink-0 p-0.5 rounded hover:bg-shell-surface-active transition-color
                   </select>
                 </div>
                 <div className="space-y-1">
-                  <Label htmlFor="new-channel-description" className="block uppercase tracking-wider">Topic</Label>
+                  <Label htmlFor="new-channel-topic" className="block uppercase tracking-wider">Topic</Label>
                   <Input
-                    id="new-channel-description"
+                    id="new-channel-topic"
                     value={newChannel.topic}
                     onChange={(e) => setNewChannel((s) => ({ ...s, topic: e.target.value }))}
                     placeholder="What's this channel about?"

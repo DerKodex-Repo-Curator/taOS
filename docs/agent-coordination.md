@@ -1271,6 +1271,14 @@ request gets a 429 carrying `Retry-After` in whole seconds:
   a browser gets a minimal HTML page. No PIN check here; it only advertises the
   contract.
 
+The invite create body accepts a `kind` field (default `agent`; valid values
+`agent` or `cloud_agent`; any other value returns 400 with the valid list).
+For `cloud_agent` the controller must have `TAOS_CONTROLLER_RELAY_URL` set to a
+safe public `https://` URL or minting fails with "set up taOSgo first".
+`cloud_agent` defaults `check_interval_secs` to 900 (the `agent` kind keeps its
+existing default of 1800). The redeemed `cloud_agent` bundle carries ONLY relay
+endpoints (LAN and mesh are stripped).
+
 The redeem response carries a **connection bundle** (design section 4 plus the
 Approved-build addendum). It contains NO token or secret (the token still
 arrives via the status poll). The bundle has:
@@ -1624,6 +1632,23 @@ it never stores an error page as a `.safetensors`.
 A Civitai URL added to the Library takes the same path: `detect_kind` tags it
 `url:civitai` and `CivitaiProcessor` runs the identical ingest job, linking the
 resulting `lora_id` back onto the library item.
+
+## Cast discovery status (`GET /api/cast/discovery/status`, session-only)
+
+Route module `tinyagentos/routes/cast_discovery.py`. Session cookie only; no
+registry scope reaches it. It reports whether the opt-in mDNS reflector
+(`mdns_reflector.enabled` in config.yaml, off by default) is actually bridging
+cast discovery across a container boundary.
+
+- `{"state": "ok"}` -- running, bridging at least two interfaces, traffic seen.
+- `{"state": "unavailable", "reason": ...}` -- enabled but not bridging.
+  `reason` is `not_running`, `single_interface`, `bind_failed`, `send_failed`,
+  `no_traffic`, or `start_failed` (enabled in config but the reflector raised
+  during startup; `error` carries the message).
+- `{"state": "disabled"}` -- not enabled; it makes no claim either way.
+
+The cast device list must treat `unavailable` as "discovery is not working",
+never as an empty network.
 
 ## What `GET /api/decisions/agent` returns (grant scoping)
 

@@ -411,6 +411,15 @@ Publishes a `decision.note` event on the owner's `user:<id>` channel so open sur
 
 ---
 
+# Notification history (session-only)
+
+- `GET /api/notifications/history`
+- `GET /api/notifications/history/sources`
+- `GET /api/notifications/archived` (legacy)
+- Detail: `docs/notifications-history.md`
+
+---
+
 ## Device API v1
 
 The full spec lives in `docs/device-api-v1.md`; routes under `/api/devices`
