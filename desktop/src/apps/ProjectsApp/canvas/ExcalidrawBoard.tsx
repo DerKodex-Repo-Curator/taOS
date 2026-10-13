@@ -24,9 +24,6 @@ type ExcalidrawAPI = Parameters<
 
 type SkeletonInput = Parameters<typeof convertToExcalidrawElements>[0];
 
-// Converted diagram elements keyed by the CanvasElement id; absent until the
-// async mermaid conversion resolves.
-
 // Branded types from Excalidraw (not exported from main module, use type assertions)
 type FileId = string & { _brand: "FileId" };
 type DataURL = string & { _brand: "DataURL" };
@@ -83,6 +80,8 @@ export function ExcalidrawBoard({
   readOnly,
 }: ExcalidrawBoardProps) {
   const [api, setApi] = useState<ExcalidrawAPI | null>(null);
+  // Converted diagram elements keyed by the CanvasElement id; absent until the
+  // async mermaid conversion resolves.
   const [diagrams, setDiagrams] = useState<Record<string, ExcalidrawElements>>({});
 
   const getElementRef = useRef(getElement);
@@ -215,7 +214,6 @@ export function ExcalidrawBoard({
     }
   }, [api, sceneElementsArray, sync]);
 
-  // Image fetching: track in-flight and loaded fileIds to allow retry after failure.
   const inFlightFileIds = useRef<Set<string>>(new Set());
   const loadedFileIds = useRef<Set<string>>(new Set());
   useEffect(() => {
