@@ -530,7 +530,7 @@ def test_intel_mac_ollama_does_not_advertise_cuda(monkeypatch: pytest.MonkeyPatc
     monkeypatch.delenv("TAOS_WORKER_RESOURCES", raising=False)
     assert _collect_resources([{"type": "ollama"}], "", "darwin") == ["cpu-inference"]
     assert _collect_resources([{"type": "mlx"}], "", "darwin") == ["cpu-inference"]
-    # The same backend on Linux still gets the CUDA class — but only when the
+    # The same backend on Linux still gets the CUDA class -- but only when the
     # hardware gpu_type actually indicates a CUDA GPU (taOS #3228). An empty
     # gpu_type must not fabricate a gpu-* resource.
     assert _collect_resources([{"type": "ollama"}], "cuda", "linux") == [

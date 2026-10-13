@@ -131,7 +131,7 @@ def _collect_resources(
     GPU resources are derived from the hardware ``gpu_type`` rather than
     gated on a live backend (taOS #3228). Previously, a GPU resource was
     emitted only when a backend of type vllm/ollama/exo/mlx was live, and
-    then hardcoded to ``gpu-cuda-0`` — so a llama.cpp-only NVIDIA worker and
+    then hardcoded to ``gpu-cuda-0`` -- so a llama.cpp-only NVIDIA worker and
     any AMD/ROCm worker advertised only ``cpu-inference`` and could never
     have their GPU leased. Now the hardware GPU class is trusted directly.
     """
