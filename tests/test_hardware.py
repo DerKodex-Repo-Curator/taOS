@@ -58,13 +58,15 @@ class TestDetectHardware:
         # Simulates the mainline panthor GPU driver scenario
         # Mirror the _stub_environment mocking style from TestDetectNpuRknpuModernPaths
 
-        # Block /sys/class/misc/mali0 via Path.exists (the GPU code uses Path.exists()
-        # directly, not _path_exists_safe, for this check)
+        # Stub Path.exists: mali0 absent, /sys/class/drm present, card1/device/driver
+        # present; all else falls through to real Path.exists
         real_path_exists = Path.exists
         def fake_path_exists(self):
             s = str(self)
             if s == "/sys/class/misc/mali0":
                 return False  # mali0 absent (panthor scenario)
+            if s == "/sys/class/drm":
+                return True  # drm directory exists (panthor scenario)
             if "card1/device/driver" in s:
                 return True  # test card driver exists (panthor scenario)
             return real_path_exists(self)
