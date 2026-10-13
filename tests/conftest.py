@@ -51,10 +51,11 @@ from _data_guard_plugin import (  # noqa: F401
 # ---------------------------------------------------------------------------
 
 @pytest.fixture(autouse=True)
-def _forbid_real_opencode_spawn(request, monkeypatch):
+def _forbid_real_opencode_spawn(request):
     """Make real opencode spawns impossible in all tests."""
     # Skip for tests marked with no_opencode_spawn_guard (e.g. TestResolveOpencodeBinary).
     if request.node.get_closest_marker("no_opencode_spawn_guard"):
+        yield
         return
 
     import tinyagentos.opencode_runtime as ocr
@@ -66,12 +67,11 @@ def _forbid_real_opencode_spawn(request, monkeypatch):
     fake_path = "/this/path/does/not/exist/opencode"
 
     # 1. Force resolve_opencode_binary() to return the fake path.
-    monkeypatch.setattr(ocr, "resolve_opencode_binary", lambda: fake_path)
-
     # 2. Set TAOS_OPENCODE_BIN to the same fake path for consistency.
     #    This env var is checked first by the real resolve_opencode_binary, but
-    #    since we monkeypatch the function directly, this is defensive.
-    monkeypatch.setenv("TAOS_OPENCODE_BIN", fake_path)
+    #    since we patch the function directly, this is defensive.
+    with patch.object(ocr, "resolve_opencode_binary", lambda: fake_path), patch.dict(os.environ, {"TAOS_OPENCODE_BIN": fake_path}):
+        yield
 
 
 # ---------------------------------------------------------------------------
