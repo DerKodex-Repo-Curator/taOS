@@ -71,11 +71,12 @@ class TestDetectHardware:
         monkeypatch.setattr(Path, "exists", fake_path_exists)
 
         # Single _path_exists_safe that blocks NVIDIA probe
+        real_safe = hardware_mod._path_exists_safe
         def fake_path_exists_safe(p):
             s = str(p)
             if "/proc/driver/nvidia/gpus" in s or s == "/proc/driver/nvidia":
                 return False  # block NVIDIA probe
-            return Path.exists(p)
+            return real_safe(p)
         monkeypatch.setattr(hardware_mod, "_path_exists_safe", fake_path_exists_safe)
 
         real_glob = Path.glob
