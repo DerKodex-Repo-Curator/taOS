@@ -253,8 +253,18 @@ class TestCuratedRegistry:
             if manifest.run.uses_workspace():
                 config = manifest.server_config(f"/ws/{manifest.id}")
                 assert all("{workspace}" not in arg for arg in config["cmd"])
-                assert config["cmd"][-1] == f"/ws/{manifest.id}" or \
-                    f"/ws/{manifest.id}" in config["cmd"]
+                substituted = [
+                    *config["cmd"],
+                    *config.get("env", {}).keys(),
+                    *config.get("env", {}).values(),
+                ]
+                assert not any(
+                    "{workspace}" in str(part) for part in substituted
+                ), f"{manifest.id}: unexpanded {{workspace}} in installed config"
+                assert any(
+                    f"/ws/{manifest.id}" in str(part) for part in substituted
+                ), f"{manifest.id}: workspace missing from installed config"
+
             else:
                 assert manifest.server_config()["cmd"] == manifest.launch_argv()
 
@@ -969,3 +979,258 @@ def test_marketplace_routes_require_admin(tmp_data_dir):
                     f"{method} {path} has no admin dependency (got {names})"
                 )
     assert seen == gated, f"unexpected mutating marketplace routes: {seen ^ gated}"
+
+
+# ---------------------------------------------------------------------------
+# jaylfc lead review, 2026-09-30: blocking + non-blocking findings
+# ---------------------------------------------------------------------------
+
+INIT_MANIFEST = {
+    "id": "mcp-init-demo",
+    "name": "Init demo",
+    "description": "test fixture",
+    "version": "1.0.0",
+    "author": "taos",
+    "transport": "stdio",
+    "permissions": [],
+    "install": {"method": "none"},
+    "run": {
+        "command": ["demo-server"],
+        "args": ["{workspace}"],
+    },
+    "init": {"command": ["git", "init", "{workspace}"]},
+}
+
+
+@pytest.fixture
+def init_registry_dir(tmp_path: Path) -> Path:
+    directory = tmp_path / "init-registry"
+    _write_manifest(directory, "mcp-init-demo.yaml", INIT_MANIFEST)
+    return directory
+
+
+@pytest.mark.asyncio
+class TestInitStep:
+    """A manifest-declared init step runs through the bounded runner after the
+    workspace is created and before anything is registered."""
+
+    async def test_init_runs_with_the_workspace_expanded(
+        self, init_registry_dir, store, tmp_path: Path
+    ):
+        runner = RecordingRunner()
+        marketplace = MCPMarketplace(
+            registry=MCPRegistry(init_registry_dir),
+            store=store,
+            runner=runner,
+            workspace_root=tmp_path / "workspaces",
+        )
+        await marketplace.install("mcp-init-demo")
+
+        workspace = str(tmp_path / "workspaces" / "mcp-init-demo")
+        assert runner.calls == [["git", "init", workspace]]
+        assert Path(workspace).is_dir()
+        # …and the server row is registered afterwards, as usual.
+        assert await store.get_server("mcp-init-demo") is not None
+
+    async def test_failed_init_leaves_the_store_untouched(
+        self, init_registry_dir, store, tmp_path: Path
+    ):
+        marketplace = MCPMarketplace(
+            registry=MCPRegistry(init_registry_dir),
+            store=store,
+            runner=RecordingRunner(returncode=1),
+            workspace_root=tmp_path / "workspaces",
+        )
+        with pytest.raises(MCPMarketplaceError) as excinfo:
+            await marketplace.install("mcp-init-demo")
+        assert excinfo.value.status_code == 502
+        assert "init command" in str(excinfo.value)
+        assert await store.get_server("mcp-init-demo") is None
+
+    async def test_dry_run_skips_the_init_step(
+        self, init_registry_dir, store, tmp_path: Path
+    ):
+        runner = RecordingRunner()
+        marketplace = MCPMarketplace(
+            registry=MCPRegistry(init_registry_dir),
+            store=store,
+            runner=runner,
+            workspace_root=tmp_path / "workspaces",
+        )
+        await marketplace.install("mcp-init-demo", run_install_command=False)
+        assert runner.calls == []
+        assert await store.get_server("mcp-init-demo") is not None
+
+    async def test_init_without_a_command_is_a_noop(
+        self, registry_dir, store, tmp_path: Path
+    ):
+        """Manifests that declare no init step never touch the runner."""
+        runner = RecordingRunner()
+        marketplace = MCPMarketplace(
+            registry=MCPRegistry(registry_dir),
+            store=store,
+            runner=runner,
+            workspace_root=tmp_path / "workspaces",
+        )
+        await marketplace.install("mcp-fetch", run_install_command=False)
+        assert runner.calls == []
+
+
+class FakeSecretsStore:
+    """Minimal stand-in for the secrets store: list() of name/value dicts."""
+
+    def __init__(self, secrets: list[dict]):
+        self._secrets = secrets
+
+    async def list(self):
+        return self._secrets
+
+
+@pytest.mark.asyncio
+class TestSecretEnvMerge:
+    """Operator secrets (``mcp:<id>:<VAR>``) reach the child at launch."""
+
+    async def test_secret_env_overrides_manifest_defaults(
+        self, tmp_path: Path, store
+    ):
+        registry_dir = tmp_path / "registry"
+        _write_manifest(registry_dir, "mcp-secret-probe.yaml", {
+            "id": "mcp-secret-probe",
+            "name": "Secret probe",
+            "description": "test fixture",
+            "version": "1.0.0",
+            "author": "taos",
+            "transport": "stdio",
+            "permissions": [],
+            "install": {"method": "none"},
+            "run": {
+                "command": [
+                    sys.executable, "-c",
+                    "import os, time; print('PROBE=' + os.environ.get('TAOS_PROBE', '<unset>'), flush=True); time.sleep(10)",
+                ],
+                "env": {"TAOS_PROBE": "manifest-default", "TAOS_OTHER": "kept"},
+            },
+        })
+        marketplace = MCPMarketplace(registry=MCPRegistry(registry_dir), store=store)
+        await marketplace.install("mcp-secret-probe", run_install_command=False)
+
+        secrets = FakeSecretsStore([
+            {"name": "mcp:mcp-secret-probe:TAOS_PROBE", "value": "live-secret"},
+            # Another server's secret must not leak in.
+            {"name": "mcp:other-server:TAOS_PROBE", "value": "wrong"},
+        ])
+        supervisor = MCPSupervisor(
+            store=store, catalog=None, notif_store=None, secrets_store=secrets
+        )
+        try:
+            assert await supervisor.start("mcp-secret-probe") is True
+            for _ in range(40):
+                if any("PROBE=" in e["line"] for e in supervisor.logs("mcp-secret-probe")):
+                    break
+                await asyncio.sleep(0.1)
+            lines = [e["line"] for e in supervisor.logs("mcp-secret-probe")]
+        finally:
+            await supervisor.stop("mcp-secret-probe")
+        assert any("PROBE=live-secret" in line for line in lines), (
+            f"operator secret did not reach the child: {lines}"
+        )
+
+    async def test_secret_env_lookup_tolerates_a_failing_store(self, store):
+        supervisor = MCPSupervisor(store=store, catalog=None, notif_store=None)
+
+        class BrokenStore:
+            async def list(self):
+                raise RuntimeError("secrets db is down")
+
+        supervisor._secrets_store = BrokenStore()
+        assert await supervisor._secret_env("mcp-anything") == {}
+
+    async def test_secret_env_is_empty_without_a_secrets_store(self, store):
+        supervisor = MCPSupervisor(store=store, catalog=None, notif_store=None)
+        assert await supervisor._secret_env("mcp-anything") == {}
+
+
+@pytest.mark.asyncio
+class TestEnvRedaction:
+    def test_redact_config_env_redacts_values_but_keeps_keys(self):
+        from tinyagentos.mcp.marketplace import REDACTED_ENV_VALUE, redact_config_env
+
+        config = {"cmd": ["x"], "env": {"TOKEN": "live-secret", "OTHER": "v"}}
+        redacted = redact_config_env(config)
+        assert redacted["env"] == {
+            "TOKEN": REDACTED_ENV_VALUE,
+            "OTHER": REDACTED_ENV_VALUE,
+        }
+        assert redacted["cmd"] == ["x"]
+        # The stored config is not mutated.
+        assert config["env"]["TOKEN"] == "live-secret"
+
+    def test_redact_config_env_tolerates_malformed_input(self):
+        from tinyagentos.mcp.marketplace import redact_config_env
+
+        assert redact_config_env(None) == {}
+        assert redact_config_env("nope") == {}
+        assert redact_config_env({"cmd": ["x"]}) == {"cmd": ["x"]}
+
+    async def test_detail_redacts_installed_env_values(self, registry_dir, store):
+        marketplace = MCPMarketplace(
+            registry=MCPRegistry(registry_dir),
+            store=store,
+            runner=RecordingRunner(),
+        )
+        await marketplace.install("mcp-fetch")
+        server = await store.get_server("mcp-fetch")
+        config = dict(server["config"])
+        config["env"] = {"SOME_TOKEN": "live-secret"}
+        await store.set_config("mcp-fetch", config)
+
+        detail = await marketplace.detail("mcp-fetch")
+        from tinyagentos.mcp.marketplace import REDACTED_ENV_VALUE
+
+        assert detail["installed_config"]["env"] == {
+            "SOME_TOKEN": REDACTED_ENV_VALUE
+        }
+        assert detail["installed_config"]["cmd"] == ["uvx", "mcp-server-fetch"]
+
+
+class TestIdFullmatch:
+    def test_id_with_a_trailing_newline_is_rejected(self):
+        """``re.match`` anchors at the start only; ``$`` still matches before
+        a trailing newline, so ``"evil\\n"`` used to pass validation."""
+        with pytest.raises(ValidationError):
+            MCPRegistryManifest(
+                id="evil\n",
+                name="Evil",
+                run={"command": ["x"]},
+            )
+
+
+class TestCuratedManifestVersions:
+    """Every curated manifest pins its version to a real release and the
+    version appears in its install/run argv — no more unpinned npx/uvx."""
+
+    def test_every_curated_manifest_pins_its_version_in_argv(self):
+        registry = MCPRegistry(default_registry_dir())
+        manifests = registry.list()
+        assert len(manifests) >= 6
+        for manifest in manifests:
+            argv = [
+                *manifest.install.command,
+                *manifest.run.command,
+                *manifest.run.args,
+            ]
+            blob = " ".join(argv)
+            assert manifest.version in blob, (
+                f"{manifest.id}: version {manifest.version!r} is not pinned "
+                f"in its argv {argv}"
+            )
+
+    def test_git_manifest_declares_its_repo_init_step(self):
+        manifest = MCPRegistry(default_registry_dir()).get("mcp-community-git")
+        assert manifest is not None
+        assert manifest.init.command == ["git", "init", "{workspace}"]
+
+    def test_memory_manifest_points_at_the_workspace(self):
+        manifest = MCPRegistry(default_registry_dir()).get("mcp-community-memory")
+        assert manifest is not None
+        assert manifest.run.env.get("MEMORY_FILE_PATH") == "{workspace}/memory.jsonl"
