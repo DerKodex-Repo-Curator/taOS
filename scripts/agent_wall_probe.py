@@ -17,7 +17,7 @@ from urllib.parse import urlparse
 def http_get(
     url: str,
     timeout: float = 5.0,
-    allow_http: bool = False,
+    allow_http: bool = False,  # kept for compatibility
 ) -> Dict[str, Any]:
     """Perform a GET request. Returns dict with status code and outcome."""
     parsed = urlparse(url)
@@ -25,25 +25,21 @@ def http_get(
         return {"ok": False, "status": None, "error": "invalid_scheme"}
     try:
         if parsed.scheme == "https":
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
             conn = http.client.HTTPSConnection(
                 parsed.hostname,
                 parsed.port or 443,
                 timeout=timeout,
-                context=ssl._create_unverified_context(),
+                context=ctx,
             )
         else:
-            if not allow_http:
-                conn = http.client.HTTPConnection(
-                    parsed.hostname,
-                    parsed.port or 80,
-                    timeout=timeout,
-                )
-            else:
-                conn = http.client.HTTPConnection(
-                    parsed.hostname,
-                    parsed.port or 80,
-                    timeout=timeout,
-                )
+            conn = http.client.HTTPConnection(
+                parsed.hostname,
+                parsed.port or 80,
+                timeout=timeout,
+            )
         path = parsed.path or "/"
         if parsed.query:
             path = f"{path}?{parsed.query}"
@@ -137,7 +133,10 @@ def check_devices(root: str = "/") -> Dict[str, Any]:
         p = Path(root) / dev
         try:
             if p.exists() or p.is_symlink():
-                found.append(dev.lstrip("dev/") if dev.startswith("dev/") else dev)
+                if dev.startswith("dev/"):
+                    found.append(dev[4:])  # dev/ is 4 chars
+                else:
+                    found.append(dev)
         except Exception:
             pass
     if found:
@@ -150,7 +149,7 @@ def check_devices(root: str = "/") -> Dict[str, Any]:
 
 
 def check_controller_data(root: str = "/") -> Dict[str, Any]:
-    """controller-data: FAIL if /opt/taos or /opt/tinyagentos exists/listable."""
+    """controller-data: FAIL if /opt/taos or /opt/tinyagentos exists and is listable."""
     candidates = ["opt/taos", "opt/tinyagentos"]
     found = []
     for c in candidates:
@@ -158,12 +157,11 @@ def check_controller_data(root: str = "/") -> Dict[str, Any]:
         try:
             if p.exists():
                 try:
-                    # listable check
-                    next(p.iterdir())
+                    # listable check - exists and is listable
+                    list(p.iterdir())
                     found.append(c)
                 except Exception:
-                    # exists but not listable; treat as found? but spec says "exists and is listable"
-                    # but easier to check existence and listability - if it exists and we can iterate, found
+                    # exists but not listable
                     pass
         except Exception:
             pass
@@ -281,6 +279,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     # parse targets
     targets = []
     for t in args.target:
+        # handle IPv6 [::1]:80
+        if t.startswith("["):
+            try:
+                end = t.find("]:")
+                if end != -1:
+                    host = t[1:end]
+                    port_str = t[end + 2 :]
+                    port = int(port_str)
+                    targets.append((host, port))
+                    continue
+            except Exception:
+                pass
         if ":" in t:
             try:
                 host, port_str = t.rsplit(":", 1)

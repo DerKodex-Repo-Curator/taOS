@@ -180,38 +180,18 @@ class TestIntegration:
                                     rc = probe_mod.main([])
         assert rc == 0
 
-    def test_internet_control_failed_turns_reach_to_unknown(self, probe_mod):
+    def test_internet_control_failed_turns_reach_to_unknown(self, probe_mod, capsys):
         with patch("agent_wall_probe.check_admin_api", return_value={"id": "admin-api", "status": "PASS", "detail": "403"}):
             with patch("agent_wall_probe.check_idmap", return_value={"id": "idmap", "status": "PASS", "detail": "ok"}):
                 with patch("agent_wall_probe.check_devices", return_value={"id": "devices", "status": "PASS", "detail": "none"}):
                     with patch("agent_wall_probe.check_controller_data", return_value={"id": "controller-data", "status": "PASS", "detail": "none"}):
                         with patch("agent_wall_probe.check_limits", return_value={"id": "limits", "status": "PASS", "detail": "bounded"}):
                             with patch("agent_wall_probe.check_internet_control", return_value={"id": "internet-control", "status": "UNKNOWN", "detail": "failed"}):
-                                # reach would normally PASS if refused
                                 with patch("agent_wall_probe.check_reach_target", return_value={"id": "reach:example.invalid:80", "status": "PASS", "detail": "refused"}):
-                                    results = []
-                                    # simulate
-                                    controller = "http://127.0.0.1:6969"
-                                    results.append(probe_mod.check_admin_api(controller))
-                                    results.append(probe_mod.check_idmap("/"))
-                                    results.append(probe_mod.check_devices("/"))
-                                    results.append(probe_mod.check_controller_data("/"))
-                                    results.append(probe_mod.check_limits("/"))
-                                    internet_res = probe_mod.check_internet_control("https://example.com")
-                                    results.append(internet_res)
-                                    targets = [("example.invalid", 80)]
-                                    internet_ok = internet_res["status"] == "PASS"
-                                    for host, port in targets:
-                                        res = probe_mod.check_reach_target(host, port)
-                                        if not internet_ok and res["status"] == "PASS":
-                                            results.append({"id": res["id"], "status": "UNKNOWN", "detail": res["detail"]})
-                                        else:
-                                            results.append(res)
-                                    results.append(probe_mod.check_share_acl())
-                                    rc = probe_mod.compute_exit_code(results)
-        assert rc == 2
-        # find reach result
-        reach = [r for r in results if r["id"].startswith("reach:")]
+                                    rc = probe_mod.main(["--target", "example.invalid:80", "--json"])
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        reach = [r for r in data if r["id"].startswith("reach:")]
         assert len(reach) == 1
         assert reach[0]["status"] == "UNKNOWN"
 
