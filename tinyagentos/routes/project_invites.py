@@ -1177,6 +1177,8 @@ async def mint_collab_invite(
             peer_link = await contacts_store.get_peer_link(payload.contact_id)
             if peer_link is None or not peer_link.get("endpoints"):
                 delivery_error = "no peer endpoints for contact"
+            elif not peer_link.get("outbound_token"):
+                delivery_error = "peer handshake incomplete: no token for contact"
             elif not await deliver_to_peer(
                 contacts_store, payload.contact_id, "/api/peer/inbox", envelope,
             ):

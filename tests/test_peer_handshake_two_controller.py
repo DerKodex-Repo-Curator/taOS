@@ -379,3 +379,32 @@ def test_guard_allowance_is_exact_host_and_port():
         host_port = (always.split("//")[1].split(":")[0], 80)
         with pytest.raises(SsrfBlockedError):
             validate_url_or_raise(always, allow_hostports=frozenset({host_port}))
+
+
+@pytest.mark.asyncio
+async def test_deliver_to_peer_skips_link_without_outbound_token(nodes):
+    """A link whose handshake never completed is not delivered to at all."""
+    from tinyagentos.peer import deliver_to_peer
+
+    a, b = nodes
+    store = a.app.state.contacts_store
+    await store.add_contact(
+        contact_id=b.contact_id, hub_username="bob", display_name="Bob",
+        ed25519_pub=b.signing_pub, x25519_pub=b.encryption_pub,
+        peer_fingerprint=b.fingerprint,
+    )
+    await store.establish_peer_link(
+        contact_id=b.contact_id, inbound_token="i" * 64, outbound_token="",
+        endpoints=[{"kind": "hub", "url": "http://93.184.216.34", "priority": 0}],
+    )
+    seen: dict = {}
+    client = _recording_client(seen)
+    try:
+        ok = await deliver_to_peer(
+            store, b.contact_id, "/api/peer/inbox", {"kind": "chat"},
+            http_client=client,
+        )
+    finally:
+        await client.aclose()
+    assert ok is False
+    assert seen.get("urls", []) == []

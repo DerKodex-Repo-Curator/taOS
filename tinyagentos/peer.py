@@ -413,6 +413,10 @@ async def deliver_to_peer(
     link = await contacts_store.get_peer_link(contact_id)
     if link is None or not link.get("endpoints"):
         return False
+    token = link.get("outbound_token") or ""
+    if not token:
+        # Handshake never completed: the peer would refuse an empty bearer.
+        return False
     endpoints = sorted(
         link["endpoints"],
         key=lambda e: e.get("priority", 99) if isinstance(e, dict) else 99,
@@ -421,7 +425,7 @@ async def deliver_to_peer(
         endpoints, path, {"envelope": envelope},
         known_endpoints=known_hostports(link["endpoints"]),
         http_client=http_client,
-        headers={"Authorization": f"Bearer {link.get('outbound_token', '')}"},
+        headers={"Authorization": f"Bearer {token}"},
         timeout=10.0,
     )
     return resp is not None
