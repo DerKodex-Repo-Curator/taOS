@@ -82,10 +82,10 @@ class TestDetectHardware:
         monkeypatch.setattr(hardware_mod, "_path_exists_safe", fake_path_exists_safe)
 
         real_glob = Path.glob
-        def fake_glob(self, pattern):
+        def fake_glob(self, pattern, *args, **kwargs):
             if str(self) == "/sys/class/drm" and pattern == "card*/device/driver":
                 return [Path("/sys/class/drm/card1/device/driver")]
-            return real_glob(self, pattern)
+            return real_glob(self, pattern, *args, **kwargs)
         monkeypatch.setattr(Path, "glob", fake_glob)
 
         real_resolve = Path.resolve
@@ -134,12 +134,12 @@ class TestDetectNpuRknpuModernPaths:
         monkeypatch.setattr(hardware_mod, "_path_exists_safe", fake_exists_safe)
 
         real_glob = Path.glob
-        def fake_glob(self, pattern):
+        def fake_glob(self, pattern, *args, **kwargs):
             if str(self) == "/sys/class/drm" and pattern == "renderD*":
                 return iter([Path(node) for node, _ in drm_nodes])
             if str(self) == "/dev":
                 return iter([])
-            return real_glob(self, pattern)
+            return real_glob(self, pattern, *args, **kwargs)
         monkeypatch.setattr(Path, "glob", fake_glob)
 
         driver_targets = {

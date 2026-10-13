@@ -133,12 +133,12 @@ class TestDetectNpu:
         monkeypatch.setattr(hw_mod, "_path_exists_safe", fake_path_exists)
 
         real_glob = _Path.glob
-        def fake_glob(self, pattern):
+        def fake_glob(self, pattern, *args, **kwargs):
             if str(self) == "/sys/bus/platform/drivers" and pattern == "RKNPU":
                 return iter([_Path("/sys/bus/platform/drivers/RKNPU")])
             if str(self) == "/sys/class/drm" and pattern == "renderD*":
                 return iter([])
-            return real_glob(self, pattern)
+            return real_glob(self, pattern, *args, **kwargs)
         monkeypatch.setattr(_Path, "glob", fake_glob)
 
         real_read_text = _Path.read_text
