@@ -716,7 +716,10 @@ different project, and 403 when the agent lacks the `canvas_read` scope or the
   and the trash restore/purge/empty routes. NOTE: the files routes key on the
   project SLUG in the path, not the id.
 - **decisions_write**: `POST /api/decisions` (raise a human-in-the-loop
-  decision), `POST /api/decisions/{id}/answer/agent` (mirror an answer),
+  decision; a `metadata.kind` naming a server-owned gate, `execution_gate`,
+  `delegation_gate`, `device_pairing`, `app_grant`, `project_create` or
+  `collab_delegation_gate`, is refused with 400 for every caller, since only
+  the server's internal raisers may open a gate, tsk-mul5pa), `POST /api/decisions/{id}/answer/agent` (mirror an answer),
   `GET /api/decisions/{id}/agent` (read its own), `GET /api/decisions/agent`
   (list its own), `POST /api/decisions/{id}/withdraw` (withdraw its own pending
   decision as moot: body `{"reason": "..."}`, reason required (400), allowed
@@ -1268,6 +1271,14 @@ request gets a 429 carrying `Retry-After` in whole seconds:
   a browser gets a minimal HTML page. No PIN check here; it only advertises the
   contract.
 
+The invite create body accepts a `kind` field (default `agent`; valid values
+`agent` or `cloud_agent`; any other value returns 400 with the valid list).
+For `cloud_agent` the controller must have `TAOS_CONTROLLER_RELAY_URL` set to a
+safe public `https://` URL or minting fails with "set up taOSgo first".
+`cloud_agent` defaults `check_interval_secs` to 900 (the `agent` kind keeps its
+existing default of 1800). The redeemed `cloud_agent` bundle carries ONLY relay
+endpoints (LAN and mesh are stripped).
+
 The redeem response carries a **connection bundle** (design section 4 plus the
 Approved-build addendum). It contains NO token or secret (the token still
 arrives via the status poll). The bundle has:
@@ -1622,6 +1633,23 @@ A Civitai URL added to the Library takes the same path: `detect_kind` tags it
 `url:civitai` and `CivitaiProcessor` runs the identical ingest job, linking the
 resulting `lora_id` back onto the library item.
 
+## Cast discovery status (`GET /api/cast/discovery/status`, session-only)
+
+Route module `tinyagentos/routes/cast_discovery.py`. Session cookie only; no
+registry scope reaches it. It reports whether the opt-in mDNS reflector
+(`mdns_reflector.enabled` in config.yaml, off by default) is actually bridging
+cast discovery across a container boundary.
+
+- `{"state": "ok"}` -- running, bridging at least two interfaces, traffic seen.
+- `{"state": "unavailable", "reason": ...}` -- enabled but not bridging.
+  `reason` is `not_running`, `single_interface`, `bind_failed`, `send_failed`,
+  `no_traffic`, or `start_failed` (enabled in config but the reflector raised
+  during startup; `error` carries the message).
+- `{"state": "disabled"}` -- not enabled; it makes no claim either way.
+
+The cast device list must treat `unavailable` as "discovery is not working",
+never as an empty network.
+
 ## What `GET /api/decisions/agent` returns (grant scoping)
 
 Route module `tinyagentos/routes/decisions.py`, scope `decisions_write`. Lists
@@ -1632,23 +1660,22 @@ Which of its own decisions come back depends on the shape of the grant:
 
 | grant | returns |
 |---|---|
-| global (null-project) | **null-project decisions ONLY** |
+| global (null-project) only | **null-project decisions ONLY** |
 | exactly one project | that project's decisions, filtered in the store query |
-| two or more projects | fetched by agent, then filtered in Python |
+| two or more scopes (global counts as one) | the union, one store query per scope, merged newest first |
 
 **A global grant does NOT mean "see everything".** It means null-project
 decisions, matching the rule `_resolve_decision_actor` already applies when the
 agent POSTS a decision: an agent with a global grant raises null-project
-decisions, so that is what it reads back. Anything relying on a global grant
-returning every project's decisions is relying on the older, wider behaviour.
+decisions, so that is what it reads back. An agent that also holds a grant on
+project B can post there too, so it also reads back its project-B decisions;
+projects it holds no grant for stay hidden. The registry-JWT path of
+`GET /api/decisions` returns the same set.
 
-**The `limit` interacts with scoping and only two of the three paths are safe.**
-The global and single-project paths push the project filter into the store query,
-so the 500 limit applies AFTER scoping (issue #2194). The **two-or-more-project
-path still fetches up to 500 rows for the agent and filters afterwards in
-Python**, so an agent holding grants on several projects and carrying more than
-500 decisions in total can still lose allowed-project rows to the limit. Same
-shape as the original bug, narrower blast radius.
+**The `limit` applies AFTER scoping (issue #2194).** Each granted scope
+(global, or one project) is its own store query with the project filter inside
+it, and the merged result is capped at 500 newest first, so decisions in
+ungranted projects can never crowd allowed ones out of the list.
 
 ## MCP tool calls (`POST /api/mcp/call`)
 
