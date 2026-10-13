@@ -1,12 +1,11 @@
 """Test that no real opencode spawn can happen during tests.
 
 This test ensures the autouse fixture in conftest.py makes a real opencode
-spawn impossible by forcing resolve_opencode_binary() to return None and
-setting TAOS_OPENCODE_BIN to a non-existent path.
+spawn impossible by forcing resolve_opencode_binary() to return a non-existent
+path and setting TAOS_OPENCODE_BIN to a non-existent path.
 """
 from __future__ import annotations
 
-import asyncio
 import pytest
 
 from tinyagentos.opencode_runtime import (
@@ -36,11 +35,12 @@ async def test_no_real_opencode_spawn_raises_binary_not_found(tmp_path):
     cfg = _make_server_cfg(tmp_path)
     server = OpenCodeServer(cfg)
 
-    # With the autouse fixture active, resolve_opencode_binary() returns None
-    # and TAOS_OPENCODE_BIN points to a non-existent path, so the spawn attempt
-    # hits FileNotFoundError which ensure_running maps to OpenCodeBinaryNotFoundError.
+    # With the autouse fixture active, resolve_opencode_binary() returns a
+    # non-existent path and TAOS_OPENCODE_BIN points to a non-existent path,
+    # so the spawn attempt hits FileNotFoundError which ensure_running maps to
+    # OpenCodeBinaryNotFoundError.
     with pytest.raises(OpenCodeBinaryNotFoundError):
-        await server.ensure_running(deadline_s=0.5, poll_s=0.05)
+        await server.ensure_running(deadline_s=0.05, poll_s=0.01)
 
     # Verify no process was started
     assert not server.is_running()

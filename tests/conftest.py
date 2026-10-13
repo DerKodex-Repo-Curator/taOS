@@ -33,26 +33,28 @@ from _data_guard_plugin import (  # noqa: F401
 #
 # An autouse fixture that makes a real opencode spawn impossible during tests:
 #   1. Monkeypatches `tinyagentos.opencode_runtime.resolve_opencode_binary` to
-#      return a non-existent path (so the `or binary` fallback in ensure_running
-#      uses that path instead of "opencode").
+#      return a non-existent path. In ensure_running, when config.binary is the
+#      default "opencode", the code does:
+#          binary = resolve_opencode_binary() or binary
+#      With a fake path (truthy), this uses the fake path and the spawn fails
+#      with FileNotFoundError, which ensure_running maps to
+#      OpenCodeBinaryNotFoundError.
 #   2. Sets `TAOS_OPENCODE_BIN` to the same non-existent path for consistency.
 #
-# When both fail, `ensure_running` hits FileNotFoundError which it maps to
-# OpenCodeBinaryNotFoundError.
-#
 # Tests that deliberately exercise the spawn path with a fake binary (by passing
-# `binary=` to OpenCodeServerConfig, or by setting TAOS_OPENCODE_BIN after this
-# fixture runs) keep working because they override these values explicitly.
+# `binary=` to OpenCodeServerConfig) keep working because the code only calls
+# resolve_opencode_binary() when config.binary == "opencode". Explicit binary=
+# configs bypass the patched function entirely.
 #
-# Tests that test `resolve_opencode_binary` directly (TestResolveOpencodeBinary)
-# are excluded from this fixture so they can test the real resolution logic.
+# Tests that test `resolve_opencode_binary` directly are excluded via the
+# `no_opencode_spawn_guard` marker so they can test the real resolution logic.
 # ---------------------------------------------------------------------------
 
 @pytest.fixture(autouse=True)
 def _forbid_real_opencode_spawn(request, monkeypatch):
     """Make real opencode spawns impossible in all tests."""
-    # Skip for tests that directly test resolve_opencode_binary resolution logic.
-    if request.node.cls and request.node.cls.__name__ == "TestResolveOpencodeBinary":
+    # Skip for tests marked with no_opencode_spawn_guard (e.g. TestResolveOpencodeBinary).
+    if request.node.get_closest_marker("no_opencode_spawn_guard"):
         return
 
     import tinyagentos.opencode_runtime as ocr
@@ -67,6 +69,8 @@ def _forbid_real_opencode_spawn(request, monkeypatch):
     monkeypatch.setattr(ocr, "resolve_opencode_binary", lambda: fake_path)
 
     # 2. Set TAOS_OPENCODE_BIN to the same fake path for consistency.
+    #    This env var is checked first by the real resolve_opencode_binary, but
+    #    since we monkeypatch the function directly, this is defensive.
     monkeypatch.setenv("TAOS_OPENCODE_BIN", fake_path)
 
 
