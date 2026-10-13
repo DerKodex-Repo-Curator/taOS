@@ -1967,7 +1967,8 @@ session, cookie or bearer. So casting never hands a TV an ordinary taOS URL:
   (how stale a still frame can be; show it in the UI). `mode: "live"` answers
   501 until the HLS encoder lands.
 - `POST /api/cast/sessions/{cast_id}/refresh` extends an ACTIVE cast by one
-  TTL; an expired or ended cast answers 409 and cannot be revived.
+  TTL; an expired cast answers 409 (or 404 once pruned), an ended cast
+  answers 404, and neither can be revived.
 - `DELETE /api/cast/sessions/{cast_id}` ends the cast; the token dies at once.
 - `GET|HEAD /cast/media/{kind}/{view_id}/still.png?token=...` is what the TV
   fetches. AuthMiddleware exempts exactly the `/cast/media/` prefix for
