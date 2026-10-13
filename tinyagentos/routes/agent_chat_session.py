@@ -2,7 +2,7 @@
 
 A registry agent (for example a self-joined external CLI) authenticates with its
 own registry JWT holding the ``chat_session`` grant. The session slug is derived
-from the token's registry record and never from the request, so an agent can
+from the token's canonical_id and never from the request, so an agent can
 only drain and answer its own chat session.
 """
 from __future__ import annotations
@@ -13,6 +13,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from tinyagentos.agent_token_auth import check_agent_scope
+from tinyagentos.chat.orphan_reconcile import _CANONICAL_AGENT_ID_RE
 
 logger = logging.getLogger(__name__)
 
@@ -24,12 +25,12 @@ async def _resolve_slug(request: Request) -> str | JSONResponse:
     cid = await check_agent_scope(request, "chat_session")
     if cid is None:
         return JSONResponse({"error": "forbidden"}, status_code=403)
-    registry = getattr(request.app.state, "agent_registry", None)
-    record = await registry.get(cid) if registry is not None else None
-    handle = ((record or {}).get("handle") or "").strip()
-    slug = handle.lstrip("@")
-    if not slug:
-        return JSONResponse({"error": "agent has no handle"}, status_code=403)
+    # The chat router and DM channels name a registry agent by the slug of its
+    # canonical_id (display-name based), not by its handle, so the session key
+    # must be that same slug or routed messages never reach this stream.
+    slug = _CANONICAL_AGENT_ID_RE.sub("", cid)
+    if not slug or slug == cid:
+        return JSONResponse({"error": "agent has no session slug"}, status_code=403)
     # The bridge keys sessions by the local agent's config ``name``. A guest
     # whose handle equals one would drain and answer that local agent's session.
     config = getattr(request.app.state, "config", None)

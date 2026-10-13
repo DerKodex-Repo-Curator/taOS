@@ -41,11 +41,14 @@ async def chat_app(app, tmp_data_dir):
             await store.close()
 
 
-async def _agent(app, handle, *, scopes=("chat_session",)):
+async def _agent(app, handle, *, scopes=("chat_session",), display_name=None):
     registry = app.state.agent_registry
     priv, _pub = app.state.agent_registry_keypair
     rec = await registry.register(
-        framework="taosmd", display_name=handle, origin="taos-deployed", handle=handle
+        framework="taosmd",
+        display_name=display_name or handle,
+        origin="taos-deployed",
+        handle=handle,
     )
     cid = rec["canonical_id"]
     for scope in scopes:
@@ -147,6 +150,30 @@ class TestChatSessionEvents:
         assert "event: user_message" in r.text
         assert "hello" in r.text
         assert "other" not in r.text
+
+    async def test_session_slug_follows_canonical_id_not_handle(self, chat_app):
+        # The router delivers to the canonical_id slug (display-name based), so a
+        # handle that differs from the display name must not move the session.
+        _cid, token = await _agent(
+            chat_app, "@other-handle", display_name="Guest Display"
+        )
+        registry = chat_app.state.bridge_sessions
+        real_subscribe = registry.subscribe
+        subscribed = []
+
+        async def one_frame(slug):
+            subscribed.append(slug)
+            async for frame in real_subscribe(slug):
+                yield frame
+                return
+
+        registry.subscribe = one_frame
+        await registry.enqueue_user_message("guest-display", {"id": "m1", "text": "hi"})
+        async with _bare(chat_app) as c:
+            r = await c.get(EVENTS, headers=_hdr(token))
+        assert r.status_code == 200
+        assert subscribed == ["guest-display"]
+        assert "hi" in r.text
 
 
 @pytest.mark.asyncio
