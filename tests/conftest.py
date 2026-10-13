@@ -29,6 +29,48 @@ from _data_guard_plugin import (  # noqa: F401
 
 
 # ---------------------------------------------------------------------------
+# opencode spawn guard — FORBID real `opencode serve` spawns from the test suite.
+#
+# An autouse fixture that makes a real opencode spawn impossible during tests:
+#   1. Monkeypatches `tinyagentos.opencode_runtime.resolve_opencode_binary` to
+#      return a non-existent path (so the `or binary` fallback in ensure_running
+#      uses that path instead of "opencode").
+#   2. Sets `TAOS_OPENCODE_BIN` to the same non-existent path for consistency.
+#
+# When both fail, `ensure_running` hits FileNotFoundError which it maps to
+# OpenCodeBinaryNotFoundError.
+#
+# Tests that deliberately exercise the spawn path with a fake binary (by passing
+# `binary=` to OpenCodeServerConfig, or by setting TAOS_OPENCODE_BIN after this
+# fixture runs) keep working because they override these values explicitly.
+#
+# Tests that test `resolve_opencode_binary` directly (TestResolveOpencodeBinary)
+# are excluded from this fixture so they can test the real resolution logic.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _forbid_real_opencode_spawn(request, monkeypatch):
+    """Make real opencode spawns impossible in all tests."""
+    # Skip for tests that directly test resolve_opencode_binary resolution logic.
+    if request.node.cls and request.node.cls.__name__ == "TestResolveOpencodeBinary":
+        return
+
+    import tinyagentos.opencode_runtime as ocr
+
+    # Use a path that definitely does not exist. When resolve_opencode_binary()
+    # returns this, ensure_running's `binary = resolve_opencode_binary() or binary`
+    # uses it (since a non-empty string is truthy), and the spawn fails with
+    # FileNotFoundError, which ensure_running maps to OpenCodeBinaryNotFoundError.
+    fake_path = "/this/path/does/not/exist/opencode"
+
+    # 1. Force resolve_opencode_binary() to return the fake path.
+    monkeypatch.setattr(ocr, "resolve_opencode_binary", lambda: fake_path)
+
+    # 2. Set TAOS_OPENCODE_BIN to the same fake path for consistency.
+    monkeypatch.setenv("TAOS_OPENCODE_BIN", fake_path)
+
+
+# ---------------------------------------------------------------------------
 # CSRF in tests — ON by default, opted OUT explicitly.
 #
 # This used to be inverted: an autouse fixture no-op'd `verify_csrf` for every
