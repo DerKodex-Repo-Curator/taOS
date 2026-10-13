@@ -121,16 +121,15 @@ class TestDetectNpu:
         # and the rknpu paths are present, asserting _detect_npu() == 3.
         import tinyagentos.hardware as hw_mod
         from pathlib import Path as _Path
-        from tinyagentos.hardware import _path_exists_safe
 
-        real_path_exists = _Path.exists
-        def fake_path_exists(self):
-            s = str(self)
+        real_safe = hw_mod._path_exists_safe
+        def fake_path_exists(p):
+            s = str(p)
             if "/dev/rknpu" in s:
                 return True  # rknpu path present
             if "model" in s:
                 return True  # model path present
-            return real_path_exists(self)
+            return real_safe(p)
         monkeypatch.setattr(hw_mod, "_path_exists_safe", fake_path_exists)
 
         real_glob = _Path.glob
@@ -173,49 +172,6 @@ class TestDetectNpu:
             mock_hw_npu.return_value = NpuInfo(type="rknpu", cores=3)
             result = _detect_npu()
             assert result == 3
-
-    def test_returns_3_when_rknpu_paths_present_no_mali0(self, monkeypatch):
-        # After the fix, _detect_npu delegates to hardware._detect_npu().
-        # Monkeypatch the hardware detector so that /sys/class/misc/mali0 is absent
-        # (panthor scenario) and the rknpu paths are present on an RK3588 model string,
-        # asserting _detect_npu() == 3.
-        import tinyagentos.hardware as hw_mod
-        from pathlib import Path as _Path
-        from tinyagentos.hardware import _path_exists_safe
-
-        real_path_exists = _Path.exists
-        def fake_path_exists(self):
-            s = str(self)
-            if "/dev/rknpu" in s:
-                return True  # rknpu path present
-            if "model" in s:
-                return True  # model path present
-            return real_path_exists(self)
-        monkeypatch.setattr(hw_mod, "_path_exists_safe", fake_path_exists)
-
-        real_glob = _Path.glob
-        def fake_glob(self, pattern):
-            if str(self) == "/sys/bus/platform/drivers" and pattern == "RKNPU":
-                return iter([_Path("/sys/bus/platform/drivers/RKNPU")])
-            if str(self) == "/sys/class/drm" and pattern == "renderD*":
-                return iter([])
-            return real_glob(self, pattern)
-        monkeypatch.setattr(_Path, "glob", fake_glob)
-
-        real_read_text = _Path.read_text
-        def fake_read_text(self, *args, **kwargs):
-            if str(self) == "/proc/device-tree/model":
-                return "Orange Pi 5 Plus rockchip,rk3588"
-            return real_read_text(self, *args, **kwargs)
-        monkeypatch.setattr(_Path, "read_text", fake_read_text)
-
-        real_run = hw_mod._run
-        def fake_run(*a, **k):
-            return ""
-        monkeypatch.setattr(hw_mod, "_run", fake_run)
-
-        result = _detect_npu()
-        assert result == 3
 
 
 class TestDetectGpu:

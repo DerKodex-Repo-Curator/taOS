@@ -65,6 +65,8 @@ class TestDetectHardware:
             s = str(self)
             if s == "/sys/class/misc/mali0":
                 return False  # mali0 absent (panthor scenario)
+            if s == "/sys/class/drm":
+                return True  # drm directory exists (panthor scenario)
             if "card1/device/driver" in s:
                 return True  # test card driver exists (panthor scenario)
             return real_path_exists(self)
