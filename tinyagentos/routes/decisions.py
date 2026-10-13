@@ -1080,17 +1080,7 @@ async def _deliver_delegation_invite(
         return
 
     try:
-        import asyncio
-        from tinyagentos.peer import resolve_local_identity_id, send_envelope
-
-        data_dir = getattr(request.app.state, "data_dir", None)
-        local_id = await asyncio.to_thread(
-            resolve_local_identity_id, data_dir
-        )
-        if local_id is None:
-            return
-
-        from_username = local_id.removeprefix("hub:")
+        from tinyagentos.peer import send_envelope
 
         body: dict = {
             "invite_id": invite_id,
@@ -1099,7 +1089,6 @@ async def _deliver_delegation_invite(
         }
         delivered, err = await send_envelope(
             contacts_store,
-            from_username=from_username,
             to_contact_id=contact_id,
             kind="delegation_status",
             body=body,

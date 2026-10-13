@@ -313,7 +313,6 @@ async def deliver_handshake(
 async def send_envelope(
     contacts_store,
     *,
-    from_username: str,
     to_contact_id: str,
     kind: str,
     body: dict | None = None,
@@ -326,22 +325,23 @@ async def send_envelope(
 
     This is the reusable outbound half of the peer channel — the inbound half
     is ``POST /api/peer/inbox`` in ``routes/peer.py``.
+
+    ``to_contact_id`` is the recipient's canonical ``hub:<fingerprint>`` id
+    (the contacts row key).  The envelope's ``from`` is this node's
+    :func:`local_contact_id` — every peer envelope carries the fingerprint
+    identity since tsk-abwk4t, never the ``hub:<username>`` directory form.
     """
-    # ``to_contact_id`` must be the full ``hub:<username>`` contact id (the key
-    # the contacts store uses).  ``build_envelope`` prefixes ``hub:`` itself, so
-    # strip it here — otherwise the envelope is addressed ``hub:hub:<user>`` and
-    # the receiver 403s it.  Fail loudly on a wrong shape rather than silently
-    # producing a ``hub:peer:abc`` address that never matches the remote id.
+    # ``to_contact_id`` must be the full ``hub:<...>`` contact id (the key
+    # the contacts store uses).  ``build_envelope`` stamps it into ``to``
+    # as-is — passing a bare id here would address the envelope to something
+    # that never matches the remote node.  Fail loudly on a wrong shape
+    # rather than silently producing an undeliverable envelope.
     if not to_contact_id.startswith("hub:"):
         raise ValueError(
-            f"to_contact_id must be a 'hub:<username>' id, got {to_contact_id!r}"
+            f"to_contact_id must be a 'hub:<...>' id, got {to_contact_id!r}"
         )
-    to_username = to_contact_id[len("hub:"):]
-    if not to_username:
-        raise ValueError("to_contact_id has an empty hub username")
     envelope = build_envelope(
-        from_username=from_username,
-        to_username=to_username,
+        to_contact_id=to_contact_id,
         kind=kind,
         body=body,
     )

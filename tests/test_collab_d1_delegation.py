@@ -1069,12 +1069,15 @@ class TestScopeTierVsElevated:
     def test_validate_splits_tier_from_elevated(self):
         from tinyagentos.delegation_handler import validate_delegation_scopes
 
+        # memory_read is a real grantable scope (unlike tools_execute, which
+        # was removed from the grant vocabulary) but outside the delegation
+        # default tier — the canonical "elevated" example.
         tier, elevated, denied = validate_delegation_scopes(
-            ["a2a_send", "tools_execute"]
+            ["a2a_send", "memory_read"]
         )
         assert "a2a_send" in tier
-        assert "tools_execute" in elevated
-        assert "tools_execute" not in tier
+        assert "memory_read" in elevated
+        assert "memory_read" not in tier
         assert denied == []
 
     @pytest.mark.asyncio
@@ -1104,12 +1107,12 @@ class TestScopeTierVsElevated:
             envelope_body={
                 "agent_slug": "grok-taos",
                 "display_name": "Grok TAOS",
-                "requested_scopes": ["a2a_send", "tools_execute"],
+                "requested_scopes": ["a2a_send", "memory_read"],
                 "project_id": "prj-test",
             },
         )
         # An elevated scope must never be auto-granted: the request must route
-        # to manual approval, not mint an invite containing tools_execute.
+        # to manual approval, not mint an invite containing memory_read.
         assert result["status"] == "pending_approval"
         # And no invite may have been minted on the auto path.
         invites = await store.list_for_project("prj-test")
@@ -1274,24 +1277,29 @@ class TestDelegationDeliveryPath:
 
     @pytest.mark.asyncio
     async def test_send_envelope_delivers_to_string_endpoint_without_double_prefix(
-        self, tmp_path
+        self, tmp_path, monkeypatch
     ):
         """send_envelope must (a) accept plain string endpoints (the canonical
         shape written by establish_peer_link) and (b) address the envelope to
-        ``hub:<user>``, not ``hub:hub:<user>``."""
+        the contact id as-is — stamped into ``to`` verbatim, never re-prefixed.
+        The ``from`` is this node's fingerprint identity (tsk-abwk4t)."""
         import httpx as _httpx
         import respx
         from tinyagentos.contacts_store import ContactsStore, generate_peer_token
-        from tinyagentos.peer import send_envelope
+        from tinyagentos.peer import local_contact_id, send_envelope
+
+        # Isolate the hub identity keystore: local_contact_id() mints one.
+        monkeypatch.setenv("TAOS_DATA_DIR", str(tmp_path / "node"))
+        peer_id = "hub:" + "ab" * 32
 
         store = ContactsStore(tmp_path / "contacts.db")
         await store.init()
         await store.add_contact(
-            contact_id="hub:hogne", hub_username="hogne", display_name="H",
+            contact_id=peer_id, hub_username="hogne", display_name="H",
             ed25519_pub="pk", x25519_pub="ek",
         )
         await store.establish_peer_link(
-            contact_id="hub:hogne",
+            contact_id=peer_id,
             inbound_token=generate_peer_token(),
             outbound_token=generate_peer_token(),
             endpoints=["https://hogne.example.com:6969"],
@@ -1304,8 +1312,7 @@ class TestDelegationDeliveryPath:
 
             delivered, err = await send_envelope(
                 store,
-                from_username="jaylfc",
-                to_contact_id="hub:hogne",
+                to_contact_id=peer_id,
                 kind="delegation_status",
                 body={"invite_id": "inv-123", "agent_slug": "grok", "project_id": "prj-1"},
             )
@@ -1315,8 +1322,8 @@ class TestDelegationDeliveryPath:
             assert route.called
             assert len(route.calls) == 1
             envelope = json.loads(route.calls[0].request.content)["envelope"]
-            assert envelope["to"] == "hub:hogne"  # NOT hub:hub:hogne
-            assert envelope["from"] == "hub:jaylfc"
+            assert envelope["to"] == peer_id  # stamped verbatim, not re-prefixed
+            assert envelope["from"] == local_contact_id()
 
         await store.close()
 
@@ -1332,6 +1339,9 @@ class TestDelegationDeliveryPath:
         from tinyagentos.contacts_store import ContactsStore, generate_peer_token
         from tinyagentos.routes.decisions import _deliver_delegation_invite
 
+        # Isolate the hub identity keystore: the envelope's `from` mints one.
+        monkeypatch.setenv("TAOS_DATA_DIR", str(tmp_path / "node"))
+
         store = ContactsStore(tmp_path / "contacts.db")
         await store.init()
         await store.add_contact(
@@ -1345,13 +1355,9 @@ class TestDelegationDeliveryPath:
             endpoints=["https://hogne.example.com:6969"],
         )
 
-        # Avoid the hub-identity filesystem lookup; the delivery path only
-        # needs a local id to derive from_username.
-        monkeypatch.setattr(
-            "tinyagentos.peer.resolve_local_identity_id",
-            lambda data_dir=None: "hub:testnode",
-        )
-
+        # The delivery path no longer needs the hub directory identity: the
+        # envelope's `from` is the node's fingerprint identity (tsk-abwk4t),
+        # stamped by build_envelope itself.
         request = MagicMock()
         request.app.state.contacts_store = store
         request.app.state.data_dir = str(tmp_path)
@@ -1537,32 +1543,36 @@ class TestSendEnvelopeGuards:
         store = ContactsStore(tmp_path / "contacts.db")
         await store.init()
 
-        # A non-hub id (e.g. peer:abc) must raise, not silently produce a
-        # hub:peer:abc envelope that the receiver 403s.
-        with pytest.raises(ValueError, match="hub:<username>"):
+        # A non-hub id (e.g. peer:abc) must raise, not silently produce an
+        # envelope addressed to a contact id that never matches the remote.
+        with pytest.raises(ValueError, match="hub:<"):
             await send_envelope(
-                store, from_username="jaylfc", to_contact_id="peer:abc",
+                store, to_contact_id="peer:abc",
                 kind="chat", body={},
             )
 
         await store.close()
 
     @pytest.mark.asyncio
-    async def test_orders_dict_endpoints_by_priority(self, tmp_path):
+    async def test_orders_dict_endpoints_by_priority(self, tmp_path, monkeypatch):
         import httpx as _httpx
         import respx
 
         from tinyagentos.contacts_store import ContactsStore, generate_peer_token
         from tinyagentos.peer import send_envelope
 
+        # Isolate the hub identity keystore: build_envelope mints one for `from`.
+        monkeypatch.setenv("TAOS_DATA_DIR", str(tmp_path / "node"))
+        peer_id = "hub:" + "cd" * 32
+
         store = ContactsStore(tmp_path / "contacts.db")
         await store.init()
         await store.add_contact(
-            contact_id="hub:hogne", hub_username="hogne", display_name="H",
+            contact_id=peer_id, hub_username="hogne", display_name="H",
             ed25519_pub="pk", x25519_pub="ek",
         )
         await store.establish_peer_link(
-            contact_id="hub:hogne",
+            contact_id=peer_id,
             inbound_token=generate_peer_token(),
             outbound_token=generate_peer_token(),
             endpoints=[
@@ -1578,7 +1588,7 @@ class TestSendEnvelopeGuards:
                 return_value=_httpx.Response(200, json={"status": "received"}))
 
             delivered, err = await send_envelope(
-                store, from_username="jaylfc", to_contact_id="hub:hogne",
+                store, to_contact_id=peer_id,
                 kind="delegation_status", body={},
             )
 
