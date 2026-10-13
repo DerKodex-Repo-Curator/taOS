@@ -421,6 +421,8 @@ async def create_decision(
                     "priority": body.priority,
                     "from_agent": from_agent,
                 },
+                # Only the decider's bell and push devices, never a broadcast.
+                user_id=actor.decider_user_id,
             )
         except Exception:
             pass
@@ -468,18 +470,15 @@ async def list_decisions(
 async def list_decisions_as_agent(request: Request):
     """Agent-facing list: filter by from_agent (the asking agent).  Only
     returns decisions whose project the agent holds an active decisions_write
-    grant for.  A global (null-project) grant means null-project decisions
-    only, matching _resolve_decision_actor's posting rule; otherwise, only
-    decisions from allowed projects are returned.  The store layer enforces
-    the from_agent binding so there is no cross-agent leakage.
+    grant for.  A global (null-project) grant covers null-project decisions,
+    matching _resolve_decision_actor's posting rule; each per-project grant
+    covers that project.  An agent holding both sees the union.  The store
+    layer enforces the from_agent binding so there is no cross-agent leakage.
 
-    LIMIT INTERACTION, and it is not uniform across the three paths: the global
-    and single-project paths push the project filter INTO the store query, so the
-    limit applies AFTER scoping (issue #2194).  The two-or-more-project path
-    cannot express that as one query, so it still fetches up to `limit` rows for
-    the agent and filters in Python afterwards; an agent holding grants on
-    several projects and carrying more than `limit` decisions in total can still
-    lose allowed-project rows to the limit there."""
+    LIMIT INTERACTION: each granted scope (null project or one project) is
+    queried with the project filter INSIDE the store query, and the merged
+    result is capped at 500 newest first, so the limit applies AFTER scoping
+    (issue #2194) however many grants the agent holds."""
     from tinyagentos.agent_token_auth import check_agent_scope
 
     canonical_id = await check_agent_scope(request, "decisions_write")
@@ -513,33 +512,25 @@ async def _agent_own_decisions(
     }
 
     store = request.app.state.decision_store
-    # A global (null-project) grant means null-project decisions only,
-    # matching _resolve_decision_actor's posting rule.
-    # The project filter is pushed into the store query so the limit applies
-    # AFTER scoping (issue #2194) -- for the global and single-project paths.
-    # The multi-project fallback below still filters after the fetch.
-    if None in allowed_projects:
-        # Global grant: only null-project decisions
-        if project_id is not None:
-            return []
-        items = await store.list(from_agent=canonical_id, project_id=None, status=status, limit=500)
-    else:
-        # Per-project grants: only those projects.  A requested project_id
-        # narrows the set to that one project (or nothing when not granted).
-        if project_id is not None:
-            allowed_projects &= {project_id}
-        # Push the project filter into the store query so the limit applies
-        # after scoping. If there is exactly one allowed project, use it
-        # directly; otherwise fall back to Python filtering after the fetch.
-        if not allowed_projects:
-            return []
-        if len(allowed_projects) == 1:
-            only_project = allowed_projects.pop()
-            items = await store.list(from_agent=canonical_id, project_id=only_project, status=status, limit=500)
-        else:
-            items = await store.list(from_agent=canonical_id, status=status, limit=500)
-            items = [d for d in items if d.get("project_id") in allowed_projects]
-    return items
+    # A global (null-project) grant covers null-project decisions, matching
+    # _resolve_decision_actor's posting rule; each per-project grant covers
+    # that project.  The allowed set is the union of both.  A requested
+    # project_id narrows the set to that one project (or nothing when not
+    # granted).
+    if project_id is not None:
+        allowed_projects &= {project_id}
+    if not allowed_projects:
+        return []
+    # Push the project filter into the store query so the limit applies after
+    # scoping (issue #2194).  Each allowed scope (None means IS NULL) is queried
+    # on its own, then the results are merged newest first and capped.
+    items: list[dict] = []
+    for scope in allowed_projects:
+        items.extend(
+            await store.list(from_agent=canonical_id, project_id=scope, status=status, limit=500)
+        )
+    items.sort(key=lambda d: d.get("created_at") or 0, reverse=True)
+    return items[:500]
 
 
 @router.get("/api/decisions/{decision_id}")
