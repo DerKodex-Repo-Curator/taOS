@@ -12,6 +12,7 @@ from .marketplace import (
     InvalidPermissionSet,
     PERMISSION_VOCABULARY,
     default_registry_dir,
+    redact_config_env,
     validate_permissions,
 )
 
@@ -30,5 +31,6 @@ __all__ = [
     "InvalidPermissionSet",
     "PERMISSION_VOCABULARY",
     "default_registry_dir",
+    "redact_config_env",
     "validate_permissions",
 ]

@@ -229,6 +229,30 @@ class MCPInstallSpec(BaseModel):
         return _coerce_argv(value, field="install.command")
 
 
+class MCPInitSpec(BaseModel):
+    """A one-shot workspace preparation step, run once at install time.
+
+    Some servers need more than an empty directory before they can start: the
+    reference git server, for example, calls ``git.Repo(path)`` on launch and
+    exits when the workspace is not a repository.  A manifest declares that
+    preparation here as an argv; the install flow runs it through the same
+    bounded runner as the install command, after the workspace directory is
+    created and before the server row is registered.  ``{workspace}`` is
+    expanded the same way as in the run configuration.  A failing init step
+    fails the install (502) and leaves the store untouched, exactly like a
+    failing install command.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    command: list[str] = Field(default_factory=list)
+
+    @field_validator("command", mode="before")
+    @classmethod
+    def _coerce_command(cls, value: Any) -> list[str]:
+        return _coerce_argv(value, field="init.command")
+
+
 class MCPRunSpec(BaseModel):
     """How to launch the server once installed.
 
@@ -287,6 +311,10 @@ class MCPRegistryManifest(BaseModel):
     permissions: list[str] = Field(default_factory=list)
     install: MCPInstallSpec = Field(default_factory=MCPInstallSpec)
     run: MCPRunSpec = Field(default_factory=MCPRunSpec)
+    # Optional one-shot workspace preparation (see MCPInitSpec).  Empty by
+    # default: most servers start fine in the empty directory the installer
+    # provisions.
+    init: MCPInitSpec = Field(default_factory=MCPInitSpec)
     # Registry-curated entries are reviewed by a maintainer; the flag is
     # surfaced in the browse payload so a UI can badge them.
     verified: bool = False
@@ -297,7 +325,10 @@ class MCPRegistryManifest(BaseModel):
     def _check_id(cls, value: str) -> str:
         # The character class already requires an alphanumeric first character,
         # so ids made only of separators (``.``, ``..``, ``-``) cannot pass it.
-        if not _ID_RE.match(value or ""):
+        # ``fullmatch`` (not ``match``): ``$`` in ``match`` still accepts a
+        # trailing newline, so ``"evil\n"`` would pass validation and then
+        # travel into file paths and shell-adjacent argv.
+        if not _ID_RE.fullmatch(value or ""):
             raise ValueError(
                 f"id {value!r} is not a valid marketplace id "
                 "(lowercase letters, digits, '.', '_', '-' — must start alphanumeric)"
@@ -720,6 +751,34 @@ def _is_marketplace_row(server: dict | None) -> bool:
     return isinstance(config, dict) and config.get("source") == MARKETPLACE_SOURCE
 
 
+# What a redacted ``config["env"]`` value looks like in read payloads.  The
+# keys stay (an operator needs to see *which* variables are set); the values
+# never leave the server, because ``config["env"]`` is writable through
+# ``PUT /api/mcp/servers/{id}/config`` and readable by any signed-in member —
+# the one working route for a live credential used to be stashing it there.
+REDACTED_ENV_VALUE = "[redacted]"
+
+
+def redact_config_env(config: dict | None) -> dict:
+    """Return a copy of a server config with ``env`` values redacted.
+
+    ``MCPSupervisor.start()`` merges ``config["env"]`` (non-secret defaults)
+    with the ``mcp:<id>:*`` secrets at launch; either side can therefore carry
+    a live credential, so every read path that returns a stored config must go
+    through here.  Non-dict input yields ``{}`` rather than raising — a
+    malformed row must not turn a browse into a 500.
+    """
+    if not isinstance(config, dict):
+        return {}
+    redacted = dict(config)
+    env = redacted.get("env")
+    if isinstance(env, dict):
+        redacted["env"] = {
+            key: REDACTED_ENV_VALUE for key in env
+        }
+    return redacted
+
+
 class MCPMarketplace:
     """Browse the registry and install entries into ``MCPServerStore``.
 
@@ -804,7 +863,10 @@ class MCPMarketplace:
             entry["installed"] = True
             entry["installed_by_marketplace"] = _is_marketplace_row(server)
             entry["installed_version"] = server.get("version", "")
-            entry["installed_config"] = server.get("config", {})
+            # The stored config can carry live credentials in ``env`` (it is
+            # writable via PUT /config and merged at launch), so the detail
+            # payload redacts the values and keeps the keys.
+            entry["installed_config"] = redact_config_env(server.get("config"))
             if self.supervisor is not None:
                 entry["running"] = bool(
                     self.supervisor.get_status(manifest_id).get("running")
@@ -891,6 +953,9 @@ class MCPMarketplace:
         # …and create it only once the install succeeded, so a failed or timed
         # out install leaves no directory behind.
         self._create_workspace(workspace)
+        await self._run_init(
+            manifest, workspace, run_install_command=run_install_command
+        )
         config = manifest.server_config(workspace)
 
         await self.store.register_server(
@@ -943,6 +1008,45 @@ class MCPMarketplace:
                 f"could not create the workspace at {workspace}: {exc}",
                 status_code=500,
             ) from exc
+
+    async def _run_init(
+        self,
+        manifest: MCPRegistryManifest,
+        workspace: str | None,
+        *,
+        run_install_command: bool,
+    ) -> None:
+        """Run a manifest's declared init step, if any.
+
+        Executed through the same bounded runner as the install command, with
+        ``{workspace}`` expanded.  A failure aborts the install before anything
+        is registered — the store is left untouched, exactly like a failed
+        install command.  Skipped entirely in dry-run mode
+        (``run_install_command=False``), which resolves and registers without
+        executing anything.
+        """
+        if not manifest.init.command or not run_install_command:
+            return
+        if workspace is None and any(
+            WORKSPACE_TOKEN in arg for arg in manifest.init.command
+        ):
+            raise MCPMarketplaceError(
+                f"{manifest.id!r} declares an init step using {WORKSPACE_TOKEN} "
+                "but needs no workspace",
+                status_code=400,
+            )
+        argv = [
+            arg.replace(WORKSPACE_TOKEN, workspace or "")
+            for arg in manifest.init.command
+        ]
+        returncode, stdout, stderr = await self._runner(argv)
+        if returncode != 0:
+            raise MCPMarketplaceError(
+                f"init command for {manifest.id!r} failed "
+                f"(exit {returncode}): "
+                f"{stderr.strip()[:400] or stdout.strip()[:400]}",
+                status_code=502,
+            )
 
     async def uninstall(self, manifest_id: str) -> dict:
         """Remove an installed marketplace server.

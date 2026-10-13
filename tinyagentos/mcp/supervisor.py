@@ -87,6 +87,15 @@ class ServerProcess:
     stdout_task: asyncio.Task | None = None
 
 
+def _secret_prefix(server_id: str) -> str:
+    """Secrets-store name prefix for a server's operator-supplied env vars.
+
+    ``PUT /api/mcp/servers/{id}/env`` writes ``mcp:<id>:<VAR>``; the same
+    prefix selects them for launch-time injection and for uninstall cleanup.
+    """
+    return f"mcp:{server_id}:"
+
+
 class MCPSupervisor:
     def __init__(self, store: MCPServerStore, catalog, notif_store, secrets_store=None) -> None:
         self._store = store
@@ -115,6 +124,17 @@ class MCPSupervisor:
         # controller's own environment rather than replacing it — replacing it
         # strips PATH, so `npx`/`uvx`-based servers would not resolve.
         env = _merged_env(server.get("config"))
+        # Operator-supplied secrets (``PUT /api/mcp/servers/{id}/env`` writes
+        # ``mcp:<id>:<VAR>``) are injected here, over the manifest defaults: a
+        # secret the operator set must win over a placeholder the manifest
+        # shipped, and ``config["env"]`` alone must never be the only path —
+        # its values are readable by any signed-in member (see
+        # ``redact_config_env``), so it cannot carry a live credential.
+        secret_env = await self._secret_env(server_id)
+        if secret_env:
+            if env is None:
+                env = dict(os.environ)
+            env.update(secret_env)
 
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -149,6 +169,32 @@ class MCPSupervisor:
         await self._store.mark_running(server_id, proc.pid)
         logger.info("mcp: started %s pid=%s", server_id, proc.pid)
         return True
+
+    async def _secret_env(self, server_id: str) -> dict[str, str]:
+        """Operator-supplied env vars for *server_id* (``mcp:<id>:<VAR>``).
+
+        Read at launch so a token set through ``PUT /servers/{id}/env`` reaches
+        the child process.  A secrets-store failure yields no secrets rather
+        than failing the start — the child then runs with manifest defaults,
+        and the missing-variable failure (if any) surfaces in its own stderr,
+        not as a controller 500.
+        """
+        if self._secrets_store is None:
+            return {}
+        prefix = _secret_prefix(server_id)
+        try:
+            all_secrets = await self._secrets_store.list()
+        except Exception:
+            logger.exception("mcp start: could not read secrets for %s", server_id)
+            return {}
+        secret_env: dict[str, str] = {}
+        for secret in all_secrets:
+            name = secret.get("name", "")
+            if name.startswith(prefix):
+                value = secret.get("value", "")
+                if isinstance(value, str):
+                    secret_env[name[len(prefix):]] = value
+        return secret_env
 
     async def stop(self, server_id: str, timeout: float = 10.0) -> bool:
         sp = self._processes.get(server_id)
@@ -200,7 +246,7 @@ class MCPSupervisor:
         secrets_dropped = 0
         if self._secrets_store is not None:
             try:
-                prefix = f"mcp:{server_id}:"
+                prefix = _secret_prefix(server_id)
                 all_secrets = await self._secrets_store.list()
                 for s in all_secrets:
                     if s["name"].startswith(prefix):
