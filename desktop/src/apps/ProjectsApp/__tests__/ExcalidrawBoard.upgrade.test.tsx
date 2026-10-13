@@ -224,12 +224,8 @@ describe("ExcalidrawBoard upgrade test - 80 seeded rows", () => {
     const userShapeRows = rows.filter((r) => r.kind === "user_shape");
     expect(userShapeRows).toHaveLength(5);
 
-    // Store the original tldraw_shape blobs for byte-identity comparison
-    const originalBlobs = new Map<string, unknown>();
-    for (const row of userShapeRows) {
-      const blob = (row.payload as { tldraw_shape?: unknown })?.tldraw_shape;
-      originalBlobs.set(row.id, blob);
-    }
+    // Store the original tldraw_shape blobs as strings for byte-identity comparison
+    const originalBlobs = userShapeRows.map((r) => JSON.stringify(r.payload.tldraw_shape));
 
     // Render to trigger conversion
     await act(async () => {
@@ -282,10 +278,10 @@ describe("ExcalidrawBoard upgrade test - 80 seeded rows", () => {
 
     // Verify the stored tldraw_shape blob is byte-identical after load + edit
     // The payload's tldraw_shape should not have been mutated by the conversion/edit cycle
-    for (const row of userShapeRows) {
-      const originalBlob = originalBlobs.get(row.id);
-      const currentBlob = (row.payload as { tldraw_shape?: unknown })?.tldraw_shape;
-      expect(currentBlob).toEqual(originalBlob);
+    for (let i = 0; i < userShapeRows.length; i++) {
+      const row = userShapeRows[i];
+      const currentBlob = JSON.stringify(row.payload.tldraw_shape);
+      expect(currentBlob).toEqual(originalBlobs[i]);
     }
   });
 

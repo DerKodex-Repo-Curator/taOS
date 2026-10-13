@@ -30,9 +30,9 @@ updates:
         patterns:
           - "*"
     ignore:
-      # Major bumps of the heavy UI libs (lucide-react 0->1,
+      # Major bumps of the heavy UI libs (tldraw 4->5, lucide-react 0->1,
       # tsparticles 3->4, etc.) carry breaking API changes and must be migrated
-      # deliberately, not auto-merged.
+      # deliberately (e.g. the tldraw engine migration, #75), not auto-merged.
       # Minor/patch bumps still flow through normally.
       - dependency-name: "*"
         update-types: ["version-update:semver-major"]
