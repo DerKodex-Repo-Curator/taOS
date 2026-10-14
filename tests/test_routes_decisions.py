@@ -743,22 +743,23 @@ async def test_device_bearer_collab_delegation_gate_refused(client, app):
     coverage against a re-drift, not a tautology."""
     admin_uid = _admin_uid(app)
     device = await _register_device(app, admin_uid)
-    resp = await client.post("/api/decisions", json={
-        "from_agent": "hub:sponsor",
-        "question": "hub:sponsor wants to delegate agent 'assistant' (assistant) to this project",
-        "type": "approve_deny",
-        "priority": "blocking",
-        "metadata": {"kind": "collab_delegation_gate",
-                     "contact_id": "hub:sponsor",
-                     "agent_slug": "assistant",
-                     "display_name": "assistant",
-                     "granted_scopes": ["a2a_send"],
-                     "elevated_scopes": [],
-                     "denied_scopes": [],
-                     "project_id": None},
-    })
-    assert resp.status_code == 200
-    d = resp.json()
+    # Gate kinds are server-owned (tsk-mul5pa): raise it the way the internal
+    # raiser does, not via POST /api/decisions.
+    d = await app.state.decision_store.create(
+        from_agent="hub:sponsor",
+        question="hub:sponsor wants to delegate agent 'assistant' (assistant) to this project",
+        type="approve_deny",
+        priority="blocking",
+        user_id=admin_uid,
+        metadata={SERVER_RAISED_KEY: True, "kind": "collab_delegation_gate",
+                  "contact_id": "hub:sponsor",
+                  "agent_slug": "assistant",
+                  "display_name": "assistant",
+                  "granted_scopes": ["a2a_send"],
+                  "elevated_scopes": [],
+                  "denied_scopes": [],
+                  "project_id": None},
+    )
     resp = await client.post(
         f"/api/decisions/{d['id']}/answer",
         json={"value": "approve"},
