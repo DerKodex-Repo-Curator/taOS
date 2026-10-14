@@ -480,7 +480,7 @@ class MCPRegistryManifest(BaseModel):
             raise
 
 
-def default_registry_dir() -> Path:
+def default_registry_dir(catalog_dir: Path | None = None) -> Path:
     """The curated registry shipped with this build of taOS.
 
     It lives next to the rest of the app catalog (``app-catalog/mcp-registry/``,
@@ -489,8 +489,12 @@ def default_registry_dir() -> Path:
     catalog the same way (``PROJECT_DIR / "app-catalog"``).  ``MCPRegistry``
     takes the directory as an argument, so pointing it at a downloaded or
     mounted copy of the hosted registry is a one-line change.
+
+    When ``catalog_dir`` is given (e.g. ``create_app(catalog_dir=...)`` in
+    tests), the registry is resolved under it instead of the source tree.
     """
-    return Path(__file__).resolve().parent.parent.parent / "app-catalog" / "mcp-registry"
+    base = catalog_dir or Path(__file__).resolve().parent.parent.parent / "app-catalog"
+    return base / "mcp-registry"
 
 
 def _manifest_files(registry_dir: Path) -> Iterable[Path]:
