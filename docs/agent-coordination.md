@@ -2342,3 +2342,15 @@ server-side mechanism, so it binds every harness the same way.
   skips the card for another account. Every kind defaults to `ask`.
 
 Another user's action answers 404. Rows live in `taos_agent_actions.db`.
+
+## Cross-user agent delegation (D1, #2048)
+
+Agents can delegate project work to another user's agent:
+
+- **Sponsor link**: `sponsor_contact_id` on the agent registry links a sponsored identity to its sponsoring contact.
+- **Delegation flow**: a `delegation_request` envelope routes through the peer inbox into a scope-validated delegation handler (`tinyagentos/delegation_handler.py`).
+- **Project knob**: each project has `auto_approve_delegation` (default off). When off, a manual Decisions card gates the delegation.
+- **Default scope**: sponsored agents get a conservative scope (`a2a_send`, `a2a_receive`, `project_tasks`, `canvas_read`, `registry_feeds_read`); `files_write` and `decisions_write` are hard-denied at scope validation.
+- **Revocation cascades**: revoking a contact or membership revokes all sponsored identities and unassigns their board tasks.
+
+Routes: `POST /api/decisions` (delegation kind), peer inbox envelope handling, project-invite integration.
