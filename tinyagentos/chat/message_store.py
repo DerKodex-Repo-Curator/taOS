@@ -269,6 +269,52 @@ class ChatMessageStore(BaseStore):
             desc = cursor.description
         return [_parse(r, desc) for r in rows]
 
+    async def latest_previews(self, channel_ids: list[str]) -> dict[str, dict]:
+        """Return the latest non-deleted, non-thread, non-ephemeral message per channel.
+
+        Returns {channel_id: {"text": <collapsed content, max 120 chars>,
+                               "author_id": ..., "author_type": ..., "created_at": ...}}.
+        Empty input returns {} without querying.
+
+        One indexed lookup per channel: ``idx_chat_messages_channel`` is
+        ``(channel_id, created_at)``, so ``ORDER BY created_at DESC LIMIT 1``
+        reads a handful of rows from the end of that channel's index range. A
+        window function ranking every message per channel would scan a
+        channel's whole history on each channel-list request (CR on #3674).
+        """
+        if not channel_ids:
+            return {}
+
+        sql = """
+            SELECT channel_id, content, author_id, author_type, created_at
+            FROM chat_messages
+            WHERE channel_id = ?
+              AND deleted_at IS NULL
+              AND thread_id IS NULL
+              AND ephemeral = 0
+            ORDER BY created_at DESC
+            LIMIT 1
+        """
+        result: dict[str, dict] = {}
+        for channel_id in channel_ids:
+            async with self._db.execute(sql, (channel_id,)) as cursor:
+                row = await cursor.fetchone()
+                desc = cursor.description
+            if row is None:
+                continue
+            parsed = _parse(row, desc)
+            # Collapse whitespace and truncate to 120 chars
+            text = " ".join(parsed["content"].split())
+            if len(text) > 120:
+                text = text[:120]
+            result[parsed["channel_id"]] = {
+                "text": text,
+                "author_id": parsed["author_id"],
+                "author_type": parsed["author_type"],
+                "created_at": parsed["created_at"],
+            }
+        return result
+
     async def edit_message(self, message_id: str, content: str) -> None:
         now = time.time()
         await self._db.execute(
@@ -276,6 +322,32 @@ class ChatMessageStore(BaseStore):
             (content, now, message_id),
         )
         await self._db.commit()
+
+    async def edit_last_agent_reply(self, message_id: str, content: str) -> bool:
+        """Rewrite *message_id* only if it is still the last completed agent reply.
+
+        One conditional UPDATE, so the eligibility check and the write are
+        atomic: the row must be a live, complete agent message with no
+        content blocks, and the most recent live agent message of its thread
+        (top level when ``thread_id`` is NULL; ephemeral rows never count).
+        Returns ``False`` when any condition fails and nothing was written.
+        """
+        cursor = await self._db.execute(
+            "UPDATE chat_messages SET content = ?, edited_at = ?"
+            " WHERE id = ? AND author_type = 'agent' AND deleted_at IS NULL"
+            " AND state = 'complete'"
+            " AND COALESCE(json_array_length(NULLIF(content_blocks, '')), 0) = 0"
+            " AND id = ("
+            "   SELECT latest.id FROM chat_messages AS latest"
+            "   WHERE latest.channel_id = chat_messages.channel_id"
+            "   AND latest.thread_id IS chat_messages.thread_id"
+            "   AND latest.author_type = 'agent'"
+            "   AND latest.deleted_at IS NULL AND latest.ephemeral = 0"
+            "   ORDER BY latest.created_at DESC, latest.rowid DESC LIMIT 1)",
+            (content, time.time(), message_id),
+        )
+        await self._db.commit()
+        return cursor.rowcount == 1
 
     async def set_metadata(self, message_id: str, metadata: dict) -> None:
         await self._db.execute(

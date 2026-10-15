@@ -1,15 +1,21 @@
 from __future__ import annotations
 
 import ipaddress
+import json
 import logging
+import logging.handlers
 import re
+from datetime import UTC, datetime
+from pathlib import Path
 
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import HTMLResponse, RedirectResponse
 
-from tinyagentos.agent_token_auth import check_agent_identity, _get_keypair, _get_store
+from tinyagentos.agent_token_auth import (
+    _enforce_rotation_cutoff, _get_keypair, _get_store, check_agent_identity,
+)
 from tinyagentos.auth import AuthStoreCorruptError
 from tinyagentos.device_scopes import (
     AGENTS_READ, CHAT_SEND, DECISIONS_ANSWER, FILES_UPLOAD, LIBRARY_INGEST,
@@ -19,6 +25,40 @@ from tinyagentos.device_store import DEVICE_TOKEN_PREFIX
 from tinyagentos.rate_limit import MovingWindowLimiter
 
 logger = logging.getLogger(__name__)
+def _get_agent_token_routes_logger(data_dir: Path) -> logging.Logger:
+    """Return the module-level logger for agent token route recording.
+
+    The logger writes JSON lines to {data_dir}/logs/agent-token-routes.jsonl
+    with a RotatingFileHandler (maxBytes=5MB, backupCount=3). The handler is
+    attached once, propagate=False so logs don't bubble to root.
+    """
+    log_logger = logging.getLogger("taos.agent_token_routes")
+    log_logger.propagate = False
+    log_logger.setLevel(logging.INFO)
+
+    log_dir = data_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "agent-token-routes.jsonl"
+
+    # Attach handler only once if not already attached to this path
+    for handler in log_logger.handlers:
+        if isinstance(handler, logging.handlers.RotatingFileHandler):
+            if handler.baseFilename == str(log_path):
+                return log_logger
+    # Remove any existing handlers before attaching new one
+    for handler in log_logger.handlers[:]:
+        log_logger.removeHandler(handler)
+        handler.close()
+
+    handler = logging.handlers.RotatingFileHandler(
+        log_path, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
+    )
+    # JSON line formatter: just the message (we format as JSON in the caller)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    log_logger.addHandler(handler)
+
+    return log_logger
+
 
 # /auth/pin-login is session-exempt for the same reason as /auth/login: it is
 # how a session is obtained, so requiring one would be circular. It is NOT
@@ -126,6 +166,7 @@ _AGENT_TOKEN_PATHS = (
         "/api/desktop/command",
         "/api/desktop/screenshot",
         "/api/desktop/layout",
+        "/api/desktop/panel-shot",
     })
 )
 
@@ -271,13 +312,18 @@ _AGENT_DECISIONS_ROUTES = (
     ("GET", re.compile(r"^/api/decisions/[^/]+/agent$")),
     ("GET", re.compile(r"^/api/decisions/agent$")),
     ("POST", re.compile(r"^/api/decisions/[^/]+/withdraw$")),
+    # tsk-f75p3z: the plain list. With a registry JWT the route returns ONLY
+    # the agent's own decisions (same set as /api/decisions/agent).
+    ("GET", re.compile(r"^/api/decisions$")),
 )
 
-# Notification route an agent may reach with its own registry JWT (scope
-# notifications_write). POST /api/notifications only.  The route verifies
-# the JWT + grant + project binding.  GET and mark-read stay session-only.
+# Notification routes an agent may reach with its own registry JWT (scope
+# notifications_write). POST creates; GET (tsk-f75p3z) lists ONLY the
+# notifications that agent posted.  The route verifies the JWT + grant (+
+# project binding on POST).  Count, mark-read and archive stay session-only.
 _AGENT_NOTIFICATIONS_ROUTES = (
     ("POST", re.compile(r"^/api/notifications$")),
+    ("GET", re.compile(r"^/api/notifications$")),
 )
 
 # Device-bearer self-service paths (lock-screen push-token rotation plus
@@ -431,14 +477,16 @@ def _is_agent_decisions_path(method: str, path: str) -> bool:
       - GET  /api/decisions/{id}/agent        -> decisions_write (read own)
       - GET  /api/decisions/agent             -> decisions_write (list own)
       - POST /api/decisions/{id}/withdraw     -> decisions_write (withdraw own)
+      - GET  /api/decisions                   -> decisions_write (list own)
     The route verifies the JWT + grant + project binding."""
     return any(m == method and rx.match(path) for m, rx in _AGENT_DECISIONS_ROUTES)
 
 
 def _is_agent_notifications_path(method: str, path: str) -> bool:
-    """True only for POST /api/notifications, which a notifications_write token
-    may reach.  GET and mark-read stay session-only.  The route verifies the
-    JWT + grant + project binding."""
+    """True only for POST /api/notifications (create) and GET
+    /api/notifications (list own), which a notifications_write token may
+    reach.  Count, mark-read and archive stay session-only.  The route
+    verifies the JWT + grant (+ project binding on POST)."""
     return any(m == method and rx.match(path) for m, rx in _AGENT_NOTIFICATIONS_ROUTES)
 
 
@@ -842,6 +890,27 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 bound_agent = auth_mgr.get_local_token_agent(presented)
                 if bound_agent:
                     request.state.agent_name = bound_agent
+                    response = await call_next(request)
+                    # Record the bound-agent local-token request (LOG ONLY)
+                    try:
+                        route_obj = request.scope.get("route")
+                        route_template = getattr(route_obj, "path", None) or "<unmatched>"
+                        log_entry = {
+                            "ts": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                            "method": request.method,
+                            "route": route_template,
+                            "agent": bound_agent,
+                            "status": response.status_code,
+                        }
+                        log_logger = _get_agent_token_routes_logger(auth_mgr.data_dir)
+                        log_logger.info(json.dumps(log_entry, separators=(",", ":")))
+                    except Exception:
+                        # Warning must never raise into the request either
+                        try:
+                            logger.warning("Failed to record agent token route", exc_info=True)
+                        except Exception:
+                            pass
+                    return response
                 return await call_next(request)
 
         # 2) Registry JWT on allowlisted paths (passthrough; route verifies
@@ -875,13 +944,17 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     # agent's token, set user_id to the native agent's user_id
                     # (the owner) so desktop control works. For other agents,
                     # user_id remains None (they cannot drive the desktop).
-                    if path in ("/api/desktop/command", "/api/desktop/screenshot", "/api/desktop/layout") or _is_agent_skill_exec_path(request.method, path):
+                    if path in ("/api/desktop/command", "/api/desktop/screenshot", "/api/desktop/layout", "/api/desktop/panel-shot") or _is_agent_skill_exec_path(request.method, path):
                         # Verify the token and check if it's the native agent.
                         # We do a lightweight verification here; the route will
                         # do the full scope check.
                         try:
-                            from tinyagentos.agent_token_auth import verify_registry_token
-                            from tinyagentos.native_agent_identity import NATIVE_AGENT_ORIGIN
+                            from tinyagentos.agent_token_auth import (
+                                verify_registry_token,
+                            )
+                            from tinyagentos.native_agent_identity import (
+                                NATIVE_AGENT_ORIGIN,
+                            )
                             _private_pem, public_pem = _get_keypair(request)
                             payload = verify_registry_token(presented, public_pem)
                             canonical_id = payload.get("sub", "")
@@ -889,6 +962,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
                                 registry = _get_store(request)
                                 record = await registry.get(canonical_id)
                                 if record and record.get("origin") == NATIVE_AGENT_ORIGIN and record.get("status") == "active":
+                                    # A token superseded by rotation raises here and
+                                    # falls through to registry_jwt_candidate below.
+                                    _enforce_rotation_cutoff(record, payload)
                                     request.state.user_id = record.get("user_id")
                                     request.state.is_admin = False
                                     request.state.via = "registry_jwt_native_agent"

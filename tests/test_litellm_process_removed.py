@@ -405,7 +405,7 @@ async def test_remote_deploy_refused_with_named_reason(tmp_path):
     req = DeployRequest(
         name="far", framework="smolagents", model="m1", data_dir=tmp_path,
         remote="fedora-worker", taos_host="100.64.0.1",
-        extra_config={"llm_proxy": LLMProxy(port=7834, data_dir=tmp_path), "llm_gateway_port": 7838},
+        extra_config={"llm_proxy": LLMProxy(port=7834, data_dir=tmp_path), "llm_gateway_port": 7838, "agent_controller_port": 6972},
     )
     p_create, p_exec, p_push, p_dev = _deploy_patches()
     with p_create as create, p_exec, p_push, p_dev:
@@ -428,7 +428,7 @@ async def test_local_deploy_env_uses_in_container_address(tmp_path):
         name="near", framework="smolagents", model="m1", data_dir=tmp_path,
         extra_config={
             "llm_proxy": LLMProxy(port=7834, data_dir=tmp_path),
-            "llm_gateway_port": 7838,
+            "llm_gateway_port": 7838, "agent_controller_port": 6972,
             "llm_gateway_models_problem": AsyncMock(return_value=None),
         },
     )

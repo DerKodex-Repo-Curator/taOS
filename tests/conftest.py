@@ -29,6 +29,52 @@ from _data_guard_plugin import (  # noqa: F401
 
 
 # ---------------------------------------------------------------------------
+# opencode spawn guard — FORBID real `opencode serve` spawns from the test suite.
+#
+# An autouse fixture that makes a real opencode spawn impossible during tests:
+#   1. Monkeypatches `tinyagentos.opencode_runtime.resolve_opencode_binary` to
+#      return a non-existent path. In ensure_running, when config.binary is the
+#      default "opencode", the code does:
+#          binary = resolve_opencode_binary() or binary
+#      With a fake path (truthy), this uses the fake path and the spawn fails
+#      with FileNotFoundError, which ensure_running maps to
+#      OpenCodeBinaryNotFoundError.
+#   2. Sets `TAOS_OPENCODE_BIN` to the same non-existent path for consistency.
+#
+# Tests that deliberately exercise the spawn path with a fake binary (by passing
+# `binary=` to OpenCodeServerConfig) keep working because the code only calls
+# resolve_opencode_binary() when config.binary == "opencode". Explicit binary=
+# configs bypass the patched function entirely.
+#
+# Tests that test `resolve_opencode_binary` directly are excluded via the
+# `no_opencode_spawn_guard` marker so they can test the real resolution logic.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _forbid_real_opencode_spawn(request):
+    """Make real opencode spawns impossible in all tests."""
+    # Skip for tests marked with no_opencode_spawn_guard (e.g. TestResolveOpencodeBinary).
+    if request.node.get_closest_marker("no_opencode_spawn_guard"):
+        yield
+        return
+
+    import tinyagentos.opencode_runtime as ocr
+
+    # Use a path that definitely does not exist. When resolve_opencode_binary()
+    # returns this, ensure_running's `binary = resolve_opencode_binary() or binary`
+    # uses it (since a non-empty string is truthy), and the spawn fails with
+    # FileNotFoundError, which ensure_running maps to OpenCodeBinaryNotFoundError.
+    fake_path = "/this/path/does/not/exist/opencode"
+
+    # 1. Force resolve_opencode_binary() to return the fake path.
+    # 2. Set TAOS_OPENCODE_BIN to the same fake path for consistency.
+    #    This env var is checked first by the real resolve_opencode_binary, but
+    #    since we patch the function directly, this is defensive.
+    with patch.object(ocr, "resolve_opencode_binary", lambda: fake_path), patch.dict(os.environ, {"TAOS_OPENCODE_BIN": fake_path}):
+        yield
+
+
+# ---------------------------------------------------------------------------
 # CSRF in tests — ON by default, opted OUT explicitly.
 #
 # This used to be inverted: an autouse fixture no-op'd `verify_csrf` for every
@@ -739,6 +785,23 @@ async def client(app, tmp_data_dir):
         if user_shares._db is not None:
             await user_shares.close()
         await user_shares.init()
+    else:
+        from tinyagentos.user_shares_store import UserSharesStore
+        user_shares = UserSharesStore(tmp_data_dir / "user_shares.db")
+        await user_shares.init()
+        app.state.user_shares = user_shares
+    # sharing_grants store (account-to-account app sharing) is lifespan-owned;
+    # tests that bypass the lifespan must init it so routes can consult it.
+    sharing_grants = getattr(app.state, "sharing_grants", None)
+    if sharing_grants is not None:
+        if sharing_grants._db is not None:
+            await sharing_grants.close()
+        await sharing_grants.init()
+    else:
+        from tinyagentos.sharing_grants import SharingGrantStore
+        sharing_grants = SharingGrantStore(tmp_data_dir / "sharing_grants.db")
+        await sharing_grants.init()
+        app.state.sharing_grants = sharing_grants
     # BrowserApp v2 stores
     from tinyagentos.routes.desktop_browser.store import BrowserStore, BrowserCookieStore
     _browser_store = BrowserStore(tmp_data_dir / "browser.sqlite3")
@@ -819,6 +882,9 @@ async def client(app, tmp_data_dir):
     await app.state.council_members.close()
     if user_shares is not None:
         await user_shares.close()
+    sharing_grants = getattr(app.state, "sharing_grants", None)
+    if sharing_grants is not None:
+        await sharing_grants.close()
 
 
 def create_test_qmd_db(db_path):

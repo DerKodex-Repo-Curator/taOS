@@ -353,6 +353,8 @@ def create_app(data_dir: Path | None = None, catalog_dir: Path | None = None) ->
     agent_grants_store = AgentGrantsStore(data_dir / "agent_grants.db")
     from tinyagentos.user_shares_store import UserSharesStore
     user_shares_store = UserSharesStore(data_dir / "user_shares.db")
+    from tinyagentos.sharing_grants import SharingGrantStore
+    sharing_grants_store = SharingGrantStore(data_dir / "sharing_grants.db")
     from tinyagentos.app_grants_store import AppGrantsStore
     app_grants_store = AppGrantsStore(data_dir / "app_grants.db")
     from tinyagentos.knowledge_fetchers.x import XWatchStore
@@ -507,6 +509,8 @@ def create_app(data_dir: Path | None = None, catalog_dir: Path | None = None) ->
     chat_hub = ChatHub()
     canvas_store = CanvasStore(data_dir / "canvas.db")
     desktop_settings = DesktopSettingsStore(data_dir / "desktop.db")
+    from tinyagentos.taos_agent_actions import TaosAgentActionStore
+    taos_agent_actions = TaosAgentActionStore(data_dir / "taos_agent_actions.db")
     from tinyagentos.device_store import DeviceStore
     device_store = DeviceStore(data_dir / "devices.db")
     from tinyagentos.device_pair_requests_store import DevicePairRequestsStore
@@ -616,6 +620,8 @@ def create_app(data_dir: Path | None = None, catalog_dir: Path | None = None) ->
             logger.exception("native agent identity could not be ensured at startup")
         await user_shares_store.init()
         app.state.user_shares = user_shares_store
+        await sharing_grants_store.init()
+        app.state.sharing_grants = sharing_grants_store
         await app_grants_store.init()
         await license_acceptances_store.init()
         await agent_model_key_store.init()
@@ -717,6 +723,7 @@ def create_app(data_dir: Path | None = None, catalog_dir: Path | None = None) ->
         projects_root.mkdir(parents=True, exist_ok=True)
         await canvas_store.init()
         await desktop_settings.init()
+        await taos_agent_actions.init()
         await device_store.init()
         await device_pair_requests_store.init()
         await user_memory.init()
@@ -1389,6 +1396,22 @@ def create_app(data_dir: Path | None = None, catalog_dir: Path | None = None) ->
             logger.exception("mdns publisher failed to start — continuing without")
             app.state.mdns_publisher = None
 
+        # Bundled mDNS reflector for cast discovery across a container
+        # bridge. Opt-in via config.yaml ``mdns_reflector.enabled``; when on,
+        # start() never raises and a broken bridge is reported by
+        # GET /api/cast/discovery/status rather than hidden.
+        app.state.mdns_reflector = None
+        app.state.mdns_reflector_start_error = None
+        if (config.mdns_reflector or {}).get("enabled") is True:
+            try:
+                from tinyagentos.services.mdns_reflector import MdnsReflector
+                mdns_reflector = MdnsReflector.from_config(config.mdns_reflector)
+                await mdns_reflector.start()
+                app.state.mdns_reflector = mdns_reflector
+            except Exception as exc:
+                logger.exception("mdns reflector failed to start, continuing without")
+                app.state.mdns_reflector_start_error = str(exc) or type(exc).__name__
+
         # System event bus — unified typed-event broadcast.
         from tinyagentos.events import EventBus, SystemEventStore
         from tinyagentos.events.bus import SystemEvent as _SystemEvent
@@ -1477,6 +1500,8 @@ def create_app(data_dir: Path | None = None, catalog_dir: Path | None = None) ->
         # go back to). A no-op unless __main__ recorded the listener port.
         from tinyagentos.llm_gateway.cutover import run_startup_reconcile
         _create_supervised_task(run_startup_reconcile(app.state), app.state._background_tasks)
+        from tinyagentos.agent_controller_listener import run_startup_reconcile as _agent_ctl_reconcile
+        _create_supervised_task(_agent_ctl_reconcile(app.state), app.state._background_tasks)
 
         app.state._startup_complete = True
         logger.info("startup complete — accepting requests")
@@ -1507,6 +1532,12 @@ def create_app(data_dir: Path | None = None, catalog_dir: Path | None = None) ->
                 await _mdns.stop()
             except Exception:
                 logger.exception("mdns publisher stop failed")
+        _refl = getattr(app.state, "mdns_reflector", None)
+        if _refl is not None:
+            try:
+                await _refl.stop()
+            except Exception:
+                logger.exception("mdns reflector stop failed")
         adapter_manager.stop_all()
         for c in list(getattr(app.state, "channel_hub_connectors", {}).values()):
             await c.stop()
@@ -1576,6 +1607,7 @@ def create_app(data_dir: Path | None = None, catalog_dir: Path | None = None) ->
         await install_registry_store.close()
         await user_memory.close()
         await desktop_settings.close()
+        await taos_agent_actions.close()
         await device_store.close()
         await device_pair_requests_store.close()
         # Close the APNs sender's httpx client (self-created by HttpApnsSender);
@@ -1847,6 +1879,10 @@ def create_app(data_dir: Path | None = None, catalog_dir: Path | None = None) ->
     app.state.typing = None
     app.state.canvas_store = canvas_store
     app.state.desktop_settings = desktop_settings
+    # taOS Agent action gate (spec section 3.1): pending/confirmed rows plus
+    # the per-kind executors that run a confirmed action exactly once.
+    app.state.taos_agent_actions = taos_agent_actions
+    app.state.taos_agent_action_executors = {}
     # Which harness runs the system taOS Agent (opencode, or PicoClaw on a
     # taOSmobile handset). Decided now so the lock screen and the config
     # endpoint report it from the first request; a PicoClaw key left over

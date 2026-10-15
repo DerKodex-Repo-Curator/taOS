@@ -350,6 +350,9 @@ def register_all_routers(app):
     from tinyagentos.routes.disk_quota import router as disk_quota_router
     app.include_router(disk_quota_router, dependencies=_csrf)
 
+    from tinyagentos.routes.cast_discovery import router as cast_discovery_router
+    app.include_router(cast_discovery_router, dependencies=_csrf)
+
     from tinyagentos.routes.recycle import router as recycle_router
     app.include_router(recycle_router, dependencies=_csrf)
 
@@ -386,6 +389,8 @@ def register_all_routers(app):
 
     from tinyagentos.routes.taos_agent import router as taos_agent_router
     app.include_router(taos_agent_router, dependencies=_csrf)
+    from tinyagentos.routes.taos_agent_actions import router as taos_agent_actions_router
+    app.include_router(taos_agent_actions_router, dependencies=_csrf)
 
     from tinyagentos.routes.taosmd import router as taosmd_router
     app.include_router(taosmd_router, dependencies=_csrf)
@@ -444,6 +449,10 @@ def register_all_routers(app):
     app.include_router(designs_router, dependencies=_csrf)
     from tinyagentos.routes.coding import router as coding_router
     app.include_router(coding_router, dependencies=_csrf)
+
+    from tinyagentos.routes.sharing import router as sharing_router
+    app.include_router(sharing_router, dependencies=_csrf)
+
     from tinyagentos.routes.store_submissions import router as store_submissions_router
     app.include_router(store_submissions_router, dependencies=_csrf)
     from tinyagentos.routes.install_registry import router as install_registry_router

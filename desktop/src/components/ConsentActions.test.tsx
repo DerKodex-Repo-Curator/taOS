@@ -185,7 +185,7 @@ describe("ConsentActions", () => {
       if (String(url).startsWith("/api/projects")) {
         return okJson({ items: [{ id: "p1", name: "Strata" }] });
       }
-      return okJson({ status: "ok" });
+      return okJson({ status: "ok", lead_assigned: true });
     });
     vi.stubGlobal("fetch", fetchMock);
     const onResolved = vi.fn();
@@ -207,6 +207,46 @@ describe("ConsentActions", () => {
       project_id: "p1",
       is_lead: true,
     });
+  });
+
+  async function approveAsLead(approveResponse: () => Promise<unknown>) {
+    const fetchMock = vi.fn((url: string) => {
+      const vocab = vocabHit(url);
+      if (vocab) return vocab;
+      if (String(url).startsWith("/api/projects")) {
+        return okJson({ items: [{ id: "p1", name: "Strata" }] });
+      }
+      return approveResponse();
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const onResolved = vi.fn();
+    render(
+      <ConsentActions requestId="req-lead" scopes={["project_tasks", "a2a_send"]} onResolved={onResolved} />,
+    );
+    await screen.findByLabelText(/Grant project access for/i);
+    await projectListLoaded();
+    fireEvent.click(screen.getByRole("checkbox", { name: /Make project lead/i }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /allow/i })).not.toBeDisabled(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /allow/i }));
+    return onResolved;
+  }
+
+  it("keeps the card terminal when lead_assigned is false", async () => {
+    const onResolved = await approveAsLead(() => okJson({ status: "ok", lead_assigned: false }));
+    await screen.findByText(/project lead could not be set/i);
+    expect(onResolved).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: /allow/i })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /dismiss/i }));
+    expect(onResolved).toHaveBeenCalledTimes(1);
+  });
+
+  it("treats a response without lead_assigned as unconfirmed", async () => {
+    const onResolved = await approveAsLead(() => okJson({ status: "ok" }));
+    await screen.findByText(/project lead could not be set/i);
+    expect(onResolved).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: /allow/i })).toBeNull();
   });
 
   it("offers no lead checkbox without a membership scope", async () => {
@@ -734,8 +774,8 @@ describe("ConsentActions", () => {
             );
           });
         }
-        return okJson({ status: "ok" });
-      });
+return okJson({ status: "ok", lead_assigned: true });
+    });
       vi.stubGlobal("fetch", fetchMock);
       render(<ConsentActions requestId="req-hang" scopes={["files_write"]} />);
 
