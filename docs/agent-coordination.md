@@ -2342,3 +2342,17 @@ server-side mechanism, so it binds every harness the same way.
   skips the card for another account. Every kind defaults to `ask`.
 
 Another user's action answers 404. Rows live in `taos_agent_actions.db`.
+
+Every request and outcome is audited as a trace row of kind `external_write`
+on the `taos-agent` trace (`GET /api/agents/taos-agent/trace?kind=external_write`):
+`{target, action, user_id, repo, url, diff_sha256, confirmed_by, action_id,
+latency_ms, state}`. Creating an action writes the request row (`state`
+`pending` with `confirmed_by` `pending`, or `confirmed` with `auto`); execute
+writes one `executed` or `failed` row and decline one `declined` row. The
+reversible local fixes use kind `local_fix` `{tool, target, undo, user_id}`.
+The trace store refuses either kind with a field missing, and
+`POST /api/trace` refuses both (400): only taOS writes its own audit trail.
+`GET /api/agents/{name}/trace` returns a row of either kind only to the
+signed-in user whose `user_id` it carries, so one account never reads
+another's audit trail. The rows show in the Agents app trace list (kind filter) and in the taOS
+agent's Activity tab.
