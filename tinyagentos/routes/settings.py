@@ -269,6 +269,7 @@ async def llm_proxy_status(request: Request):
     start verified the listener as its own. There is no LiteLLM to report.
     """
     from tinyagentos import llm_gateway
+    from tinyagentos.agent_controller_listener import agent_controller_live_port
     from tinyagentos.llm_gateway.cutover import llm_gateway_live_port
 
     state = request.app.state
@@ -279,6 +280,7 @@ async def llm_proxy_status(request: Request):
         "mode": "gateway",
         "running": bool(llm_gateway_live_port(state)),
         "port": port,
+        "agent_controller_port": agent_controller_live_port(state),
         "url": "/api/llm/v1",
         "backends": len(state.config.backends),
     }
