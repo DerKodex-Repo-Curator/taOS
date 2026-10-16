@@ -15,8 +15,9 @@ Response shape::
 
     {"resources": [...], "errors": [...], "generated_at": <unix float>}
 
-Each resource row has exactly these keys: ``id`` (``<type>:<name>``),
-``type`` (``agent`` / ``backend`` / ``app`` / ``controller``), ``name``,
+Each resource row has exactly these keys: ``id`` (``<type>:<name>`` except
+backend ids are ``backend:<worker>:<name>``), ``type``
+(``agent`` / ``backend`` / ``app`` / ``controller``), ``name``,
 ``worker``, ``project`` (``str`` or ``null``), ``state``
 (``running`` / ``stopped`` / ``frozen`` / ``unknown``), ``cpu_cores``
 (``int`` or ``null``), ``memory_mb`` (``int`` or ``null``) and ``warnings``
@@ -153,7 +154,7 @@ async def cluster_resources(request: Request):
             bstatus = str(b.get("status") or "")
             state = "running" if (bstatus in RUNNING_BACKEND_STATUS and serving) else "stopped"
             resources.append({
-                "id": f"backend:{bname}",
+                "id": f"backend:{worker.name}:{bname}",
                 "type": "backend",
                 "name": bname,
                 "worker": worker.name,
@@ -175,7 +176,22 @@ async def cluster_resources(request: Request):
             rows = await installed_apps.list_installed()
             for row in rows:
                 app_id: str = row["app_id"]
-                loc = await installed_apps.get_runtime_location(app_id)
+                try:
+                    loc = await installed_apps.get_runtime_location(app_id)
+                except Exception:
+                    logger.warning("cluster resources: get_runtime_location failed for app %s", app_id, exc_info=True)
+                    resources.append({
+                        "id": f"app:{app_id}",
+                        "type": "app",
+                        "name": app_id,
+                        "worker": "local",
+                        "project": None,
+                        "state": "unknown",
+                        "cpu_cores": None,
+                        "memory_mb": None,
+                        "warnings": ["runtime lookup failed"],
+                    })
+                    continue
                 if loc is not None and loc.get("runtime_host") and loc.get("runtime_port"):
                     state = "running"
                     app_warnings: list[str] = []

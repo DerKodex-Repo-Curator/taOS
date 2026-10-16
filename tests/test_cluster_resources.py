@@ -163,7 +163,7 @@ async def test_resources_aggregates_agents_backends_apps_and_controller(
     assert backend_row["name"] == "vllm:8000"
     assert backend_row["worker"] == "gpu-box"
     assert backend_row["state"] == "running"
-    assert backend_row["id"] == "backend:vllm:8000"
+    assert backend_row["id"] == "backend:gpu-box:vllm:8000"
 
     # One app row with a runtime location.
     assert len(by_type.get("app", [])) == 1
@@ -373,3 +373,101 @@ async def test_resources_sorted_by_type_worker_name(client, app, monkeypatch):
 
     keys = [(r["type"], r["worker"], r["name"]) for r in data["resources"]]
     assert keys == sorted(keys)
+
+@pytest.mark.asyncio
+async def test_backend_ids_unique_when_same_name_across_workers(client, app, monkeypatch):
+    """Two workers reporting the same backend name must produce different ids."""
+    async def _list_containers(prefix="taos-agent-"):
+        return []
+    monkeypatch.setattr(
+        "tinyagentos.routes.cluster_resources.list_containers", _list_containers,
+    )
+    _stub_installed_apps(app, [])
+
+    _put_worker(
+        app,
+        WorkerInfo(
+            name="worker-a",
+            url="http://10.0.0.1:9000",
+            platform="linux",
+            status="online",
+            last_heartbeat=time.time(),
+            backends=[
+                {"name": "aaa", "type": "vllm", "status": "ok", "capabilities": []},
+            ],
+        ),
+    )
+    _put_worker(
+        app,
+        WorkerInfo(
+            name="worker-b",
+            url="http://10.0.0.2:9000",
+            platform="linux",
+            status="online",
+            last_heartbeat=time.time(),
+            backends=[
+                {"name": "aaa", "type": "vllm", "status": "ok", "capabilities": []},
+            ],
+        ),
+    )
+
+    resp = await client.get("/api/cluster/resources")
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+
+    backend_rows = [r for r in data["resources"] if r["type"] == "backend"]
+    assert len(backend_rows) == 2
+    ids = [r["id"] for r in backend_rows]
+    assert ids[0] != ids[1]
+
+@pytest.mark.asyncio
+async def test_app_runtime_lookup_failure_does_not_drop_later_apps(client, app, monkeypatch):
+    """If get_runtime_location raises for one app, later apps still appear."""
+    async def _list_containers(prefix="taos-agent-"):
+        return []
+    monkeypatch.setattr(
+        "tinyagentos.routes.cluster_resources.list_containers", _list_containers,
+    )
+
+    # List three apps; runtime lookup raises for the second.
+    apps = [
+        ("app1", None),
+        ("app2", None),
+        ("app3", None),
+    ]
+
+    async def _list_installed():
+        return [
+            {
+                "app_id": aid,
+                "installed_at": 1234567890.0,
+                "version": "1.0.0",
+                "metadata": {},
+            }
+            for aid, _loc in apps
+        ]
+
+    async def _get_runtime_location(app_id):
+        if app_id == "app2":
+            raise RuntimeError("lookup failed")
+        for aid, loc in apps:
+            if aid == app_id:
+                return loc
+        return None
+
+    app.state.installed_apps.list_installed = _list_installed
+    app.state.installed_apps.get_runtime_location = _get_runtime_location
+
+    resp = await client.get("/api/cluster/resources")
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+
+    app_rows = [r for r in data["resources"] if r["type"] == "app"]
+    assert len(app_rows) == 3
+    by_id = {r["name"]: r for r in app_rows}
+    assert by_id["app1"]["state"] == "unknown"
+    assert "runtime lookup failed" not in by_id["app1"].get("warnings", [])
+    assert by_id["app2"]["state"] == "unknown"
+    assert "runtime lookup failed" in by_id["app2"].get("warnings", [])
+    assert by_id["app3"]["state"] == "unknown"
+    assert "installed_apps" not in data["errors"]

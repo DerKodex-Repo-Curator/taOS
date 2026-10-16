@@ -1937,10 +1937,11 @@ truth.
   `state` `unknown`) and the rest of the inventory still ships.
 - `generated_at` -- Unix timestamp of the snapshot.
 
-Each row has exactly: `id` (`<type>:<name>`), `type`, `name`, `worker`,
-`project` (string or null), `state`, `cpu_cores` (int or null),
-`memory_mb` (int or null), and `warnings` (list of short strings, may be
-empty). Rows are sorted by `(type, worker, name)`.
+Each row has exactly: `id` (`<type>:<name>` except backend ids are
+`backend:<worker>:<name>`), `type`, `name`, `worker`, `project` (string or
+null), `state`, `cpu_cores` (int or null), `memory_mb` (int or null), and
+`warnings` (list of short strings, may be empty). Rows are sorted by
+`(type, worker, name)`.
 
 ## Controller generation echo (split-brain protection)
 
