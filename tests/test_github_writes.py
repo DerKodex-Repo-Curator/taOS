@@ -157,6 +157,13 @@ async def test_pr_and_issue_bodies_are_scanned(http, fake):
     assert fake.log == []
 
 
+def test_relative_data_dir_also_matches_its_absolute_path(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    leaked = f"path = {tmp_path / 'taos-data' / 'secrets.db'}\n"
+    assert "data_dir_path" in gw.secret_scan(leaked, data_dir="./taos-data")
+    assert "data_dir_path" in gw.secret_scan("see ./taos-data/x\n", data_dir="./taos-data")
+
+
 def test_env_file_is_refused():
     assert "env_file" in gw.secret_scan("DB_PASSWORD=hunter2\n", path=".env")
     assert "env_file" in gw.secret_scan("DB_PASSWORD=hunter2\n", path="deploy/prod.env")

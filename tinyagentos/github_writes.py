@@ -31,6 +31,7 @@ import asyncio
 import ipaddress
 import re
 from dataclasses import dataclass
+from pathlib import Path
 
 import httpx
 
@@ -131,8 +132,11 @@ def secret_scan(text: str, *, path: str | None = None, data_dir: str | None = No
         )
         if env_named and _ENV_ASSIGN_RE.search(text):
             kinds.add("env_file")
-    if data_dir and data_dir.rstrip("/") and data_dir.rstrip("/") in text:
-        kinds.add("data_dir_path")
+    if data_dir and data_dir.rstrip("/"):
+        # A relative data dir is also matched by its absolute spelling.
+        markers = {data_dir.rstrip("/"), str(Path(data_dir).resolve()).rstrip("/")}
+        if any(marker in text for marker in markers):
+            kinds.add("data_dir_path")
     return sorted(kinds)
 
 
