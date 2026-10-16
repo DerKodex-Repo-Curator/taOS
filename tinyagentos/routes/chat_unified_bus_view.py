@@ -192,7 +192,13 @@ async def get_channel_view(channel_id: str, request: Request):
 
 
 @router.get("/api/chat/v2/channels/{channel_id}/messages")
-async def get_channel_messages_view(channel_id: str, request: Request, limit: int = 50, before: float | None = None):
+async def get_channel_messages_view(
+    channel_id: str,
+    request: Request,
+    limit: int = 50,
+    before: float | None = None,
+    since: float | None = None,
+):
     """View: Get messages from the bus with message ID cursor pagination."""
 
     channel_data, denied = await _authorize_channel_read(request, channel_id)
@@ -202,11 +208,21 @@ async def get_channel_messages_view(channel_id: str, request: Request, limit: in
     bus_thread = _get_bus_channel_for_channel_id(channel_id, channel_data or {"id": channel_id})
 
     try:
-        params = {"thread": bus_thread, "limit": limit}
-        if before is not None:
-            params["since"] = before
+        # The bus `since` cursor is a message ts and returns messages AFTER it, so
+        # `before` cannot be expressed on the bus. Message-ID cursors need bus
+        # support from taOSmd (open dependency).
+        params = {"thread": bus_thread, "limit": 1 if before is not None else limit}
+        if since is not None:
+            params["since"] = since
 
         messages_data = await _proxy_to_bus("GET", "/a2a/messages", params=params)
+        if before is not None:
+            # The thread is on the bus (a bus 404 falls through to the local
+            # store below, where `before` still works).
+            return JSONResponse(
+                {"error": "before is not supported on the bus view yet; page forward with since (message ts)"},
+                status_code=400,
+            )
         messages = messages_data.get("messages", [])
 
         logger.debug(

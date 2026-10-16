@@ -321,3 +321,46 @@ async def test_v2_list_channels_bus_path_filters_non_member(client, app):
         await member.aclose()
     assert [c["id"] for c in resp.json()["channels"]] == ["mine"]
     assert len(admin_resp.json()["channels"]) == 3
+
+
+# ---- tsk-2yunfy: v2 `before` must not be forwarded as the bus `since` cursor --
+
+BEFORE_400 = {
+    "error": "before is not supported on the bus view yet; page forward with since (message ts)"
+}
+
+
+@pytest.mark.asyncio
+async def test_v2_messages_before_is_not_forwarded_as_since(client):
+    from unittest.mock import AsyncMock
+
+    mock_bus = AsyncMock(return_value={"messages": [{"id": "b1", "thread": "coord"}]})
+    with patch("tinyagentos.routes.chat_unified_bus_view._proxy_to_bus", mock_bus):
+        resp = await client.get("/api/chat/v2/channels/coord/messages?before=1234.5")
+    assert resp.status_code == 400, resp.text
+    assert resp.json() == BEFORE_400
+    for call in mock_bus.call_args_list:
+        params = call.kwargs.get("params") or {}
+        assert params.get("since") != 1234.5, "before leaked into the bus since cursor"
+
+
+@pytest.mark.asyncio
+async def test_v2_messages_since_is_forwarded_to_bus(client):
+    from unittest.mock import AsyncMock
+
+    mock_bus = AsyncMock(return_value={"messages": [{"id": "b2", "thread": "coord"}]})
+    with patch("tinyagentos.routes.chat_unified_bus_view._proxy_to_bus", mock_bus):
+        resp = await client.get("/api/chat/v2/channels/coord/messages?since=1234.5")
+    assert resp.status_code == 200, resp.text
+    assert mock_bus.call_args.kwargs["params"]["since"] == 1234.5
+
+
+@pytest.mark.asyncio
+async def test_v2_messages_before_still_pages_local_fallback(client, app):
+    ch, msg = await _dm_with_message(app, ["user", "agent-a"])
+    with _bus_404():
+        resp = await client.get(
+            f"/api/chat/v2/channels/{ch['id']}/messages?before={msg['created_at'] + 1}"
+        )
+    assert resp.status_code == 200, resp.text
+    assert [m["id"] for m in resp.json()["messages"]] == [msg["id"]]
