@@ -136,9 +136,13 @@ def secret_scan(text: str, *, path: str | None = None, data_dir: str | None = No
     return sorted(kinds)
 
 
-def _refuse_if_secret(gh: GitHubSession, items: list[tuple[str | None, str]]) -> None:
+def _require_data_dir(gh: GitHubSession) -> None:
     if not (gh.data_dir or "").rstrip("/"):
         raise ValueError("data_dir is required for a GitHub write")
+
+
+def _refuse_if_secret(gh: GitHubSession, items: list[tuple[str | None, str]]) -> None:
+    _require_data_dir(gh)
     kinds: set[str] = set()
     for path, text in items:
         kinds.update(secret_scan(text, path=path, data_dir=gh.data_dir))
@@ -206,6 +210,7 @@ def _fork_name(gh: GitHubSession, upstream: str) -> str:
 async def ensure_fork(gh: GitHubSession, upstream: str) -> str:
     """Return the user's fork of *upstream*, creating it when absent."""
     _check_upstream(upstream)
+    _require_data_dir(gh)
     fork = _fork_name(gh, upstream)
     repo = await _call(gh, "GET", f"/repos/{fork}", ok_404=True)
     if repo is not None:

@@ -170,6 +170,8 @@ async def test_write_without_a_data_dir_is_refused(http, fake, data_dir):
     """The data-dir check never silently drops out: no data dir, no write."""
     gh = _session(http, data_dir=data_dir)
     with pytest.raises(ValueError, match="data_dir"):
+        await gw.ensure_fork(gh, UPSTREAM)
+    with pytest.raises(ValueError, match="data_dir"):
         await gw.push_branch(gh, UPSTREAM, "fix-weather", {"a.py": "x\n"}, "m")
     with pytest.raises(ValueError, match="data_dir"):
         await gw.open_pr(gh, UPSTREAM, "fix-weather", "Fix", "body")
