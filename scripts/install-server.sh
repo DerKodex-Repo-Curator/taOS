@@ -287,7 +287,7 @@ ensure_node22() {
         _ns_key_tmp="${_ns_key_tmp}.asc"
         # shellcheck disable=SC2064
         trap "rm -f '$_ns_key_tmp'" RETURN
-        curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+        curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 15 --max-time 60 https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
             -o "$_ns_key_tmp" \
             || die "failed to download NodeSource repo GPG key"
         local _ns_actual_fp
@@ -321,7 +321,7 @@ ensure_node22() {
         _ns_rpm_key_tmp="${_ns_rpm_key_tmp}.asc"
         # shellcheck disable=SC2064
         trap "rm -f '$_ns_rpm_key_tmp'" RETURN
-        curl -fsSL https://rpm.nodesource.com/gpgkey/ns-operations-public.key \
+        curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 15 --max-time 60 https://rpm.nodesource.com/gpgkey/ns-operations-public.key \
             -o "$_ns_rpm_key_tmp" \
             || die "failed to download NodeSource RPM repo GPG key"
         local _ns_rpm_actual_fp
@@ -1016,7 +1016,7 @@ ensure_container_runtime() {
                 _zabbly_key_tmp="${_zabbly_key_tmp}.asc"
                 # shellcheck disable=SC2064
                 trap "rm -f '$_zabbly_key_tmp'" RETURN
-                if ! curl -fsSL https://pkgs.zabbly.com/key.asc -o "$_zabbly_key_tmp"; then
+                if ! curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 15 --max-time 60 https://pkgs.zabbly.com/key.asc -o "$_zabbly_key_tmp"; then
                     warn "failed to fetch Zabbly key — skipping Incus install"
                     return 0
                 fi
@@ -1362,7 +1362,7 @@ _apt_install_docker_official_repo() {
     trap "rm -f '$_docker_key_tmp'; rm -rf '$_docker_bak_dir'" RETURN
     # Bounded timeouts so a blackholed route / stalled peer does not pin
     # the installer indefinitely and miss its graceful-failure path.
-    if ! curl -fsSL --connect-timeout 15 --max-time 60 \
+    if ! curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 15 --max-time 60 \
             "https://download.docker.com/linux/$docker_os/gpg" \
             -o "$_docker_key_tmp"; then
         warn "failed to fetch Docker apt key — skipping Docker official-repo fallback"
@@ -1713,8 +1713,8 @@ fi
 # so the brackets are added only when there is an extra.
 _taos_extras="$(taos_controller_extras)"
 log "installing controller python deps into .venv (pip install -e '.${_taos_extras:+[$_taos_extras]}')"
-./.venv/bin/pip install --quiet --upgrade pip -c scripts/install-constraints.txt
-./.venv/bin/pip install --quiet -c scripts/install-constraints.txt -e ".${_taos_extras:+[$_taos_extras]}"
+./.venv/bin/pip install --quiet --retries 10 --timeout 60 --upgrade pip -c scripts/install-constraints.txt
+./.venv/bin/pip install --quiet --retries 10 --timeout 60 -c scripts/install-constraints.txt -e ".${_taos_extras:+[$_taos_extras]}"
 
 # litellm (and with it the proprietary litellm-enterprise wheel an older
 # litellm[proxy] pulled in) is no longer part of the install set. A FRESH
