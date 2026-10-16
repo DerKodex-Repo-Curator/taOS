@@ -2092,9 +2092,15 @@ derived from the token only. Any `agent`, `slug`, `from` or `author` field in a
 reply body is ignored for identity, so an agent can never read or answer
 another agent's session. A handle equal to a locally configured agent's name
 is refused with 403 (`handle collides with a local agent`), so a guest can
-never drain or answer a local agent's session. A request with no Bearer is refused by the auth
-middleware before the route runs (401); a JWT without the grant gets 403; an
-unavailable bridge registry gets 503.
+never drain or answer a local agent's session. An agent cannot reply into a
+channel it is not a member of: `channel_id` fields in the reply body are
+validated, and using a `trace_id` of a message in a foreign channel also
+enforces membership validation, returning 403 (`not a member of this channel`)
+if the agent lacks membership in that channel. A registry agent with a handle
+that slugifies to the same value as an existing registry agent's handle is
+also rejected with 403 (`handle collides with another registry agent`).
+A request with no Bearer is refused by the auth middleware before the route
+runs (401); a JWT without the grant gets 403; an unavailable bridge registry gets 503.
 
 ## In-process LLM gateway (`/api/llm/v1`, scoped gateway keys, session or host local token)
 

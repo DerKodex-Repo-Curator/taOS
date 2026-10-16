@@ -26,10 +26,17 @@ async def chat_app(app, tmp_data_dir):
         store = getattr(app.state, attr)
         if store._db is None:
             await store.init()
+    # Initialize chat_channels and chat_messages for the tests
+    chat_channels = app.state.chat_channels
+    if chat_channels._db is None:
+        await chat_channels.init()
+    chat_messages = app.state.chat_messages
+    if chat_messages._db is None:
+        await chat_messages.init()
     app.state.bridge_sessions = BridgeSessionRegistry(
         trace_registry=None,
-        chat_messages=None,
-        chat_channels=None,
+        chat_messages=chat_messages,
+        chat_channels=chat_channels,
         chat_hub=None,
         archive=None,
     )
@@ -207,6 +214,123 @@ class TestChatSessionReply:
         slugs = [call.args[0] for call in mock.await_args_list]
         assert slugs == ["guest-a"]
         assert "guest-b" not in slugs
+
+    async def test_reply_with_foreign_channel_id_gets_403(self, chat_app):
+        _cid, token = await _agent(chat_app, "@guest-a")
+        # Create a foreign channel
+        chat_channels = chat_app.state.chat_channels
+        foreign = await chat_channels.create_channel(
+            name="foreign",
+            type="group",
+            created_by="user",
+            members=["other"],  # guest-a is NOT a member
+        )
+        # Try to reply with that channel_id
+        mock = AsyncMock()
+        chat_app.state.bridge_sessions.record_reply = mock
+        body = {"kind": "final", "content": "x", "channel_id": foreign["id"]}
+        async with _bare(chat_app) as c:
+            r = await c.post(REPLY, headers=_hdr(token), json=body)
+        assert r.status_code == 403
+        assert r.json() == {"error": "not a member of this channel"}
+        mock.assert_not_called()
+
+    async def test_reply_with_trace_id_of_foreign_channel_gets_403(
+        self, chat_app
+    ):
+        _cid, token = await _agent(chat_app, "@guest-a")
+        # Create a foreign channel with a message
+        chat_channels = chat_app.state.chat_channels
+        chat_messages = chat_app.state.chat_messages
+        foreign = await chat_channels.create_channel(
+            name="foreign",
+            type="group",
+            created_by="user",
+            members=["other"],  # guest-a is NOT a member
+        )
+        msg = await chat_messages.send_message(
+            channel_id=foreign["id"],
+            author_id="user",
+            author_type="user",
+            content="hello",
+            state="complete",
+        )
+        # Try to reply using trace_id of that message
+        mock = AsyncMock()
+        chat_app.state.bridge_sessions.record_reply = mock
+        body = {"kind": "final", "content": "x", "trace_id": msg["id"]}
+        async with _bare(chat_app) as c:
+            r = await c.post(REPLY, headers=_hdr(token), json=body)
+        assert r.status_code == 403
+        assert r.json() == {"error": "not a member of this channel"}
+        mock.assert_not_called()
+
+    async def test_reply_into_own_dm_works(self, chat_app):
+        # agent is already member of its own DM (created by _resolve_slug flow)
+        _cid, token = await _agent(chat_app, "@guest-a")
+        mock = AsyncMock()
+        chat_app.state.bridge_sessions.record_reply = mock
+        async with _bare(chat_app) as c:
+            r = await c.post(REPLY, headers=_hdr(token), json={"kind": "final", "content": "x"})
+        assert r.status_code == 202
+        mock.assert_awaited_once()
+
+    async def test_colliding_slug_with_other_registry_agent_gets_403(self, chat_app):
+        # First agent
+        _cid1, token1 = await _agent(chat_app, "@alice")
+        
+        # We need to test the slug collision check, but we can't create a second agent
+        # with the same handle due to the UNIQUE constraint. Instead, we'll
+        # mock the registry.list_all() method BEFORE creating the agent
+        # and return a list with a second agent that has the same slug
+        registry = chat_app.state.agent_registry
+        
+        # Store the original list_all method
+        original_list_all = registry.list_all
+        
+        # Create a mock registry list that includes two agents with the same slug
+        async def mock_list_all(*, status=None):
+            if status == "active":
+                # Return a mock list with two agents having the same slug
+                # The first agent's slug (from _cid1) will be calculated
+                from tinyagentos.chat.orphan_reconcile import _CANONICAL_AGENT_ID_RE
+                slug1 = _CANONICAL_AGENT_ID_RE.sub("", _cid1)
+                # Create a second agent with the same slug
+                mock_second = {
+                    "canonical_id": f"{slug1}-20250101-120000",  # Same slug pattern
+                    "handle": "@bob",  # Different handle
+                    "display_name": "Bob",  # Different display name
+                    "framework": "taosmd",
+                    "user_id": "",
+                    "origin": "taos-deployed",
+                    "role": None,
+                    "capabilities": "[]",
+                    "created_ts": "2025-01-01T12:00:00Z",
+                    "revoked_at": None,
+                    "status": "active",
+                }
+                # We need to return the actual first agent too
+                # Let's get it by calling the original list_all and filtering
+                original_list = await original_list_all(status="active")
+                for agent in original_list:
+                    if agent["canonical_id"] == _cid1:
+                        return [agent, mock_second]
+                return [mock_second]
+            return await original_list_all(status=status)
+        
+        # Replace the list_all method with our mock
+        registry.list_all = mock_list_all
+        
+        try:
+            # Now try to use token1 (should fail because we detected the collision)
+            async with _bare(chat_app) as c:
+                r1 = await c.get(EVENTS, headers=_hdr(token1))
+                # Should return 403 because our mock detected the slug collision
+                assert r1.status_code == 403
+                assert r1.json() == {"error": "handle collides with another registry agent"}
+        finally:
+            # Restore the original list_all method
+            registry.list_all = original_list_all
 
 
 def test_chat_session_scope_registered_in_both_sets():

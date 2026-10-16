@@ -21,25 +21,40 @@ router = APIRouter()
 
 
 async def _resolve_slug(request: Request) -> str | JSONResponse:
-    """Return the caller's session slug, or the error response to send."""
-    cid = await check_agent_scope(request, "chat_session")
-    if cid is None:
-        return JSONResponse({"error": "forbidden"}, status_code=403)
-    # The chat router and DM channels name a registry agent by the slug of its
-    # canonical_id (display-name based), not by its handle, so the session key
-    # must be that same slug or routed messages never reach this stream.
-    slug = _CANONICAL_AGENT_ID_RE.sub("", cid)
-    if not slug or slug == cid:
-        return JSONResponse({"error": "agent has no session slug"}, status_code=403)
-    # The bridge keys sessions by the local agent's config ``name``. A guest
-    # whose handle equals one would drain and answer that local agent's session.
-    config = getattr(request.app.state, "config", None)
-    for local in getattr(config, "agents", None) or []:
-        if str(local.get("name") or "").strip().lower() == slug.lower():
-            return JSONResponse(
-                {"error": "handle collides with a local agent"}, status_code=403
-            )
-    return slug
+        """Return the caller's session slug, or the error response to send."""
+        cid = await check_agent_scope(request, "chat_session")
+        if cid is None:
+            return JSONResponse({"error": "forbidden"}, status_code=403)
+        # The chat router and DM channels name a registry agent by the slug of its
+        # canonical_id (display-name based), not by its handle, so the session key
+        # must be that same slug or routed messages never reach this stream.
+        slug = _CANONICAL_AGENT_ID_RE.sub("", cid)
+        if not slug or slug == cid:
+            return JSONResponse({"error": "agent has no session slug"}, status_code=403)
+        # The bridge keys sessions by the local agent's config ``name``. A guest
+        # whose handle equals one would drain and answer that local agent's session.
+        config = getattr(request.app.state, "config", None)
+        for local in getattr(config, "agents", None) or []:
+            if str(local.get("name") or "").strip().lower() == slug.lower():
+                return JSONResponse(
+                    {"error": "handle collides with a local agent"}, status_code=403
+                )
+        # Check for other active registry agents with the same slug
+        registry = getattr(request.app.state, "agent_registry", None)
+        if registry is not None:
+            # Check all active registry entries for slug collisions
+            # Note: get_by_slug searches by canonical_id pattern, so we need to list all active agents
+            active_entries = await registry.list_all(status="active")
+            for entry in active_entries:
+                # Skip the current agent - we're comparing against ourselves, not our own collision
+                if entry["canonical_id"] == cid:
+                    continue
+                other_slug = _CANONICAL_AGENT_ID_RE.sub("", entry["canonical_id"])
+                if other_slug == slug:
+                    return JSONResponse(
+                        {"error": "handle collides with another registry agent"}, status_code=403
+                    )
+        return slug
 
 
 @router.get("/api/agents/self/chat/events")
@@ -86,5 +101,28 @@ async def self_chat_reply(request: Request):
         return JSONResponse({"error": "invalid JSON"}, status_code=400)
     if not isinstance(body, dict):
         return JSONResponse({"error": "invalid JSON"}, status_code=400)
+    
+    # Fix 1: Determine the target channel the same way _handle_reply does
+    target_channel_id = body.get("channel_id")
+    if not target_channel_id:
+        trace_id = body.get("trace_id")
+        if trace_id and request.app.state.chat_messages:
+            try:
+                orig_msg = await request.app.state.chat_messages.get_message(trace_id)
+            except Exception:
+                orig_msg = None
+            if orig_msg and orig_msg.get("channel_id"):
+                target_channel_id = orig_msg["channel_id"]
+    
+    # If there's a target channel, verify the agent is a member
+    if target_channel_id:
+        chat_channels = getattr(request.app.state, "chat_channels", None)
+        if chat_channels:
+            channel = await chat_channels.get_channel(target_channel_id)
+            if channel:
+                members = channel.get("members", [])
+                if slug not in members:
+                    return JSONResponse({"error": "not a member of this channel"}, status_code=403)
+    
     await bridge.record_reply(slug, body)
     return JSONResponse({"accepted": True}, status_code=202)
