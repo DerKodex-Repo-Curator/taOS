@@ -1111,8 +1111,12 @@ that SAME canonical_id instead:
   or replace the bound. The scope request's own `duration_secs` (if present) is
   also wired through as `expires_at`. An expired existing grant is replaced by a
   fresh bounded re-approval, or kept as-is if the re-approval is unbounded.
-- `POST /api/agents/registry/{canonical_id}/scope-requests/{req_id}/deny`:
-  owner/admin only.
+- `POST /api/agents/registry/{canonical_id}/scope-requests/{req_id}/deny`
+  `{reason?}`: owner/admin only. The optional `reason` (max 2000 chars) is
+  recorded on the row as `deny_reason` so the agent can read back WHY it was
+  refused; a bare deny with no body (the bell / toast) stays valid and records
+  `deny_reason: null`. The Decisions app always sends one: its Deny is two-step
+  and Confirm stays disabled until a reason is typed.
 - `GET /api/agents/registry/{canonical_id}/scope-requests` (optional
   `?status=pending|accepted|refused`): list an agent's scope requests, oldest
   first. Authorized EXACTLY like create -- the agent's own registry bearer
@@ -1127,7 +1131,7 @@ that SAME canonical_id instead:
 
 Both reads return the same PUBLIC shape -- `{id, canonical_id,
 requested_scopes, project_id, reason, status, granted_scopes, created_ts,
-decided_ts}` -- projected explicitly from the stored row rather than returned
+decided_ts, deny_reason}` -- projected explicitly from the stored row rather than returned
 raw. `decided_by` (the owner/admin user_id that approved or denied) is
 deliberately withheld: an agent's own registry token may read these routes, and
 no other agent-reachable route discloses its owner's internal user id. The
@@ -1170,7 +1174,19 @@ should poll the list route rather than re-requesting a scope they cannot see.
 The desktop Agents app renders each active agent's pending requests inline
 (`PendingScopeRequests` in `desktop/src/apps/agents/RegistryPanel.tsx`, reusing
 the same `ConsentActions` Allow/Deny control the notification renders), so
-approval no longer depends on an ephemeral toast.
+approval no longer depends on an ephemeral toast. The Decisions app lists every
+pending scope request the caller may decide (`GET /api/agents/scope-requests?status=pending`)
+in a "Scope requests" section beside access requests (tsk-6ghcrv): each row
+shows the canonical_id, requested scopes, the requested project (labelled
+"Requested project", or "No project requested" for a null `project_id`),
+reason and age. The binding that will actually apply is shown separately: a
+grant with no project scope is sent without a `project_id` and lands OS-wide
+whatever the agent asked for, so the row says "Grants OS-wide (all projects)"
+before Allow. The list loads on its own, so a failed decisions load never hides
+it. The deny reason box is capped at the route's 2000 characters. Every requested scope has a tick box, so Approve can grant a strict
+SUBSET (the unticked scopes are simply not sent in `granted_scopes`); Allow is
+disabled with nothing ticked. Deny requires a reason. Either decision drops the
+row from the pending list on the refetch.
 
 All owner-gated registry routes are existence-hiding (#2106): an authenticated
 caller who is not the owner gets the same 404 body as a nonexistent
@@ -1955,6 +1971,38 @@ A `single_select` or `multi_select` decision can be answered off-menu by sending
   audit trail still distinguishes `in_app` from `mirrored_from_chat`, but the
   VALUE is no longer bounded by the option list.
 
+## Screencast cast tokens (`/cast/media/`, token-only)
+
+A TV (Chromecast, Apple TV) fetches cast media ITSELF and carries no taOS
+session, cookie or bearer. So casting never hands a TV an ordinary taOS URL:
+
+- `POST /api/cast/sessions` (session-only) `{view: "canvas:<project_id>",
+  device_id, mode: "still", device_address?}` mints a cast for ONE view the
+  caller owns (non-owner: existence-hiding 404) and returns the token once,
+  plus `media_url`, `expires_at`, `ttl_seconds` and `refresh_interval_seconds`
+  (how stale a still frame can be; show it in the UI). `mode: "live"` answers
+  501 until the HLS encoder lands.
+- `POST /api/cast/sessions/{cast_id}/refresh` extends an ACTIVE cast by one
+  TTL; an expired cast answers 409 (or 404 once pruned), an ended cast
+  answers 404, and neither can be revived.
+- `DELETE /api/cast/sessions/{cast_id}` ends the cast; the token dies at once.
+- `GET|HEAD /cast/media/{kind}/{view_id}/still.png?token=...` is what the TV
+  fetches. AuthMiddleware exempts exactly the `/cast/media/` prefix for
+  GET/HEAD; the route is gated solely by the cast token: unknown, expired or
+  revoked -> 401, a token for another view -> 403, a token bound to a
+  `device_address` fetched from another address -> 403.
+  The address check reads the TCP peer, so it holds only on a direct LAN
+  listener: behind a local reverse proxy (tailscale serve, the gateway
+  listener) the peer is the proxy and a bound cast always answers 403.
+
+The token (`tcast_...`) is a separate random secret stored only as a SHA-256
+hash, in memory (a restart revokes every cast). It is never a session token or
+a registry JWT and is accepted by nothing but the cast media route. It rides
+in `?token=` because a TV cannot send headers, so the uvicorn access log
+redacts it to `tcast_[redacted]`. The paired-device registry's unpair MUST call
+`app.state.cast_tokens.revoke_for_device(device_id)`; cast-end revocation alone
+does not cover a device unpaired mid-cast.
+
 ## Identity rules
 
 Work as jaylfc on all git and GitHub activity. Do not add AI attribution to
@@ -2342,6 +2390,20 @@ server-side mechanism, so it binds every harness the same way.
   skips the card for another account. Every kind defaults to `ask`.
 
 Another user's action answers 404. Rows live in `taos_agent_actions.db`.
+
+Every request and outcome is audited as a trace row of kind `external_write`
+on the `taos-agent` trace (`GET /api/agents/taos-agent/trace?kind=external_write`):
+`{target, action, user_id, repo, url, diff_sha256, confirmed_by, action_id,
+latency_ms, state}`. Creating an action writes the request row (`state`
+`pending` with `confirmed_by` `pending`, or `confirmed` with `auto`); execute
+writes one `executed` or `failed` row and decline one `declined` row. The
+reversible local fixes use kind `local_fix` `{tool, target, undo, user_id}`.
+The trace store refuses either kind with a field missing, and
+`POST /api/trace` refuses both (400): only taOS writes its own audit trail.
+`GET /api/agents/{name}/trace` returns a row of either kind only to the
+signed-in user whose `user_id` it carries, so one account never reads
+another's audit trail. The rows show in the Agents app trace list (kind filter) and in the taOS
+agent's Activity tab.
 
 ## Cross-user agent delegation (D1, #2048)
 

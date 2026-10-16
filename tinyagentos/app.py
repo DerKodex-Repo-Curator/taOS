@@ -1500,6 +1500,8 @@ def create_app(data_dir: Path | None = None, catalog_dir: Path | None = None) ->
         # go back to). A no-op unless __main__ recorded the listener port.
         from tinyagentos.llm_gateway.cutover import run_startup_reconcile
         _create_supervised_task(run_startup_reconcile(app.state), app.state._background_tasks)
+        from tinyagentos.agent_controller_listener import run_startup_reconcile as _agent_ctl_reconcile
+        _create_supervised_task(_agent_ctl_reconcile(app.state), app.state._background_tasks)
 
         app.state._startup_complete = True
         logger.info("startup complete — accepting requests")
@@ -1851,6 +1853,10 @@ def create_app(data_dir: Path | None = None, catalog_dir: Path | None = None) ->
     app.state.routine_store = routine_store
     app.state.project_event_broker = project_event_broker
     app.state.desktop_command_broker = desktop_command_broker
+    # Screencast cast tokens (in memory: a restart revokes every cast).
+    from tinyagentos.cast_tokens import CastTokenStore, install_access_log_redaction
+    app.state.cast_tokens = CastTokenStore()
+    install_access_log_redaction()
     app.state.project_canvas_store = project_canvas_store
     app.state.doc_review_store = doc_review_store
     app.state.project_notes_store = project_notes_store
