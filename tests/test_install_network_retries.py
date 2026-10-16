@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
+import subprocess
 from pathlib import Path
+from textwrap import dedent
 
 INSTALL = Path("scripts/install-server.sh")
 
@@ -17,18 +20,18 @@ def test_key_download_curls_have_retries():
     text = INSTALL.read_text()
     lines = text.splitlines()
 
-    # NodeSource deb key curl around line 290-292
-    deb_curl = lines[289] if len(lines) > 289 else ""
-    assert "--retry" in deb_curl, f"missing --retry in deb curl: {deb_curl}"
+    # NodeSource deb key curl (line ~296)
+    deb_curl = lines[295] if len(lines) > 295 else ""
+    assert "--retry" in deb_curl or "${CURL_RETRY[@]}" in deb_curl, f"missing retries in deb curl: {deb_curl}"
 
-    # NodeSource rpm key curl around line 324-326
-    rpm_curl = lines[323] if len(lines) > 323 else ""
-    assert "--retry" in rpm_curl, f"missing --retry in rpm curl: {rpm_curl}"
+    # NodeSource rpm key curl
+    rpm_curl = lines[329] if len(lines) > 329 else ""
+    assert "--retry" in rpm_curl or "${CURL_RETRY[@]}" in rpm_curl, f"missing retries in rpm curl: {rpm_curl}"
 
-    # Zabbly key curl around line 1019
-    zabbly_curl = lines[1018] if len(lines) > 1018 else ""
-    assert "--retry" in zabbly_curl, f"missing --retry in zabbly curl: {zabbly_curl}"
+    # Zabbly key curl
+    zabbly_curl = lines[1024] if len(lines) > 1024 else ""
+    assert "--retry" in zabbly_curl or "${CURL_RETRY[@]}" in zabbly_curl, f"missing retries in zabbly curl: {zabbly_curl}"
 
-    # Docker key curl around line 1365
-    docker_curl = lines[1364] if len(lines) > 1364 else ""
-    assert "--retry" in docker_curl, f"missing --retry in docker curl: {docker_curl}"
+    # Docker key curl
+    docker_curl = lines[1370] if len(lines) > 1370 else ""
+    assert "--retry" in docker_curl or "${CURL_RETRY[@]}" in docker_curl, f"missing retries in docker curl: {docker_curl}"

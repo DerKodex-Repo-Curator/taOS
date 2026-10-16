@@ -151,6 +151,12 @@ log()  { printf '\033[1;34m[server-install]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[server-install]\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31m[server-install]\033[0m %s\n' "$*" >&2; exit 1; }
 
+# Curl retry flags: use --retry-all-errors only if supported (curl >= 7.71)
+CURL_RETRY=(--retry 5 --retry-delay 3 --connect-timeout 15 --max-time 60)
+if curl --help all 2>/dev/null | grep -q -- '--retry-all-errors'; then
+    CURL_RETRY+=(--retry-all-errors)
+fi
+
 log "os=$os_name arch=$arch"
 # Environment banner: every user-posted install log should self-describe the
 # machine it ran on (distro, kernel, board, python, free disk) so a failure
@@ -287,7 +293,7 @@ ensure_node22() {
         _ns_key_tmp="${_ns_key_tmp}.asc"
         # shellcheck disable=SC2064
         trap "rm -f '$_ns_key_tmp'" RETURN
-        curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 15 --max-time 60 https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+        curl -fsSL "${CURL_RETRY[@]}" https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
             -o "$_ns_key_tmp" \
             || die "failed to download NodeSource repo GPG key"
         local _ns_actual_fp
@@ -321,7 +327,7 @@ ensure_node22() {
         _ns_rpm_key_tmp="${_ns_rpm_key_tmp}.asc"
         # shellcheck disable=SC2064
         trap "rm -f '$_ns_rpm_key_tmp'" RETURN
-        curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 15 --max-time 60 https://rpm.nodesource.com/gpgkey/ns-operations-public.key \
+        curl -fsSL "${CURL_RETRY[@]}" https://rpm.nodesource.com/gpgkey/ns-operations-public.key \
             -o "$_ns_rpm_key_tmp" \
             || die "failed to download NodeSource RPM repo GPG key"
         local _ns_rpm_actual_fp
@@ -1016,7 +1022,7 @@ ensure_container_runtime() {
                 _zabbly_key_tmp="${_zabbly_key_tmp}.asc"
                 # shellcheck disable=SC2064
                 trap "rm -f '$_zabbly_key_tmp'" RETURN
-                if ! curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 15 --max-time 60 https://pkgs.zabbly.com/key.asc -o "$_zabbly_key_tmp"; then
+                if ! curl -fsSL "${CURL_RETRY[@]}" https://pkgs.zabbly.com/key.asc -o "$_zabbly_key_tmp"; then
                     warn "failed to fetch Zabbly key — skipping Incus install"
                     return 0
                 fi
@@ -1362,7 +1368,7 @@ _apt_install_docker_official_repo() {
     trap "rm -f '$_docker_key_tmp'; rm -rf '$_docker_bak_dir'" RETURN
     # Bounded timeouts so a blackholed route / stalled peer does not pin
     # the installer indefinitely and miss its graceful-failure path.
-    if ! curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 15 --max-time 60 \
+    if ! curl -fsSL "${CURL_RETRY[@]}" \
             "https://download.docker.com/linux/$docker_os/gpg" \
             -o "$_docker_key_tmp"; then
         warn "failed to fetch Docker apt key — skipping Docker official-repo fallback"
