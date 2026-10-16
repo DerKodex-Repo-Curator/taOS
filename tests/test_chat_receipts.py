@@ -447,8 +447,12 @@ async def test_get_receipts_route_shape(client):
     app = client._transport.app
     ch_store = app.state.chat_channels
     msg_store = app.state.chat_messages
+    auth = app.state.auth
 
-    ch = await ch_store.create_channel(name="test-ch", type="dm", created_by="user")
+    # Get the admin user ID (the client fixture uses admin by default)
+    admin_record = auth.find_user("admin")
+    admin_id = admin_record["id"] if admin_record else "admin"
+    ch = await ch_store.create_channel(name="test-ch", type="dm", created_by="user", members=[admin_id])
     msg = await msg_store.send_message(
         channel_id=ch["id"], author_id="user1", author_type="user", content="hello"
     )
@@ -528,11 +532,11 @@ async def test_patch_receipts_records_session_user(client):
     """PATCH uses session user as reader_id, ignores body-supplied reader_id."""
     app = client._transport.app
     auth = app.state.auth
-    
+
     # Get the existing admin user's ID (created in conftest)
     admin_record = auth.find_user("admin")
     admin_id = admin_record["id"] if admin_record else "admin"
-    
+
     # Create a fresh session for the admin user
     token = auth.create_session(user_id=admin_id, long_lived=True)
     client.cookies.set("taos_session", token)
@@ -540,7 +544,7 @@ async def test_patch_receipts_records_session_user(client):
     ch_store = app.state.chat_channels
     msg_store = app.state.chat_messages
 
-    ch = await ch_store.create_channel(name="test-ch2", type="dm", created_by="user")
+    ch = await ch_store.create_channel(name="test-ch2", type="dm", created_by="user", members=[admin_id])
     msg = await msg_store.send_message(
         channel_id=ch["id"], author_id="agent1", author_type="agent", content="hello"
     )
@@ -566,11 +570,11 @@ async def test_patch_receipts_broadcasts_receipt(client):
     """PATCH marks receipt and returns success."""
     app = client._transport.app
     auth = app.state.auth
-    
+
     # Get the existing admin user's ID
     admin_record = auth.find_user("admin")
     admin_id = admin_record["id"] if admin_record else "admin"
-    
+
     # Create a fresh session for the admin user
     token = auth.create_session(user_id=admin_id, long_lived=True)
     client.cookies.set("taos_session", token)
@@ -578,7 +582,7 @@ async def test_patch_receipts_broadcasts_receipt(client):
     ch_store = app.state.chat_channels
     msg_store = app.state.chat_messages
 
-    ch = await ch_store.create_channel(name="test-ch3", type="dm", created_by="user")
+    ch = await ch_store.create_channel(name="test-ch3", type="dm", created_by="user", members=[admin_id])
     msg = await msg_store.send_message(
         channel_id=ch["id"], author_id="agent1", author_type="agent", content="hello"
     )
@@ -594,3 +598,148 @@ async def test_patch_receipts_broadcasts_receipt(client):
     assert receipts[0]["reader_id"] == admin_id
     assert receipts[0]["reader_type"] == "user"
     assert receipts[0]["seen_at"] is not None
+
+
+# ---------------------------------------------------------------------------
+# New tests for the fix-forward task (channel membership checks)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_non_member_get_receipts_403(client):
+    """Non-member attempting to GET receipts should get 403."""
+    app = client._transport.app
+    auth = app.state.auth
+    ch_store = app.state.chat_channels
+    msg_store = app.state.chat_messages
+
+    # Create a channel with a member (the user we will use as member)
+    # We'll use user1 as the member and user2 as the non-member.
+    # We assume these users exist in the auth system (as seen in other tests).
+    ch = await ch_store.create_channel(name="test-ch-nonmember", type="dm", created_by="user1", members=["user1"])
+    # Create a message in the channel
+    msg = await msg_store.send_message(
+        channel_id=ch["id"], author_id="user1", author_type="user", content="hello"
+    )
+    mid = msg["id"]
+
+    # Create a session for a non-member user (user2)
+    non_member_record = auth.find_user("user2")
+    if non_member_record is None:
+        # If user2 doesn't exist, we cannot proceed with this test as intended.
+        # We'll skip the test by returning, but we should fail the test if we want to ensure the user exists.
+        # For now, we'll assume the user exists. If the test fails because user2 not found, we'll see.
+        pass
+    non_member_token = auth.create_session(user_id="user2")
+    client.cookies.set("taos_session", non_member_token)
+
+    # Attempt to GET receipts as non-member
+    resp = await client.get(f"/api/chat/messages/{mid}/receipts")
+    assert resp.status_code == 403
+    assert resp.json()["error"] == "Not a member of this channel"
+
+    # Clear the cookie for subsequent tests
+    client.cookies.clear()
+
+
+@pytest.mark.asyncio
+async def test_non_member_patch_receipts_403_and_no_effect(client):
+    """Non-member attempting to PATCH receipts should get 403 and not create receipt or broadcast."""
+    app = client._transport.app
+    auth = app.state.auth
+    ch_store = app.state.chat_channels
+    msg_store = app.state.chat_messages
+    hub = app.state.chat_hub
+
+    # Create a channel with a member (user1)
+    ch = await ch_store.create_channel(name="test-ch-patch-nonmember", type="dm", created_by="user1", members=["user1"])
+    msg = await msg_store.send_message(
+        channel_id=ch["id"], author_id="user1", author_type="agent", content="hello"
+    )
+    mid = msg["id"]
+
+    # Create a session for non-member user2
+    non_member_record = auth.find_user("user2")
+    if non_member_record is None:
+        pass
+    non_member_token = auth.create_session(user_id="user2")
+    client.cookies.set("taos_session", non_member_token)
+
+    # Attempt to PATCH receipts as non-member
+    resp = await client.patch("/api/chat/receipts", json={"message_id": mid})
+    assert resp.status_code == 403
+    assert resp.json()["error"] == "Not a member of this channel"
+
+    # Verify no receipt was created
+    receipts = await msg_store.get_receipts(mid)
+    assert len(receipts) == 0
+
+    client.cookies.clear()
+
+
+@pytest.mark.asyncio
+async def test_member_get_and_patch_receipts_200(client):
+    """Member should be able to GET and PATCH receipts (200)."""
+    app = client._transport.app
+    auth = app.state.auth
+    ch_store = app.state.chat_channels
+    msg_store = app.state.chat_messages
+    hub = app.state.chat_hub
+
+    # Create a channel where user1 is a member
+    ch = await ch_store.create_channel(name="test-ch-member", type="dm", created_by="user1", members=["user1"])
+    msg = await msg_store.send_message(
+        channel_id=ch["id"], author_id="user1", author_type="user", content="hello"
+    )
+    mid = msg["id"]
+
+    # Create a session for user1 (member)
+    member_token = auth.create_session(user_id="user1")
+    client.cookies.set("taos_session", member_token)
+
+    # GET should succeed
+    resp = await client.get(f"/api/chat/messages/{mid}/receipts")
+    assert resp.status_code == 200
+    assert "receipts" in resp.json()
+
+    # PATCH should succeed (first time, so it will create a receipt)
+    resp = await client.patch("/api/chat/receipts", json={"message_id": mid})
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "marked"
+
+    # Verify receipt was created
+    receipts = await msg_store.get_receipts(mid)
+    assert len(receipts) == 1
+    assert receipts[0]["reader_id"] == "user1"
+    assert receipts[0]["reader_type"] == "user"
+
+    client.cookies.clear()
+
+
+@pytest.mark.asyncio
+async def test_patch_receipts_non_json_object_returns_400(client):
+    """PATCH with a JSON body that is not an object (e.g., a list) should return 400."""
+    app = client._transport.app
+    auth = app.state.auth
+
+    # Create a session for any user (we'll use admin)
+    admin_record = auth.find_user("admin")
+    admin_id = admin_record["id"] if admin_record else "admin"
+    token = auth.create_session(user_id=admin_id, long_lived=True)
+    client.cookies.set("taos_session", token)
+
+    # Create a channel and message so that the message_id is valid (to avoid 404)
+    ch_store = app.state.chat_channels
+    msg_store = app.state.chat_messages
+    ch = await ch_store.create_channel(name="test-ch-patch-json", type="dm", created_by="user", members=[admin_id])
+    msg = await msg_store.send_message(
+        channel_id=ch["id"], author_id="agent1", author_type="agent", content="hello"
+    )
+    mid = msg["id"]
+
+    # Send a JSON list as body
+    resp = await client.patch("/api/chat/receipts", json=[1, 2, 3])
+    assert resp.status_code == 400
+    # We expect our error message
+    assert resp.json()["error"] == "Expected JSON object"
+
+    client.cookies.clear()

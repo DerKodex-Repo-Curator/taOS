@@ -6,7 +6,7 @@ import logging
 import os
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, Response
 
 from tinyagentos.auth_context import (
@@ -992,12 +992,26 @@ async def get_typing(channel_id: str, request: Request):
 # ── Receipts ────────────────────────────────────────────────────────────────
 
 @router.get("/api/chat/messages/{message_id}/receipts")
-async def get_message_receipts(message_id: str, request: Request):
+async def get_message_receipts(message_id: str, request: Request, user: CurrentUser = Depends(current_user_or_device)):
     """Get delivery/seen receipts for a message."""
     msg_store = request.app.state.chat_messages
     msg = await msg_store.get_message(message_id)
     if msg is None:
         return JSONResponse({"error": "not found"}, status_code=404)
+    # Load the channel
+    ch_store = request.app.state.chat_channels
+    channel = await ch_store.get_channel(msg["channel_id"])
+    if channel is None:
+        return JSONResponse({"error": "Channel not found"}, status_code=404)
+    # Check membership
+    is_device = getattr(request.state, "_device", None) is not None
+    if is_device:
+        # For device bearers, the user from the dependency is the user associated with the device.
+        pass
+    members = channel.get("members") or []
+    user_id_str = str(user.user_id)
+    if user_id_str not in members:
+        return JSONResponse({"error": "Not a member of this channel"}, status_code=403)
     receipts = await msg_store.get_receipts(message_id)
     # SPA's Receipt type uses agent_id = reader_id
     formatted = [
@@ -1014,33 +1028,44 @@ async def get_message_receipts(message_id: str, request: Request):
 
 
 @router.patch("/api/chat/receipts")
-async def mark_receipt_seen(request: Request):
+async def mark_receipt_seen(request: Request, user: CurrentUser = Depends(current_user_or_device)):
     """Mark a message as seen by the human viewer.
     
     Body: {"message_id": str}
-    Takes user_id ONLY from the session (taos_session cookie).
+    Takes user_id from the session (taos_session cookie) or device bearer.
     """
-    body = await request.json()
+    # Parse body and ensure it's a dict
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "Expected JSON object"}, status_code=400)
     message_id = body.get("message_id")
     if not isinstance(message_id, str) or not message_id:
         return JSONResponse({"error": "message_id required"}, status_code=400)
-    
-    auth = getattr(request.app.state, "auth", None)
-    session_user = None
-    if auth is not None:
-        token = request.cookies.get("taos_session") or ""
-        if token:
-            session_user = auth.session_user(token, user_agent=request.headers.get("user-agent", ""))
-    if session_user is None:
-        return JSONResponse({"error": "not authenticated"}, status_code=401)
     
     msg_store = request.app.state.chat_messages
     msg = await msg_store.get_message(message_id)
     if msg is None:
         return JSONResponse({"error": "not found"}, status_code=404)
+    # Load the channel
+    ch_store = request.app.state.chat_channels
+    channel = await ch_store.get_channel(msg["channel_id"])
+    if channel is None:
+        return JSONResponse({"error": "Channel not found"}, status_code=404)
+    # Check membership
+    is_device = getattr(request.state, "_device", None) is not None
+    if is_device:
+        # For device bearers, the user from the dependency is the user associated with the device.
+        pass
+    members = channel.get("members") or []
+    user_id_str = str(user.user_id)
+    if user_id_str not in members:
+        return JSONResponse({"error": "Not a member of this channel"}, status_code=403)
     
     hub = request.app.state.chat_hub
-    receipt_row = await msg_store.mark_seen(message_id, session_user["id"], "user")
+    receipt_row = await msg_store.mark_seen(message_id, user.user_id, "user")
     if receipt_row:
         await hub.broadcast(msg["channel_id"], {
             "type": "receipt",
