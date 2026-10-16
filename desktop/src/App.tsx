@@ -9,6 +9,7 @@ import { SearchPalette } from "@/components/SearchPalette";
 import { ShortcutProvider, useShortcut } from "@/hooks/use-shortcut-registry";
 import { useSessionPersistence } from "@/hooks/use-session-persistence";
 import { useDeviceMode } from "@/hooks/use-device-mode";
+import { useMobileControl } from "@/hooks/use-desktop-control";
 import { useIsPwa } from "@/hooks/use-is-pwa";
 import { useThemeStore, restoreActiveTheme, installWebkitRepaintGuards } from "@/stores/theme-store";
 import { useOnAuthReady } from "@/hooks/use-on-auth-ready";
@@ -383,6 +384,10 @@ export function App() {
       setActiveWindowId(null);
     }
   }, [activeWindowId, minimizeWindow]);
+
+  // Agent window control (window.taosDesktop, taos:window) for the phone
+  // layout, which never mounts <Desktop/> and so never got its receiver.
+  useMobileControl({ setActive: setActiveWindowId }, mode !== "desktop");
 
   if (mode === "desktop") {
     return (
