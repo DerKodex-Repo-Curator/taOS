@@ -1111,8 +1111,12 @@ that SAME canonical_id instead:
   or replace the bound. The scope request's own `duration_secs` (if present) is
   also wired through as `expires_at`. An expired existing grant is replaced by a
   fresh bounded re-approval, or kept as-is if the re-approval is unbounded.
-- `POST /api/agents/registry/{canonical_id}/scope-requests/{req_id}/deny`:
-  owner/admin only.
+- `POST /api/agents/registry/{canonical_id}/scope-requests/{req_id}/deny`
+  `{reason?}`: owner/admin only. The optional `reason` (max 2000 chars) is
+  recorded on the row as `deny_reason` so the agent can read back WHY it was
+  refused; a bare deny with no body (the bell / toast) stays valid and records
+  `deny_reason: null`. The Decisions app always sends one: its Deny is two-step
+  and Confirm stays disabled until a reason is typed.
 - `GET /api/agents/registry/{canonical_id}/scope-requests` (optional
   `?status=pending|accepted|refused`): list an agent's scope requests, oldest
   first. Authorized EXACTLY like create -- the agent's own registry bearer
@@ -1127,7 +1131,7 @@ that SAME canonical_id instead:
 
 Both reads return the same PUBLIC shape -- `{id, canonical_id,
 requested_scopes, project_id, reason, status, granted_scopes, created_ts,
-decided_ts}` -- projected explicitly from the stored row rather than returned
+decided_ts, deny_reason}` -- projected explicitly from the stored row rather than returned
 raw. `decided_by` (the owner/admin user_id that approved or denied) is
 deliberately withheld: an agent's own registry token may read these routes, and
 no other agent-reachable route discloses its owner's internal user id. The
@@ -1170,7 +1174,19 @@ should poll the list route rather than re-requesting a scope they cannot see.
 The desktop Agents app renders each active agent's pending requests inline
 (`PendingScopeRequests` in `desktop/src/apps/agents/RegistryPanel.tsx`, reusing
 the same `ConsentActions` Allow/Deny control the notification renders), so
-approval no longer depends on an ephemeral toast.
+approval no longer depends on an ephemeral toast. The Decisions app lists every
+pending scope request the caller may decide (`GET /api/agents/scope-requests?status=pending`)
+in a "Scope requests" section beside access requests (tsk-6ghcrv): each row
+shows the canonical_id, requested scopes, the requested project (labelled
+"Requested project", or "No project requested" for a null `project_id`),
+reason and age. The binding that will actually apply is shown separately: a
+grant with no project scope is sent without a `project_id` and lands OS-wide
+whatever the agent asked for, so the row says "Grants OS-wide (all projects)"
+before Allow. The list loads on its own, so a failed decisions load never hides
+it. The deny reason box is capped at the route's 2000 characters. Every requested scope has a tick box, so Approve can grant a strict
+SUBSET (the unticked scopes are simply not sent in `granted_scopes`); Allow is
+disabled with nothing ticked. Deny requires a reason. Either decision drops the
+row from the pending list on the refetch.
 
 All owner-gated registry routes are existence-hiding (#2106): an authenticated
 caller who is not the owner gets the same 404 body as a nonexistent
