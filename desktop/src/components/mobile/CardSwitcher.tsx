@@ -42,7 +42,9 @@ function shellWindowIcon(w: ShellWindow): icons.LucideIcon {
 
 export function CardSwitcher({ open, onClose, onSelectApp, onLaunchpad }: Props) {
   const windows = useProcessStore((s) => s.windows);
-  const closeWindow = useProcessStore((s) => s.closeWindow);
+  // removeWindow, not closeWindow: closeWindow only marks a window closing for
+  // the desktop Window's close animation, which the phone layout never mounts.
+  const removeWindow = useProcessStore((s) => s.removeWindow);
   const [dismissing, setDismissing] = useState<Record<string, number>>({});
   const touchStartY = useRef<Record<string, number>>({});
   const [shellWindows, setShellWindows] = useState<ShellWindow[]>([]);
@@ -240,7 +242,7 @@ export function CardSwitcher({ open, onClose, onSelectApp, onLaunchpad }: Props)
                 onSelectApp(win.id);
                 onClose();
               },
-              () => closeWindow(win.id),
+              () => removeWindow(win.id),
             );
           })}
           {visibleShellWindows.map((w) =>

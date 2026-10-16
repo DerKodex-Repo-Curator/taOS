@@ -123,3 +123,65 @@ describe("CardSwitcher shell windows", () => {
     expect(screen.getByText("No apps open")).toBeTruthy();
   });
 });
+
+describe("CardSwitcher in-page windows", () => {
+  // The phone layout mounts only the active app (MobileAppWindow), and nothing
+  // there finishes a desktop close animation: a window left marked closing
+  // stays in the store, and in this switcher, for good.
+  const FILES = {
+    id: "w-files",
+    appId: "files",
+    position: { x: 0, y: 0 },
+    size: { w: 900, h: 550 },
+    zIndex: 1,
+    minimized: false,
+    maximized: false,
+    snapped: null,
+    focused: false,
+    launchNonce: 0,
+  };
+
+  beforeEach(() => {
+    useProcessStore.setState({ windows: [FILES], nextZIndex: 2 } as never);
+    isShell.mockReturnValue(false);
+    list.mockReset();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("the X button removes the app, not just marks it closing", () => {
+    setup();
+    fireEvent.click(screen.getByRole("button", { name: "Close Files" }));
+    expect(useProcessStore.getState().windows).toEqual([]);
+    expect(screen.queryByRole("button", { name: "Switch to Files" })).toBeNull();
+    expect(screen.getByText("No apps open")).toBeTruthy();
+  });
+
+  it("swiping a card up removes the app", () => {
+    vi.useFakeTimers();
+    setup();
+    const card = screen.getByRole("button", { name: "Switch to Files" });
+    fireEvent.touchStart(card, { touches: [{ clientY: 600 }] });
+    fireEvent.touchMove(card, { touches: [{ clientY: 400 }] });
+    fireEvent.touchEnd(card);
+    act(() => {
+      vi.advanceTimersByTime(300);
+    });
+    expect(useProcessStore.getState().windows).toEqual([]);
+  });
+
+  it("a short drag does not close the app", () => {
+    vi.useFakeTimers();
+    setup();
+    const card = screen.getByRole("button", { name: "Switch to Files" });
+    fireEvent.touchStart(card, { touches: [{ clientY: 600 }] });
+    fireEvent.touchMove(card, { touches: [{ clientY: 560 }] });
+    fireEvent.touchEnd(card);
+    act(() => {
+      vi.advanceTimersByTime(300);
+    });
+    expect(useProcessStore.getState().windows.map((w) => w.id)).toEqual(["w-files"]);
+  });
+});
