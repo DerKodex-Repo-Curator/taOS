@@ -513,6 +513,8 @@ def register_all_routers(app):
 
     from tinyagentos.routes.peer import router as peer_router
     app.include_router(peer_router)  # CSRF-exempt — bearer-only auth
+    from tinyagentos.routes.peer import handshake_router as peer_handshake_router
+    app.include_router(peer_handshake_router)  # CSRF-exempt: signature-authenticated, no cookie
 
     from tinyagentos.routes.council import router as council_router
     app.include_router(council_router, dependencies=_csrf)
