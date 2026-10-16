@@ -90,6 +90,7 @@ def _extract_curl_retry_block(text: str) -> str:
             if line.strip() == "fi":
                 break
     
+    assert block_lines, "CURL_RETRY=( block not found in install-server.sh"
     return "\n".join(block_lines)
 
 
@@ -97,37 +98,16 @@ def test_no_unconditional_retry_all_errors():
     """No line of install-server.sh that contains `curl ` also contains a literal `--retry-all-errors`.
     Only the guarded `CURL_RETRY+=(--retry-all-errors)` line may carry the flag."""
     text = INSTALL.read_text()
-    lines = text.splitlines()
-    
-    for i, line in enumerate(lines):
-        # Skip comment lines and empty lines
-        stripped = line.strip()
-        if stripped.startswith("#") or not stripped:
-            continue
-        
-        if "curl " in line and "--retry-all-errors" in line:
-            # Check if this is the guarded CURL_RETRY+= line (should be outside of CURL_RETRY block)
-            # Find if we're in a CURL_RETRY block
-            in_curl_retry = False
-            for j, check_line in enumerate(lines):
-                if j > i:  # Only check lines before current one
-                    if check_line.strip().startswith("CURL_RETRY=("):
-                        in_curl_retry = True
-                    elif in_curl_retry and check_line.strip() == "fi":
-                        in_curl_retry = False
-                    elif not in_curl_retry and check_line.strip().startswith("CURL_RETRY+="):
-                        # This is the guarded line, it's OK
-                        pass
-                    elif not in_curl_retry and check_line.strip().startswith("CURL_RETRY="):
-                        in_curl_retry = True
-                elif in_curl_retry and "curl " in check_line and "--retry-all-errors" in check_line:
-                    # Found a curl with --retry-all-errors inside the CURL_RETRY block
-                    raise AssertionError(f"curl with --retry-all-errors inside CURL_RETRY block: {line}")
-            
-            # Also check if this line is actually the CURL_RETRY+= line (not a curl command)
-            if stripped.startswith("CURL_RETRY+="):
-                # This is the guarded line, it's OK
-                pass
+    offenders = [
+        line for line in text.splitlines()
+        if not line.strip().startswith("#")
+        and "curl " in line
+        and "curl --help" not in line
+        and "--retry-all-errors" in line
+    ]
+    assert offenders == [], f"curl lines with an unconditional --retry-all-errors: {offenders}"
+    guarded = [line for line in text.splitlines() if "--retry-all-errors" in line and line.strip().startswith("CURL_RETRY+=(")]
+    assert len(guarded) == 1, f"expected exactly one guarded CURL_RETRY+=(--retry-all-errors) line, got {guarded}"
 
 
 def test_curl_retry_without_retry_all_errors(tmp_path):
