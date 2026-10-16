@@ -287,15 +287,15 @@ async def test_second_open_pr_is_refused(fake):
 
 @pytest.mark.asyncio
 async def test_same_branch_open_pr_is_returned_not_duplicated(fake):
-        fake.open_pulls = [{
-            "html_url": f"https://github.com/{UPSTREAM}/pull/5", "number": 5,
-            "head": {"label": f"{LOGIN}:taos-agent/fix-weather", "ref": "taos-agent/fix-weather"},
-        }]
-        async with httpx.AsyncClient(transport=httpx.MockTransport(fake.handler)) as http:
-            gh = _session(http)
-            pr = await gw.open_pr(gh, UPSTREAM, "fix-weather", "Fix", "body")
-        assert pr == {"url": f"https://github.com/{UPSTREAM}/pull/5", "number": 5}
-        assert fake.bodies("POST", f"/repos/{UPSTREAM}/pulls") == []
+    fake.open_pulls = [{
+        "html_url": f"https://github.com/{UPSTREAM}/pull/5", "number": 5,
+        "head": {"label": f"{LOGIN}:taos-agent/fix-weather", "ref": "taos-agent/fix-weather"},
+    }]
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fake.handler)) as http:
+        gh = _session(http)
+        pr = await gw.open_pr(gh, UPSTREAM, "fix-weather", "Fix", "body")
+    assert pr == {"url": f"https://github.com/{UPSTREAM}/pull/5", "number": 5}
+    assert fake.bodies("POST", f"/repos/{UPSTREAM}/pulls") == []
 
 
 @pytest.mark.asyncio
