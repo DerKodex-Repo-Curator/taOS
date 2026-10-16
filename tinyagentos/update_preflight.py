@@ -94,7 +94,7 @@ def _covers_ref(ref: str, refspecs: List[str]) -> bool:
 def _find_foreign_owned_files(project_dir: Path) -> tuple[int, List[str]]:
     """Find files not writable by the current effective user.
 
-    Excludes files under .venv, venv, node_modules, data, __pycache__,
+    Excludes files under .venv, venv, node_modules, data, backups, __pycache__,
     and .git trees. When running as root, returns (0, []) because root
     can write any file.
     """
@@ -103,7 +103,7 @@ def _find_foreign_owned_files(project_dir: Path) -> tuple[int, List[str]]:
 
     count = 0
     paths = []
-    prune_dirs = {".venv", "venv", "node_modules", "data", "__pycache__", ".git"}
+    prune_dirs = {".venv", "venv", "node_modules", "data", "backups", "__pycache__", ".git"}
 
     for root, dirs, files in os.walk(project_dir):
         dirs[:] = [d for d in dirs if d not in prune_dirs]
