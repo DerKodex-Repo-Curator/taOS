@@ -173,8 +173,10 @@ async def test_write_without_a_data_dir_is_refused(http, fake, data_dir):
         await gw.ensure_fork(gh, UPSTREAM)
     with pytest.raises(ValueError, match="data_dir"):
         await gw.push_branch(gh, UPSTREAM, "fix-weather", {"a.py": "x\n"}, "m")
+    assert fake.log == []
     with pytest.raises(ValueError, match="data_dir"):
         await gw.open_pr(gh, UPSTREAM, "fix-weather", "Fix", "body")
+    assert fake.log == []
     with pytest.raises(ValueError, match="data_dir"):
         await gw.create_issue(gh, UPSTREAM, "Crash", "body")
     assert fake.log == []
@@ -285,15 +287,15 @@ async def test_second_open_pr_is_refused(fake):
 
 @pytest.mark.asyncio
 async def test_same_branch_open_pr_is_returned_not_duplicated(fake):
-    fake.open_pulls = [{
-        "html_url": f"https://github.com/{UPSTREAM}/pull/5", "number": 5,
-        "head": {"label": f"{LOGIN}:taos-agent/fix-weather", "ref": "taos-agent/fix-weather"},
-    }]
-    async with httpx.AsyncClient(transport=httpx.MockTransport(fake.handler)) as http:
-        gh = _session(http)
-        pr = await gw.open_pr(gh, UPSTREAM, "fix-weather", "Fix", "body")
-    assert pr == {"url": f"https://github.com/{UPSTREAM}/pull/5", "number": 5}
-    assert fake.bodies("POST", f"/repos/{UPSTREAM}/pulls") == []
+        fake.open_pulls = [{
+            "html_url": f"https://github.com/{UPSTREAM}/pull/5", "number": 5,
+            "head": {"label": f"{LOGIN}:taos-agent/fix-weather", "ref": "taos-agent/fix-weather"},
+        }]
+        async with httpx.AsyncClient(transport=httpx.MockTransport(fake.handler)) as http:
+            gh = _session(http)
+            pr = await gw.open_pr(gh, UPSTREAM, "fix-weather", "Fix", "body")
+        assert pr == {"url": f"https://github.com/{UPSTREAM}/pull/5", "number": 5}
+        assert fake.bodies("POST", f"/repos/{UPSTREAM}/pulls") == []
 
 
 @pytest.mark.asyncio
@@ -358,3 +360,111 @@ async def test_push_gives_up_when_the_fork_never_becomes_ready(http, fake, monke
     with pytest.raises(httpx.HTTPStatusError):
         await gw.push_branch(gh, UPSTREAM, "fix-weather", {"a.py": "x\n"}, "Fix")
     assert fake.bodies("POST", "/git/trees") == []
+
+
+# -- additional tests for issue #3714 ---------------------------
+
+@pytest.mark.asyncio
+async def test_sentence_final_ip_is_detected(http, fake):
+    """Issue #1: IP followed by a dot (not digit) should be detected as ipv4_address."""
+    gh = _session(http)
+    # Test without newline
+    with pytest.raises(gw.SecretScanRefused) as exc:
+        await gw.push_branch(gh, UPSTREAM, "fix-ip", {"app/x.py": "host 192.168.1.20."}, "fix")
+    assert "ipv4_address" in exc.value.kinds
+    assert fake.log == []
+    # Also test with newline (already covered in existing test, but we can do again)
+    with pytest.raises(gw.SecretScanRefused) as exc:
+        await gw.push_branch(gh, UPSTREAM, "fix-ip", {"app/x.py": "host 192.168.1.20.\n"}, "fix")
+    assert "ipv4_address" in exc.value.kinds
+    assert fake.log == []
+
+
+@pytest.mark.asyncio
+async def test_new_secret_filename_and_content_patterns(http, fake):
+    """Issue #2: refuse new filename patterns and catch new content patterns."""
+    gh = _session(http)
+    content = "SECRET=something\n"
+    # *.pem
+    with pytest.raises(gw.SecretScanRefused) as exc:
+        await gw.push_branch(gh, UPSTREAM, "fix-pem", {"test.pem": content}, "fix")
+    assert "env_file" in exc.value.kinds
+    assert fake.log == []
+    # *.key
+    with pytest.raises(gw.SecretScanRefused) as exc:
+        await gw.push_branch(gh, UPSTREAM, "fix-key", {"test.key": content}, "fix")
+    assert "env_file" in exc.value.kinds
+    assert fake.log == []
+    # id_rsa*
+    with pytest.raises(gw.SecretScanRefused) as exc:
+        await gw.push_branch(gh, UPSTREAM, "fix-idrsa", {"id_rsa_test": content}, "fix")
+    assert "env_file" in exc.value.kinds
+    assert fake.log == []
+    # id_ed25519*
+    with pytest.raises(gw.SecretScanRefused) as exc:
+        await gw.push_branch(gh, UPSTREAM, "fix-ideddsa", {"id_ed25519_test": content}, "fix")
+    assert "env_file" in exc.value.kinds
+    assert fake.log == []
+    # Content pattern: Authorization: Bearer <jwt>
+    jwt_content = f"Authorization: Bearer {JWT}\n"
+    with pytest.raises(gw.SecretScanRefused) as exc:
+        await gw.push_branch(gh, UPSTREAM, "fix-jwt", {"auth.txt": jwt_content}, "fix")
+    assert "jwt" in exc.value.kinds
+    assert fake.log == []
+
+
+@pytest.mark.asyncio
+async def test_data_dir_none_raises_value_error(http, fake):
+    """Issue #3: public write entry points should require data_dir (raise ValueError when None)."""
+    gh = gw.GitHubSession(token="gho_test", login=LOGIN, http=http, data_dir=None)
+    with pytest.raises(ValueError, match="data_dir"):
+        await gw.ensure_fork(gh, UPSTREAM)
+    assert fake.log == []
+    with pytest.raises(ValueError, match="data_dir"):
+        await gw.push_branch(gh, UPSTREAM, "fix-data", {"a.py": "x\n"}, "m")
+    assert fake.log == []
+    with pytest.raises(ValueError, match="data_dir"):
+        await gw.open_pr(gh, UPSTREAM, "fix-data", "Fix", "body")
+    assert fake.log == []
+    with pytest.raises(ValueError, match="data_dir"):
+        await gw.create_issue(gh, UPSTREAM, "Crash", "body")
+    assert fake.log == []
+
+
+@pytest.mark.asyncio
+async def test_bad_upstream_regex_validation(http, fake):
+    """Issue #4: validate upstream with regex and reject ..."""
+    gh = _session(http)
+    # Test no slash
+    with pytest.raises(ValueError, match="upstream"):
+        await gw.ensure_fork(gh, "noSlash")
+    assert fake.log == []
+    # Test repo part is ".."
+    with pytest.raises(ValueError, match="upstream"):
+        await gw.ensure_fork(gh, "owner/..")
+    assert fake.log == []
+    # Test repo part is "."
+    with pytest.raises(ValueError, match="upstream"):
+        await gw.ensure_fork(gh, "owner/.")
+    assert fake.log == []
+    # Test valid upstream should not raise
+    try:
+        await gw.ensure_fork(gh, UPSTREAM)
+    except ValueError:
+        pytest.fail("Valid upstream raised ValueError unexpectedly")
+
+
+@pytest.mark.asyncio
+async def test_push_branch_refuses_non_fork(http, fake):
+    """Issue #5: push_branch should check that the target repo is a fork of upstream."""
+    gh = _session(http)
+    # Simulate a non-fork: repo exists but is not a fork
+    fake.fork_exists = True
+    fake.not_a_fork = True
+    with pytest.raises(ValueError, match="not a fork"):
+        await gw.push_branch(gh, UPSTREAM, "fix-nonfork", {"a.py": "x\n"}, "m")
+    # Expect only GET requests to check the fork, no write calls
+    assert [r for r in fake.log if r.method != "GET"] == []
+    get_requests = [r for r in fake.log if r.method == "GET"]
+    assert len(get_requests) == 1
+    assert get_requests[0].url.path == f"/repos/{LOGIN}/taOS"

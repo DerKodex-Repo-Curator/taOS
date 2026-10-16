@@ -127,7 +127,13 @@ def secret_scan(text: str, *, path: str | None = None, data_dir: str | None = No
     if path is not None:
         name = path.rsplit("/", 1)[-1]
         env_named = (
-            name in (".env", ".envrc") or name.startswith(".env.") or name.endswith(".env")
+            name in (".env", ".envrc") or 
+            name.startswith(".env.") or 
+            name.endswith(".env") or
+            name.endswith(".pem") or
+            name.endswith(".key") or
+            name.startswith("id_rsa") or
+            name.startswith("id_ed25519")
         )
         if env_named and _ENV_ASSIGN_RE.search(text):
             kinds.add("env_file")
