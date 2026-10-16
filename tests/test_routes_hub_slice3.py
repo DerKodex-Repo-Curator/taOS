@@ -229,6 +229,34 @@ class TestFriendRequestFlow:
         assert decl == ["peerFP"]
 
 
+
+    @pytest.mark.asyncio
+    async def test_accept_returns_immediately_when_handshake_sleeps(self, client, upstream, monkeypatch):
+        captured, calls = upstream
+        async def accept_handler(method, url, **kw):
+            return _FakeResp(content=json.dumps({"peer": "peerFP", "endpoints": ["wss://x"]}).encode())
+        _set(upstream, accept_handler)
+
+        import asyncio
+        from tinyagentos.routes import hub as hub_routes
+
+        async def slow_handshake(request, directory_resp, peer_fingerprint):
+            await asyncio.sleep(5)
+
+        monkeypatch.setattr(hub_routes, "_try_handshake", slow_handshake)
+
+        import time
+        start = time.perf_counter()
+        resp = await client.post(
+            "/api/hub/friends/requests/rid-9/accept",
+            json={"peer_fingerprint": "peerFP"},
+        )
+        elapsed = time.perf_counter() - start
+        assert resp.status_code == 200
+        assert resp.json()["state"] == "accepted"
+        assert elapsed < 1.0
+
+
 class TestPresenceGate:
     @pytest.mark.asyncio
     async def test_presence_denied_without_accepted_edge(self, client, upstream):

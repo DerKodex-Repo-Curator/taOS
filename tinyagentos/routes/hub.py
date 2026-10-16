@@ -26,6 +26,7 @@ dependency (401), exactly like every other local app route.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -38,10 +39,13 @@ from pydantic import BaseModel
 from tinyagentos import peer as peer_channel
 from tinyagentos.auth_context import CurrentUser, current_user
 from tinyagentos.contacts_store import generate_peer_token
+from tinyagentos import task_utils
 from tinyagentos.hub import identity, posts, relationships, store as hub_store
 from tinyagentos.routes.account_proxy import _forward_to
 
 logger = logging.getLogger(__name__)
+
+_BACKGROUND_TASKS: set[asyncio.Task] = set()
 
 router = APIRouter()
 
@@ -489,7 +493,16 @@ async def accept_friend_request(
     # When the directory omits these fields, we fall back to the locally cached
     # hub_authors record (populated during the friend-request flow).
     if peer:
-        await _try_handshake(request, resp, peer)
+        async def _handshake():
+            try:
+                await asyncio.wait_for(
+                    _try_handshake(request, resp, peer),
+                    timeout=30,
+                )
+            except Exception:
+                logger.exception("friend-accept handshake task failed for %s", peer)
+
+        task = task_utils._create_supervised_task(_handshake(), _BACKGROUND_TASKS)
 
     return {"state": "accepted", "peer": peer, "directory": resp}
 

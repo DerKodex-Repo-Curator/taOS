@@ -2356,6 +2356,10 @@ The agent's own A2A identity token (`.taos_agent_token`) is a2a-only
 Leaving PicoClaw, or any controller start into opencode, revokes the old
 credential and mints a fresh one.
 
+## Peer handshake (friend-accept)
+
+The private/CGNAT endpoint allowance comes from endpoints the OTHER side supplies (directory response or handshake body), so a friend can make this node POST to a private host:port on the fixed handshake/inbox paths; loopback, link-local and metadata addresses stay blocked.
+
 ## taOS Agent action gate (pending, confirm, execute)
 
 Every tier-B operation the taOS Agent wants to perform (an external write such
