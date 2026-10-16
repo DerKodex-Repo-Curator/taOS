@@ -531,6 +531,27 @@ async def update_message_state(request: Request, message_id: str):
 
 # ── Channel CRUD ──────────────────────────────────────────────────────────────
 
+def caller_can_read_channel(request: Request, channel: dict) -> bool:
+    """True for an admin, the host local token, or a listed channel member.
+
+    Membership compares ``str(user_id)`` against ``channel['members']``, the
+    same comparison post_message uses for device bearers.
+    """
+    if getattr(request.state, "is_admin", False):
+        return True
+    if getattr(request.state, "via", None) == "local_token":
+        return True
+    uid = getattr(request.state, "user_id", None)
+    return bool(uid) and str(uid) in (channel.get("members") or [])
+
+
+def channel_read_denied(request: Request, channel: dict) -> JSONResponse | None:
+    """A 403 response when the caller may not read *channel*, else None."""
+    if caller_can_read_channel(request, channel):
+        return None
+    return JSONResponse({"error": "forbidden: not a member"}, status_code=403)
+
+
 @router.get("/api/chat/channels")
 async def list_channels(
     request: Request,
@@ -557,6 +578,9 @@ async def get_channel(request: Request, channel_id: str):
     channel = await ch_store.get_channel(channel_id)
     if not channel:
         return JSONResponse({"error": "Channel not found"}, status_code=404)
+    denied = channel_read_denied(request, channel)
+    if denied:
+        return denied
     return channel
 
 
@@ -564,6 +588,10 @@ async def get_channel(request: Request, channel_id: str):
 async def get_channel_messages(
     request: Request, channel_id: str, limit: int = 50, before: float | None = None
 ):
+    channel = await request.app.state.chat_channels.get_channel(channel_id)
+    denied = channel_read_denied(request, channel or {})
+    if denied:
+        return denied
     msg_store = request.app.state.chat_messages
     messages = await msg_store.get_messages(channel_id, limit=limit, before=before)
     return {"messages": messages}
