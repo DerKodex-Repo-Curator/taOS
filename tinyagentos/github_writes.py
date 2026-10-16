@@ -10,6 +10,10 @@ Guardrails, all mechanical:
 - Secret scan first. Every file pushed, every commit message, PR title/body
   and issue title/body is scanned before ANY network call. A hit raises
   ``SecretScanRefused`` naming the matched kinds, never the matched value.
+- The session must carry the taOS data dir: a write without one is refused,
+  so the data-dir path check can never silently drop out.
+- ``upstream`` must be a plain ``owner/repo``, and ``push_branch`` only writes
+  to a repo that is a fork of it.
 - Branches are always ``taos-agent/<slug>`` and PRs always target ``dev``.
 - At most one open taOS Agent PR per repo per user: ``open_pr`` refuses with
   ``OpenPullRequestExists`` when the user already has one open on another
@@ -37,6 +41,7 @@ BRANCH_PREFIX = "taos-agent/"
 PR_BASE = "dev"
 
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,59}$")
+_UPSTREAM_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/(?!\.\.?$)[A-Za-z0-9._-]{1,100}$")
 _TIMEOUT = 30.0
 # Forking is asynchronous: a new fork's git objects can 404 for a moment after
 # the 202. The parent-commit read is retried on 404 with these pauses (about a
@@ -68,7 +73,7 @@ class GitHubSession:
     token: str
     login: str
     http: httpx.AsyncClient
-    data_dir: str | None = None
+    data_dir: str | None
     api_base: str = API_BASE
 
     def __repr__(self) -> str:
@@ -80,7 +85,8 @@ class GitHubSession:
 # ---------------------------------------------------------------------------
 
 _PATTERNS: list[tuple[str, re.Pattern[str]]] = [
-    ("private_key", re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")),
+    ("private_key", re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----")),
+    ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}")),
     ("api_key", re.compile(
         r"\b(?:sk-[A-Za-z0-9_-]{16,}"
         r"|gh[pousr]_[A-Za-z0-9]{20,}"
@@ -91,7 +97,11 @@ _PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     )),
     ("tailscale_hostname", re.compile(r"\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.ts\.net\b", re.I)),
 ]
-_IPV4_RE = re.compile(r"(?<![\d.])(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?![\d.])")
+# Not part of a longer dotted number on either side, but a sentence-final full
+# stop still counts as the end of the address.
+_IPV4_RE = re.compile(
+    r"(?<!\d)(?<!\d\.)(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?!\d|\.\d)"
+)
 # Loopback and the wildcard bind address say nothing about the user's network.
 _HARMLESS_IPV4 = frozenset({"127.0.0.1", "0.0.0.0"})
 _TAILSCALE_NET = ipaddress.ip_network("100.64.0.0/10")
@@ -116,7 +126,10 @@ def secret_scan(text: str, *, path: str | None = None, data_dir: str | None = No
             kinds.add("ipv4_address")
     if path is not None:
         name = path.rsplit("/", 1)[-1]
-        if (name == ".env" or name.startswith(".env.")) and _ENV_ASSIGN_RE.search(text):
+        env_named = (
+            name in (".env", ".envrc") or name.startswith(".env.") or name.endswith(".env")
+        )
+        if env_named and _ENV_ASSIGN_RE.search(text):
             kinds.add("env_file")
     if data_dir and data_dir.rstrip("/") and data_dir.rstrip("/") in text:
         kinds.add("data_dir_path")
@@ -124,6 +137,8 @@ def secret_scan(text: str, *, path: str | None = None, data_dir: str | None = No
 
 
 def _refuse_if_secret(gh: GitHubSession, items: list[tuple[str | None, str]]) -> None:
+    if not (gh.data_dir or "").rstrip("/"):
+        raise ValueError("data_dir is required for a GitHub write")
     kinds: set[str] = set()
     for path, text in items:
         kinds.update(secret_scan(text, path=path, data_dir=gh.data_dir))
@@ -141,6 +156,11 @@ def _branch(slug: str) -> str:
     if not isinstance(slug, str) or not _SLUG_RE.match(slug):
         raise ValueError("slug must be 1-60 chars of a-z, 0-9 and '-', not starting with '-'")
     return BRANCH_PREFIX + slug
+
+
+def _check_upstream(upstream: str) -> None:
+    if not isinstance(upstream, str) or not _UPSTREAM_RE.match(upstream):
+        raise ValueError("upstream must be 'owner/repo'")
 
 
 def _attribution(login: str) -> str:
@@ -185,6 +205,7 @@ def _fork_name(gh: GitHubSession, upstream: str) -> str:
 
 async def ensure_fork(gh: GitHubSession, upstream: str) -> str:
     """Return the user's fork of *upstream*, creating it when absent."""
+    _check_upstream(upstream)
     fork = _fork_name(gh, upstream)
     repo = await _call(gh, "GET", f"/repos/{fork}", ok_404=True)
     if repo is not None:
@@ -214,13 +235,16 @@ async def push_branch(
 
     A new branch starts from upstream ``dev``. An existing branch is
     fast-forwarded (the commit's parent is its current head, ``force: false``).
+    The target is checked to be the user's fork of *upstream* (created when
+    absent) before anything is written.
     """
+    _check_upstream(upstream)
     branch = _branch(slug)
     if not files:
         raise ValueError("nothing to push")
     _refuse_if_secret(gh, [*files.items(), (None, message)])
 
-    fork = _fork_name(gh, upstream)
+    fork = await ensure_fork(gh, upstream)
     current = await _call(gh, "GET", f"/repos/{fork}/git/ref/heads/{branch}", ok_404=True)
     if current is not None:
         parent = current["object"]["sha"]
@@ -265,6 +289,7 @@ async def _open_taos_agent_pulls(gh: GitHubSession, upstream: str) -> list[dict]
 
 async def open_pr(gh: GitHubSession, upstream: str, slug: str, title: str, body: str) -> dict:
     """Open a PR from ``<login>:taos-agent/<slug>`` into ``dev``; return ``{url, number}``."""
+    _check_upstream(upstream)
     branch = _branch(slug)
     full_body = _with_attribution(body, gh.login)
     _refuse_if_secret(gh, [(None, title), (None, full_body)])
@@ -286,6 +311,7 @@ async def open_pr(gh: GitHubSession, upstream: str, slug: str, title: str, body:
 
 async def create_issue(gh: GitHubSession, upstream: str, title: str, body: str) -> dict:
     """File an issue on *upstream* as the user; return ``{url, number}``."""
+    _check_upstream(upstream)
     full_body = _with_attribution(body, gh.login)
     _refuse_if_secret(gh, [(None, title), (None, full_body)])
     created = await _call(gh, "POST", f"/repos/{upstream}/issues",

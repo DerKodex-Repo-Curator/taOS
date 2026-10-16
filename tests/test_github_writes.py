@@ -37,6 +37,8 @@ class FakeGitHub:
         # A new fork's git objects show up a little after the 202: the first
         # ``fork_lag`` commit reads after a fork is created answer 404.
         self.fork_lag = 0
+        # The user's repo of the same name exists but is not a fork of upstream.
+        self.not_a_fork = False
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.log.append(request)
@@ -45,6 +47,8 @@ class FakeGitHub:
         if method == "GET" and path == f"/repos/{LOGIN}/taOS":
             if not self.fork_exists:
                 return httpx.Response(404, json={"message": "Not Found"})
+            if self.not_a_fork:
+                return httpx.Response(200, json={"full_name": f"{LOGIN}/taOS", "fork": False})
             return httpx.Response(
                 200, json={"full_name": f"{LOGIN}/taOS", "fork": True,
                            "parent": {"full_name": UPSTREAM}},
@@ -109,6 +113,10 @@ def _session(http: httpx.AsyncClient, data_dir: str | None = "/var/lib/taos-data
     return gw.GitHubSession(token="gho_test", login=LOGIN, http=http, data_dir=data_dir)
 
 
+JWT = (
+    "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0"
+    ".dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
+)
 ATTRIBUTION = f"Filed by the taOS Agent on behalf of {LOGIN} (taOS {__version__})"
 
 
@@ -124,6 +132,9 @@ ATTRIBUTION = f"Filed by the taOS Agent on behalf of {LOGIN} (taOS {__version__}
         ("-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n", "private_key"),
         ("box.tail1234.ts.net\n", "tailscale_hostname"),
         ("path = /var/lib/taos-data/secrets.db\n", "data_dir_path"),
+        ("the server is 192.168.1.20.\n", "ipv4_address"),
+        ("-----BEGIN PGP PRIVATE KEY BLOCK-----\nabc\n", "private_key"),
+        (f"auth = {JWT}\n", "jwt"),
     ],
 )
 async def test_push_refuses_secret_before_network(http, fake, content, kind):
@@ -148,7 +159,48 @@ async def test_pr_and_issue_bodies_are_scanned(http, fake):
 
 def test_env_file_is_refused():
     assert "env_file" in gw.secret_scan("DB_PASSWORD=hunter2\n", path=".env")
+    assert "env_file" in gw.secret_scan("DB_PASSWORD=hunter2\n", path="deploy/prod.env")
+    assert "env_file" in gw.secret_scan("export DB_PASSWORD=hunter2\n", path=".envrc")
     assert gw.secret_scan("version = 1.0.0\nhost = 127.0.0.1\n") == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("data_dir", [None, "", "/"])
+async def test_write_without_a_data_dir_is_refused(http, fake, data_dir):
+    """The data-dir check never silently drops out: no data dir, no write."""
+    gh = _session(http, data_dir=data_dir)
+    with pytest.raises(ValueError, match="data_dir"):
+        await gw.push_branch(gh, UPSTREAM, "fix-weather", {"a.py": "x\n"}, "m")
+    with pytest.raises(ValueError, match="data_dir"):
+        await gw.open_pr(gh, UPSTREAM, "fix-weather", "Fix", "body")
+    with pytest.raises(ValueError, match="data_dir"):
+        await gw.create_issue(gh, UPSTREAM, "Crash", "body")
+    assert fake.log == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", ["", "taOS", "jaylfc/", "/taOS", "a/b/c", "../x/y", "jay lfc/taOS"])
+async def test_bad_upstream_is_refused_before_network(http, fake, bad):
+    gh = _session(http)
+    with pytest.raises(ValueError, match="upstream"):
+        await gw.ensure_fork(gh, bad)
+    with pytest.raises(ValueError, match="upstream"):
+        await gw.push_branch(gh, bad, "fix-weather", {"a.py": "x\n"}, "m")
+    with pytest.raises(ValueError, match="upstream"):
+        await gw.open_pr(gh, bad, "fix-weather", "Fix", "body")
+    with pytest.raises(ValueError, match="upstream"):
+        await gw.create_issue(gh, bad, "Crash", "body")
+    assert fake.log == []
+
+
+@pytest.mark.asyncio
+async def test_push_refuses_a_repo_that_is_not_a_fork_of_upstream(http, fake):
+    fake.fork_exists = True
+    fake.not_a_fork = True
+    gh = _session(http)
+    with pytest.raises(ValueError, match="not a fork"):
+        await gw.push_branch(gh, UPSTREAM, "fix-weather", {"a.py": "x\n"}, "m")
+    assert [r for r in fake.log if r.method != "GET"] == []
 
 
 # -- branch name, PR shape, attribution -------------------------------------
@@ -222,7 +274,7 @@ async def test_second_open_pr_is_refused(fake):
         "head": {"label": f"{LOGIN}:taos-agent/older-fix", "ref": "taos-agent/older-fix"},
     }]
     async with httpx.AsyncClient(transport=httpx.MockTransport(fake.handler)) as http:
-        gh = _session(http, data_dir=None)
+        gh = _session(http)
         with pytest.raises(gw.OpenPullRequestExists) as exc:
             await gw.open_pr(gh, UPSTREAM, "fix-weather", "Fix", "body")
     assert exc.value.url == f"https://github.com/{UPSTREAM}/pull/5"
@@ -236,7 +288,7 @@ async def test_same_branch_open_pr_is_returned_not_duplicated(fake):
         "head": {"label": f"{LOGIN}:taos-agent/fix-weather", "ref": "taos-agent/fix-weather"},
     }]
     async with httpx.AsyncClient(transport=httpx.MockTransport(fake.handler)) as http:
-        gh = _session(http, data_dir=None)
+        gh = _session(http)
         pr = await gw.open_pr(gh, UPSTREAM, "fix-weather", "Fix", "body")
     assert pr == {"url": f"https://github.com/{UPSTREAM}/pull/5", "number": 5}
     assert fake.bodies("POST", f"/repos/{UPSTREAM}/pulls") == []
@@ -249,7 +301,7 @@ async def test_other_users_taos_agent_prs_do_not_count(fake):
         "head": {"label": "bob:taos-agent/older-fix", "ref": "taos-agent/older-fix"},
     }]
     async with httpx.AsyncClient(transport=httpx.MockTransport(fake.handler)) as http:
-        gh = _session(http, data_dir=None)
+        gh = _session(http)
         pr = await gw.open_pr(gh, UPSTREAM, "fix-weather", "Fix", "body")
     assert pr["number"] == 9
 
@@ -268,7 +320,7 @@ async def test_open_pr_finds_same_branch_pr_after_another(fake):
         },
     ]
     async with httpx.AsyncClient(transport=httpx.MockTransport(fake.handler)) as http:
-        gh = _session(http, data_dir=None)
+        gh = _session(http)
         pr = await gw.open_pr(gh, UPSTREAM, "fix-weather", "Fix", "body")
     assert pr == {"url": f"https://github.com/{UPSTREAM}/pull/5", "number": 5}
     assert fake.bodies("POST", f"/repos/{UPSTREAM}/pulls") == []
@@ -284,7 +336,7 @@ async def test_push_waits_for_a_new_fork_to_be_git_ready(http, fake, monkeypatch
 
     monkeypatch.setattr("asyncio.sleep", _nap)
     fake.fork_lag = 2
-    gh = _session(http, data_dir=None)
+    gh = _session(http)
     await gw.ensure_fork(gh, UPSTREAM)
     branch = await gw.push_branch(gh, UPSTREAM, "fix-weather", {"a.py": "x\n"}, "Fix")
     assert branch == "taos-agent/fix-weather"
@@ -299,7 +351,7 @@ async def test_push_gives_up_when_the_fork_never_becomes_ready(http, fake, monke
 
     monkeypatch.setattr("asyncio.sleep", _nap)
     fake.fork_lag = 10_000
-    gh = _session(http, data_dir=None)
+    gh = _session(http)
     await gw.ensure_fork(gh, UPSTREAM)
     with pytest.raises(httpx.HTTPStatusError):
         await gw.push_branch(gh, UPSTREAM, "fix-weather", {"a.py": "x\n"}, "Fix")
