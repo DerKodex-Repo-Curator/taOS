@@ -216,6 +216,7 @@ class TestMemoryModeRuntime:
             framework="openclaw",
             model=None,
             data_dir=tmp_path,
+            extra_config={"agent_controller_port": 6972},
         )
 
         async def mock_exec(name, cmd, **kwargs):
@@ -241,6 +242,7 @@ class TestMemoryModeRuntime:
             framework="openclaw",
             model=None,
             data_dir=tmp_path,
+            extra_config={"agent_controller_port": 6972},
             memory_mode="framework",
         )
 
@@ -267,6 +269,7 @@ class TestMemoryModeRuntime:
             framework="openclaw",
             model=None,
             data_dir=tmp_path,
+            extra_config={"agent_controller_port": 6972},
             memory_mode="taosmd",
         )
 
@@ -371,8 +374,7 @@ class TestMemoryModeFrameworkIsolation:
         import sys
         fake_taosmd = types.ModuleType("taosmd")
         fake_taosmd.agent_rules = lambda: fake_rules
-        sys.modules["taosmd"] = fake_taosmd
-        try:
+        with patch.dict(sys.modules, {"taosmd": fake_taosmd}):
             with patch("tinyagentos.deployer.create_container", new_callable=AsyncMock) as mock_create, \
                  patch("tinyagentos.deployer.exec_in_container", side_effect=mock_exec), \
                  patch("tinyagentos.deployer.push_file", side_effect=fake_push_file), \
@@ -383,12 +385,11 @@ class TestMemoryModeFrameworkIsolation:
                     framework="openclaw",
                     model=None,
                     data_dir=tmp_path,
+                    extra_config={"agent_controller_port": 6972},
                     memory_mode="framework",
                 )
                 result = await deploy_agent(req)
                 assert result["success"] is True
-        finally:
-            sys.modules.pop("taosmd", None)
 
         agents_md_entries = [
             (dst, content) for dst, content in pushed

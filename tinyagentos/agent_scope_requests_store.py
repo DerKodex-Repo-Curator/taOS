@@ -32,11 +32,13 @@ CREATE TABLE IF NOT EXISTS agent_scope_requests (
     requested_scopes  TEXT NOT NULL DEFAULT '[]',
     project_id        TEXT,
     reason            TEXT NOT NULL DEFAULT '',
+    duration_secs     INTEGER,
     status            TEXT NOT NULL DEFAULT 'pending',
     granted_scopes    TEXT,
     created_ts        TEXT NOT NULL,
     decided_ts        TEXT,
-    decided_by        TEXT
+    decided_by        TEXT,
+    deny_reason       TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_scope_requests_status ON agent_scope_requests(status);
 CREATE INDEX IF NOT EXISTS idx_scope_requests_canonical ON agent_scope_requests(canonical_id, status);
@@ -54,7 +56,7 @@ _VALID_DECISION_STATUSES = frozenset({"accepted", "refused"})
 # The insert's column list, shared by both ``create`` shapes so the capped and
 # uncapped writes can never drift apart on which columns they set.
 _CREATE_COLUMNS = (
-    "(id, canonical_id, requested_scopes, project_id, reason, status, created_ts)"
+    "(id, canonical_id, requested_scopes, project_id, reason, duration_secs, status, created_ts)"
 )
 
 # Makes the pending cap atomic with the insert: SQLite evaluates the count and
@@ -96,6 +98,26 @@ class AgentScopeRequestsStore(BaseStore):
         if self._db is not None:
             self._db.row_factory = aiosqlite.Row
 
+    async def _post_init(self) -> None:
+        if self._db is None:
+            return
+        cols = {
+            row[1]
+            for row in await (
+                await self._db.execute("PRAGMA table_info(agent_scope_requests)")
+            ).fetchall()
+        }
+        if "duration_secs" not in cols:
+            await self._db.execute(
+                "ALTER TABLE agent_scope_requests ADD COLUMN duration_secs INTEGER"
+            )
+            await self._db.commit()
+        if "deny_reason" not in cols:
+            await self._db.execute(
+                "ALTER TABLE agent_scope_requests ADD COLUMN deny_reason TEXT"
+            )
+            await self._db.commit()
+
     # ------------------------------------------------------------------
     # Write
     # ------------------------------------------------------------------
@@ -107,6 +129,7 @@ class AgentScopeRequestsStore(BaseStore):
         requested_scopes: list[str],
         project_id: Optional[str] = None,
         reason: str = "",
+        duration_secs: Optional[int] = None,
         pending_cap: Optional[int] = None,
     ) -> dict:
         """Create a new pending scope request. Returns the full record.
@@ -130,19 +153,20 @@ class AgentScopeRequestsStore(BaseStore):
             json.dumps(requested_scopes),
             project_id,
             reason,
+            duration_secs,
             now,
         )
 
         if pending_cap is None:
             cur = await self._db.execute(
                 f"INSERT INTO agent_scope_requests {_CREATE_COLUMNS} "
-                "VALUES (?, ?, ?, ?, ?, 'pending', ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)",
                 values,
             )
         else:
             cur = await self._db.execute(
                 f"INSERT INTO agent_scope_requests {_CREATE_COLUMNS} "
-                "SELECT ?, ?, ?, ?, ?, 'pending', ? WHERE " + _CAP_GUARD,
+                "SELECT ?, ?, ?, ?, ?, ?, 'pending', ? WHERE " + _CAP_GUARD,
                 (*values, canonical_id, pending_cap),
             )
         await self._db.commit()
@@ -169,8 +193,12 @@ class AgentScopeRequestsStore(BaseStore):
         *,
         granted_scopes: Optional[list[str]] = None,
         decided_by: str,
+        deny_reason: Optional[str] = None,
     ) -> Optional[dict]:
         """Atomically transition a pending request to accepted or refused.
+
+        ``deny_reason`` is the approver's free-text reason for a refusal; it is
+        stored as given (None when no reason was supplied).
 
         Returns the updated record on success, or ``None`` if the row was
         already decided (rowcount == 0 from the conditional UPDATE).
@@ -190,10 +218,11 @@ class AgentScopeRequestsStore(BaseStore):
                SET status         = ?,
                    granted_scopes = ?,
                    decided_ts     = ?,
-                   decided_by     = ?
+                   decided_by     = ?,
+                   deny_reason    = ?
              WHERE id = ? AND status = 'pending'
             """,
-            (status, granted_json, now, decided_by, request_id),
+            (status, granted_json, now, decided_by, deny_reason, request_id),
         )
         await self._db.commit()
 
