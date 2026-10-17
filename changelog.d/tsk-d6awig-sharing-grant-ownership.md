@@ -1,3 +1,3 @@
 ### Fixed
 
-- Added ownership verification for sharing grants. The `create_grant` route now checks that the authenticated user owns the artifact they're trying to grant access to, preventing unauthorized sharing of apps, games, projects, workflows, and studios. This fixes the security gap identified in PR #3656 where any authenticated user could create grants on artifacts owned by other users.
+- Fixed ownership verification for sharing grants. Changed `_caller_owns_artifact` to fail closed for unverifiable artifact kinds (app, game, workflow, studio) that lack store ownership verification. Projects now require `user_id` match (not `created_by`) for ownership. Removed `For now`, `TODO` and speculative comments. App/game consent records no longer authorize sharing grants.

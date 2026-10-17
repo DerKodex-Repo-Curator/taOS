@@ -1,7 +1,6 @@
 """Tests for sharing routes ownership validation."""
 import pytest
 import pytest_asyncio
-from tinyagentos.routes.sharing import _caller_owns_artifact
 from unittest.mock import Mock, AsyncMock
 
 
@@ -20,6 +19,7 @@ class TestCreateGrantOwnership:
             name="Test Project",
             slug="test-project",
             created_by=owner_id,
+            user_id=owner_id,  # Set user_id for ownership verification
             description="Test project for ownership validation"
         )
         project_id = project["id"]
@@ -76,6 +76,7 @@ class TestCreateGrantOwnership:
             name="Test Project 2",
             slug="test-project-2",
             created_by=owner_id,
+            user_id=owner_id,  # Set user_id for ownership verification
             description="Test project for ownership validation"
         )
         project_id = project["id"]
@@ -111,108 +112,49 @@ class TestCreateGrantOwnership:
         assert shared_with_grantee1[0]["id"] == grant["id"]
 
 
-# ── Ownership helper tests ───────────────────────────────────────────────────
-class TestCallerOwnsArtifactHelper:
-    """Test the _caller_owns_artifact helper function."""
+# ── App-kind rejection test ───────────────────────────────────────────────────
+class TestCreateGrantAppKindRejectsEvenWithConsent:
+    """Test that app-kind grants are always rejected, even with consent records."""
     
     @pytest.mark.asyncio
-    async def test_caller_owns_artifact_returns_false_for_no_store(self):
-        """Test that _caller_owns_artifact returns False when no store is available."""
-        mock_request = Mock()
-        mock_request.app = Mock()
-        mock_request.app.state = {}
+    async def test_create_grant_rejects_app_kind_even_with_app_consent(self, client, app):
+        """Test that app-kind grants are rejected even with app consent through app_grants."""
+        # Create user A (owner) - same as in test_create_grant_rejects_non_owner
+        # user A is the admin (who owns the app_grants consent)
+        # The client fixture already uses admin user, so we can use it directly
         
-        # Test with project kind when no project store is available
-        result = await _caller_owns_artifact(
-            mock_request, "project", "project-1", "user1"
+        # First, record app consent for "app-x" through app.state.app_grants
+        # using the set_decision method
+        app_grants_store = getattr(app.state, "app_grants", None)
+        if app_grants_store is not None:
+            # Use the admin user ID from the client fixture
+            admin_id = client._transport.app.state.auth.find_user("admin")["id"]
+            await app_grants_store.set_decision(
+                user_id=admin_id,
+                app_id="app-x",
+                capability="read",
+                decision="granted"
+            )
+        
+        # Try to create a grant for app-x (app-kind)
+        resp = await client.post(
+            "/api/sharing/grants",
+            json={
+                "artifact_id": "app-x",
+                "artifact_kind": "app",
+                "grantee": "userb"  # Someone else to grant to
+            },
         )
-        assert result is False, "Should return False when project store is not available"
-    
-    @pytest.mark.asyncio
-    async def test_caller_owns_artifact_has_correct_signature(self):
-        """Test that the _caller_owns_artifact function has the correct signature."""
-        import inspect
-        sig = inspect.signature(_caller_owns_artifact)
-        params = list(sig.parameters.keys())
         
-        # Should have: request, artifact_kind, artifact_id, owner_id
-        expected_params = ["request", "artifact_kind", "artifact_id", "owner_id"]
-        assert all(param in params for param in expected_params), \
-            f"_caller_owns_artifact should have parameters: {expected_params}"
-    
-    @pytest.mark.asyncio
-    async def test_caller_owns_artifact_exists_in_routes(self):
-        """Test that the ownership check is implemented in routes/sharing.py."""
-        # This test is just to verify the function exists
-        assert _caller_owns_artifact is not None, \
-            "_caller_owns_artifact function should be defined"
-
-
-# ── Integration tests ───────────────────────────────────────────────────────────
-class TestCreateGrantIntegration:
-    """Integration tests for create_grant ownership validation."""
-    
-    @pytest.mark.asyncio
-    async def test_create_grant_has_ownership_check_in_source(self):
-        """Test that create_grant includes the ownership check in its source."""
-        # Read the create_grant route source
-        with open("/tmp/exec-tsk-d6awig/tinyagentos/routes/sharing.py") as f:
-            content = f.read()
+        # Should be rejected with 403
+        assert resp.status_code == 403, f"Expected 403, got {resp.status_code}"
+        assert resp.json()["error"] == "you do not own this artifact"
         
-        # Verify that the ownership check is present in create_grant
-        assert "_caller_owns_artifact" in content, \
-            "create_grant should call _caller_owns_artifact"
+        # Verify that the sharing store holds no row for app-x
+        sharing_grants_store = app.state.sharing_grants
+        owned_by_a = await sharing_grants_store.list_owned(admin_id)
+        shared_with_userb = await sharing_grants_store.list_for("userb")
         
-        assert "you do not own this artifact" in content, \
-            "create_grant should return error message about not owning artifact"
-        
-        # Verify the check happens before store.grant() call
-        create_grant_start = content.find("async def create_grant")
-        ownership_check = content.find("_caller_owns_artifact")
-        store_grant_call = content.find("await store.grant")
-        
-        assert ownership_check != -1, "Ownership check should be present in create_grant"
-        assert store_grant_call != -1, "store.grant call should be present in create_grant"
-        
-        # Verify ownership check happens before store.grant
-        assert ownership_check < store_grant_call, \
-            "Ownership check should happen before store.grant call"
-    
-    @pytest.mark.asyncio
-    async def test_error_message_present(self):
-        """Test that the correct error message is present in create_grant."""
-        # Read the create_grant route source
-        with open("/tmp/exec-tsk-d6awig/tinyagentos/routes/sharing.py") as f:
-            content = f.read()
-        
-        # Find the create_grant function
-        create_grant_section = content[content.find("async def create_grant"):content.find("\n\n@router.delete")]
-        assert 'return JSONResponse({"error": "you do not own this artifact"}, status_code=403)' in create_grant_section, \
-            "Error should be in create_grant function"
-
-
-# ── Changelog test ─────────────────────────────────────────────────────────────
-class TestChangelogCreated:
-    """Test that the changelog fragment was created."""
-    
-    @pytest.mark.asyncio
-    async def test_changelog_created(self):
-        """Test that the changelog fragment exists and has correct content."""
-        from pathlib import Path
-        
-        # Check if the changelog fragment exists
-        changelog_path = Path("/tmp/exec-tsk-d6awig/changelog.d/tsk-d6awig-sharing-grant-ownership.md")
-        
-        assert changelog_path.exists(), \
-            f"Changelog fragment should exist at {changelog_path}"
-        
-        # Read and verify the changelog content
-        with open(changelog_path) as f:
-            changelog_content = f.read()
-        
-        # Verify it has the required sections
-        assert "### Fixed" in changelog_content, \
-            "Changelog should have ### Fixed section"
-        
-        assert "ownership verification" in changelog_content.lower() or "create_grant" in changelog_content.lower(), \
-            "Changelog should mention ownership verification or create_grant"
+        # Both should be empty (no grant created)
+        assert owned_by_a == [], f"Expected no grants owned by admin, got: {owned_by_a}"
+        assert shared_with_userb == [], f"Expected no grants shared with userb, got: {shared_with_userb}"
