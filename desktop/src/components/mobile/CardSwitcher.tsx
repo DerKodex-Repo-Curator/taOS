@@ -11,6 +11,8 @@ import {
   listShellWindows,
   type ShellWindow,
 } from "@/lib/mobile-shell";
+import { appRuntime, shellWindowRuntime, type AppRuntime } from "@/lib/app-runtime";
+import { AppTypeBadge } from "@/components/AppTypeBadge";
 
 const SHELL_POLL_MS = 2000;
 
@@ -114,6 +116,7 @@ export function CardSwitcher({ open, onClose, onSelectApp, onLaunchpad }: Props)
     key: string,
     name: string,
     IconComponent: icons.LucideIcon,
+    runtime: AppRuntime,
     onSelect: () => void,
     onDismiss: () => void,
   ) => {
@@ -169,7 +172,10 @@ export function CardSwitcher({ open, onClose, onSelectApp, onLaunchpad }: Props)
           <X size={14} className="text-white/70" />
         </button>
 
-        <IconComponent size={40} className="text-white/60 mb-3" />
+        <span className="relative mb-3 inline-flex rounded-lg">
+          <IconComponent size={40} className="text-white/60" />
+          <AppTypeBadge runtime={runtime} size="lg" />
+        </span>
         <span className="text-white/80 text-sm font-medium">{name}</span>
       </div>
     );
@@ -238,6 +244,7 @@ export function CardSwitcher({ open, onClose, onSelectApp, onLaunchpad }: Props)
               win.id,
               app?.name ?? win.appId,
               IconComponent,
+              app ? appRuntime(app) : "taos",
               () => {
                 onSelectApp(win.id);
                 onClose();
@@ -250,6 +257,7 @@ export function CardSwitcher({ open, onClose, onSelectApp, onLaunchpad }: Props)
               `shell-${w.con_id}`,
               shellWindowName(w),
               shellWindowIcon(w),
+              shellWindowRuntime(w.app_id),
               () => {
                 void focusShellWindow(w.con_id);
                 onClose();
