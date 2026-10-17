@@ -422,6 +422,67 @@ async def set_project_lead(
     return {"ok": True, "lead_member_id": body.member_id}
 
 
+async def _cloud_agent_canonical_id(request: Request, project_id: str, member_id: str) -> "str | None":
+    """Return ``member_id`` when that identity was minted by redeeming a kind
+    'cloud_agent' invite on this project, else None.
+
+    Lookup chain: the member row's member_id is the registry canonical_id; the
+    redeemed invite records the auth request it created
+    (``redeemed_request_id``), and that request's decision carries the minted
+    ``canonical_id``. The handle in ``redeemed_by`` is not used: handles are
+    re-issued once the old identity is gone, the canonical_id never is.
+    """
+    invites = getattr(request.app.state, "project_invites", None)
+    auth_store = getattr(request.app.state, "auth_requests", None)
+    if invites is None or auth_store is None:
+        return None
+    for inv in await invites.list_for_project(project_id):
+        if inv.get("kind") != "cloud_agent" or inv.get("status") != "redeemed":
+            continue
+        req_id = inv.get("redeemed_request_id")
+        if not req_id:
+            continue
+        record = await auth_store.get(req_id)
+        if record and record.get("canonical_id") == member_id:
+            return member_id
+    return None
+
+
+async def _revoke_cloud_agent_identity(
+    request: Request, project_id: str, member_id: str, user: CurrentUser
+) -> None:
+    """Revoke the registry identity of a cloud_agent member being removed (G5).
+
+    A cloud agent's identity exists only for the project it was invited to, so
+    removing it from the project also kills its token: the canonical_id lands
+    on GET /api/agents/registry/revoked and every agent-JWT route refuses it.
+    Members from kind 'agent' invites (and every other member) are untouched.
+    Uses the same store transition + governance audit as
+    DELETE /api/agents/registry/{id}.
+    """
+    canonical_id = await _cloud_agent_canonical_id(request, project_id, member_id)
+    if canonical_id is None:
+        return
+    from tinyagentos.routes.agent_registry import _audit_governance, _get_store
+
+    registry = _get_store(request)
+    record = await registry.get(canonical_id)
+    if record is None or record.get("status") == "revoked":
+        return
+    before_status = record.get("status") or "active"
+    await registry.revoke(canonical_id)
+    await _audit_governance(
+        request,
+        action="revoke",
+        canonical_id=canonical_id,
+        actor_user_id=user.user_id,
+        before_status=before_status,
+        after_status="revoked",
+        reason="cloud_agent member removed",
+        project_id=project_id,
+    )
+
+
 @router.delete("/api/projects/{project_id}/members/{member_id}")
 async def remove_member(
     project_id: str,
@@ -434,6 +495,10 @@ async def remove_member(
     if isinstance(project_or_err, JSONResponse):
         return project_or_err
     project = project_or_err
+    # Revoke BEFORE removing the row: if the revoke fails the member is still
+    # listed and the owner can retry, instead of a gone member whose token
+    # stays live.
+    await _revoke_cloud_agent_identity(request, project_id, member_id, user)
     await pstore.remove_member(project_id, member_id)
     await pstore.log_activity(project_id, user.user_id, "member.removed", {"member_id": member_id})
     members = await pstore.list_members(project_id)
