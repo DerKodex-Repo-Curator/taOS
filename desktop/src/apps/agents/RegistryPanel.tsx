@@ -138,10 +138,8 @@ export interface ScopeRequest {
   requested_scopes: string[];
   project_id: string | null;
   reason: string;
-  duration_secs: number | null;
   status: string;
   created_ts: string;
-  decided_ts: string | null;
 }
 
 /**
@@ -278,6 +276,42 @@ interface GrantRow {
   expires_at: string | null;
 }
 
+/**
+ * Pull a human-readable message out of a failed response body.
+ *
+ * FastAPI raises ``HTTPException``, which serialises as ``{"detail": ...}``,
+ * so ``detail`` is the field that carries the reason. ``detail`` is a string
+ * for a raised exception and a list of objects for a validation error. Some
+ * older handlers still answer with ``{"error": ...}``; that is kept as a
+ * fallback so neither shape degrades to a bare status code.
+ */
+function responseErrorMessage(body: unknown, status: number): string {
+  if (body && typeof body === "object") {
+    const { detail, error } = body as { detail?: unknown; error?: unknown };
+    if (typeof detail === "string" && detail) return detail;
+    if (Array.isArray(detail)) {
+      const msgs = detail
+        .map((d) =>
+          d && typeof d === "object" && typeof (d as { msg?: unknown }).msg === "string"
+            ? (d as { msg: string }).msg
+            : null,
+        )
+        .filter((m): m is string => Boolean(m));
+      if (msgs.length > 0) return msgs.join("; ");
+    }
+    if (typeof error === "string" && error) return error;
+  }
+  return `HTTP ${status}`;
+}
+
+/** A grant is live while it has no expiry, or its expiry is still ahead. */
+function isGrantExpired(expiresAt: string | null, now: number): boolean {
+  if (!expiresAt) return false;
+  const ts = Date.parse(expiresAt);
+  // An unparseable timestamp is not evidence of expiry; leave it as before.
+  return !Number.isNaN(ts) && ts <= now;
+}
+
 async function revokeAgentScopeFromProject(
   canonicalId: string,
   projectId: string,
@@ -293,8 +327,8 @@ async function revokeAgentScopeFromProject(
     },
   );
   if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error((err as { error?: string }).error ?? `HTTP ${res.status}`);
+    const err = await res.json().catch(() => null);
+    throw new Error(responseErrorMessage(err, res.status));
   }
 }
 
@@ -315,7 +349,9 @@ function ProjectGrantsPanel({
   const [grants, setGrants] = useState<GrantRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [revokingScope, setRevokingScope] = useState<string | null>(null);
+  // Keyed on "<project>:<scope>": the same scope name can be held on several
+  // projects, and a revoke in flight on one must not disable the others.
+  const [revokingKey, setRevokingKey] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -343,7 +379,10 @@ function ProjectGrantsPanel({
     void load();
   }, [load]);
 
-  // Group grants by project_id.
+  // Group grants by project_id. The admin ?canonical_id= feed is deliberately
+  // unfiltered (see list_active_grants in routes/agent_registry.py), so expired
+  // rows arrive here too and must be marked rather than shown as live.
+  const now = Date.now();
   const byProject = new Map<string | null, GrantRow[]>();
   for (const g of grants) {
     const key = g.project_id;
@@ -355,7 +394,8 @@ function ProjectGrantsPanel({
   async function handleRevoke(scope: string, projectId: string | null) {
     if (projectId === null) return; // Global grants are revoked via the registry entry revoke button.
     if (!window.confirm(`Revoke \`${scope}\` from ${agentLabel} on this project?`)) return;
-    setRevokingScope(scope);
+    const key = `${projectId}:${scope}`;
+    setRevokingKey(key);
     try {
       await revokeAgentScopeFromProject(canonicalId, projectId, scope);
       void load();
@@ -363,7 +403,7 @@ function ProjectGrantsPanel({
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Network error");
     } finally {
-      setRevokingScope(null);
+      setRevokingKey(null);
     }
   }
 
@@ -396,27 +436,41 @@ function ProjectGrantsPanel({
             {projectId ? `Project: ${projectId}` : "Global"}
           </div>
           <div className="flex flex-wrap gap-1">
-            {scopes.map((g) => (
-              <span
-                key={`${g.scope}-${projectId}`}
-                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] bg-white/5 border border-white/10"
-                title={`Granted ${g.granted_at}`}
-              >
-                <code className="font-mono">{g.scope}</code>
-                {projectId && (
-                  <button
-                    type="button"
-                    onClick={() => handleRevoke(g.scope, projectId)}
-                    disabled={revokingScope === g.scope}
-                    className="hover:text-red-400 disabled:opacity-50"
-                    aria-label={`Revoke ${g.scope} from ${agentLabel}`}
-                    title="Revoke this scope"
-                  >
-                    <XCircle size={10} />
-                  </button>
-                )}
-              </span>
-            ))}
+            {scopes.map((g) => {
+              const expired = isGrantExpired(g.expires_at, now);
+              const rowTitle = g.expires_at
+                ? `Granted ${g.granted_at} \u00b7 expires ${g.expires_at}`
+                : `Granted ${g.granted_at}`;
+              return (
+                <span
+                  key={`${projectId ?? "global"}:${g.scope}`}
+                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] bg-white/5 border border-white/10"
+                  title={rowTitle}
+                >
+                  <code className="font-mono">{g.scope}</code>
+                  {expired && (
+                    <span
+                      className="px-1 rounded-sm text-[9px] uppercase tracking-wide bg-amber-500/10 border border-amber-500/30 text-amber-300"
+                      title={`This grant expired at ${g.expires_at} and has no effect`}
+                    >
+                      expired
+                    </span>
+                  )}
+                  {projectId && !expired && (
+                    <button
+                      type="button"
+                      onClick={() => handleRevoke(g.scope, projectId)}
+                      disabled={revokingKey === `${projectId}:${g.scope}`}
+                      className="hover:text-red-400 disabled:opacity-50"
+                      aria-label={`Revoke ${g.scope} from ${agentLabel}`}
+                      title="Revoke this scope"
+                    >
+                      <XCircle size={10} />
+                    </button>
+                  )}
+                </span>
+              );
+            })}
           </div>
         </div>
       ))}
