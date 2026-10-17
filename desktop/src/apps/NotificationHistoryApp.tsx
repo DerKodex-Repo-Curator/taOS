@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, useRef, useCallback, useId } from "react";
 import { Search, History } from "lucide-react";
 import type { Notification } from "@/stores/notification-store";
+import { useNotificationStore } from "@/stores/notification-store";
 import {
   fetchNotificationHistory,
   fetchNotificationHistorySources,
@@ -55,7 +56,7 @@ function dayStartSeconds(value: string): number | undefined {
 }
 
 /** Resolve the date range filter to since/until unix seconds. */
-function rangeBounds(
+export function rangeBounds(
   range: RangeKey,
   customFrom: string,
   customTo: string,
@@ -73,9 +74,17 @@ function rangeBounds(
       return { since: nowSec - 30 * 86400 };
     case "custom": {
       const since = dayStartSeconds(customFrom);
-      const toStart = dayStartSeconds(customTo);
-      // The "to" date is inclusive: run to the last second of that day.
-      const until = toStart != null ? toStart + 86400 - 1 : undefined;
+      // Parse customTo as y,m,d (same as dayStartSeconds) and set 
+      // `until = Math.floor(new Date(y, m - 1, d + 1).getTime() / 1000) - 1` 
+      // (next local midnight minus one second).
+      // Keep `undefined` when customTo is empty or invalid.
+      let until: number | undefined;
+      if (customTo) {
+        const [y, m, d] = customTo.split("-").map(Number);
+        if (y && m && d) {
+          until = Math.floor(new Date(y, m - 1, d + 1).getTime() / 1000) - 1;
+        }
+      }
       return { since, until };
     }
     default:
@@ -146,6 +155,7 @@ export function NotificationHistoryApp({ windowId: _windowId }: { windowId: stri
   const [customTo, setCustomTo] = useState("");
   const [stateFilter, setStateFilter] = useState<StateKey>("all");
   const [availableSources, setAvailableSources] = useState<string[]>([]);
+  const notifications = useNotificationStore((s) => s.notifications);
 
   const [items, setItems] = useState<Notification[]>([]);
   const [nextBefore, setNextBefore] = useState<string | null>(null);
@@ -176,6 +186,51 @@ export function NotificationHistoryApp({ windowId: _windowId }: { windowId: stri
     const { since, until } = rangeBounds(range, customFrom, customTo);
     return { q, sources, levels, since, until, state: stateFilter, limit: PAGE_SIZE };
   }, [q, sources, levels, range, customFrom, customTo, stateFilter]);
+
+  const localArchived = useMemo(() => {
+    const { since, until } = rangeBounds(range, customFrom, customTo);
+    return notifications
+      .filter(n => n.archived && !n.id.startsWith("srv-"))
+      .filter(n => {
+        // Apply text search
+        if (q.trim() !== "") {
+          const search = q.toLowerCase();
+          const title = n.title.toLowerCase();
+          const body = n.body.toLowerCase();
+          if (!title.includes(search) && !body.includes(search)) {
+            return false;
+          }
+        }
+        // Apply sources filter
+        if (sources.length > 0 && !sources.includes(n.source)) {
+          return false;
+        }
+        // Apply levels filter
+        if (levels.length > 0 && !levels.includes(n.level)) {
+          return false;
+        }
+        // Apply range bounds
+        const tsSec = n.timestamp / 1000;
+        if (since !== undefined && tsSec < since) {
+          return false;
+        }
+        if (until !== undefined && tsSec > until) {
+          return false;
+        }
+        // Apply stateFilter
+        switch (stateFilter) {
+          case "all":
+            return true;
+          case "unread":
+            return !n.read;
+          case "archived":
+            // We already filtered by archived === true, so this is always true.
+            // But to be consistent with the server's meaning, we return true.
+            return true;
+        }
+      })
+      .sort((a, b) => b.timestamp - a.timestamp); // newest first
+  }, [notifications, q, sources, levels, range, customFrom, customTo, stateFilter]);
 
   // First page: refetch from the top whenever any filter changes.
   useEffect(() => {
@@ -394,65 +449,75 @@ export function NotificationHistoryApp({ windowId: _windowId }: { windowId: stri
             ))}
           </div>
         </fieldset>
-      </div>
+       </div>
 
-      <div className="flex-1 overflow-y-auto">
-        {loading ? (
-          <div className="px-4 py-16 text-center">
-            <p className="text-xs text-shell-text-tertiary">Loading history...</p>
-          </div>
-        ) : error && items.length === 0 ? (
-          <div className="px-4 py-16 text-center" role="alert">
-            <p className="text-xs text-red-400 mb-2">{error}</p>
-            <button
-              type="button"
-              onClick={() => setReloadKey((k) => k + 1)}
-              className="text-xs text-accent hover:underline"
-            >
-              Retry
-            </button>
-          </div>
-        ) : items.length === 0 ? (
-          <div className="px-4 py-16 text-center">
-            <History size={24} className="mx-auto text-shell-text-tertiary mb-2" aria-hidden="true" />
-            <p className="text-xs text-shell-text-tertiary">
-              {filtersActive ? "No matching notifications" : "No notifications yet"}
-            </p>
-          </div>
-        ) : (
-          <>
-            <ul aria-label="Notification history results">
-              {items.map((n) => (
-                <HistoryRow key={n.id} n={n} expanded={expanded.has(n.id)} onToggle={toggleExpanded} />
-              ))}
-            </ul>
-            {error && (
-              <div className="px-4 py-2 text-center" role="alert">
-                <span className="text-[11px] text-red-400 mr-2">{error}</span>
-                <button
-                  type="button"
-                  onClick={() => { setError(null); loadMore(); }}
-                  className="text-[11px] text-accent hover:underline"
-                >
-                  Retry
-                </button>
-              </div>
-            )}
-            {nextBefore && !error && (
-              <div className="px-4 py-3 text-center">
-                <button
-                  type="button"
-                  onClick={loadMore}
-                  disabled={loadingMore}
-                  className="text-xs text-accent hover:underline disabled:opacity-50"
-                >
-                  {loadingMore ? "Loading..." : "Load more"}
-                </button>
-              </div>
-            )}
-          </>
-        )}
-      </div>
+       <div className="flex-1 overflow-y-auto">
+         {localArchived.length > 0 && (
+           <>
+             <h3 className="text-[11px] font-medium text-shell-text-secondary mx-4 my-2">On this device</h3>
+             <ul aria-label="Notifications on this device">
+               {localArchived.map((n) => (
+                 <HistoryRow key={n.id} n={n} expanded={expanded.has(n.id)} onToggle={toggleExpanded} />
+               ))}
+             </ul>
+           </>
+         )}
+         {loading ? (
+           <div className="px-4 py-16 text-center">
+             <p className="text-xs text-shell-text-tertiary">Loading history...</p>
+           </div>
+         ) : error && items.length === 0 ? (
+           <div className="px-4 py-16 text-center" role="alert">
+             <p className="text-xs text-red-400 mb-2">{error}</p>
+             <button
+               type="button"
+               onClick={() => setReloadKey((k) => k + 1)}
+               className="text-xs text-accent hover:underline"
+             >
+               Retry
+             </button>
+           </div>
+         ) : items.length === 0 ? (
+           <div className="px-4 py-16 text-center">
+             <History size={24} className="mx-auto text-shell-text-tertiary mb-2" aria-hidden="true" />
+             <p className="text-xs text-shell-text-tertiary">
+               {filtersActive ? "No matching notifications" : "No notifications yet"}
+             </p>
+           </div>
+         ) : (
+           <>
+             <ul aria-label="Notification history results">
+               {items.map((n) => (
+                 <HistoryRow key={n.id} n={n} expanded={expanded.has(n.id)} onToggle={toggleExpanded} />
+               ))}
+             </ul>
+             {error && (
+               <div className="px-4 py-2 text-center" role="alert">
+                 <span className="text-[11px] text-red-400 mr-2">{error}</span>
+                 <button
+                   type="button"
+                   onClick={() => { setError(null); loadMore(); }}
+                   className="text-[11px] text-accent hover:underline"
+                 >
+                   Retry
+                 </button>
+               </div>
+             )}
+             {nextBefore && !error && (
+               <div className="px-4 py-3 text-center">
+                 <button
+                   type="button"
+                   onClick={loadMore}
+                   disabled={loadingMore}
+                   className="text-xs text-accent hover:underline disabled:opacity-50"
+                 >
+                   {loadingMore ? "Loading..." : "Load more"}
+                 </button>
+               </div>
+             )}
+           </>
+         )}
+       </div>
     </div>
   );
 }

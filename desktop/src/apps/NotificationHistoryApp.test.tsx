@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent, act } from "@testing-library/react";
+import { render, screen, fireEvent, act, within } from "@testing-library/react";
 import { NotificationHistoryApp } from "./NotificationHistoryApp";
+import { rangeBounds } from "./NotificationHistoryApp";
+import { useNotificationStore } from "@/stores/notification-store";
 
 type Row = {
   id: number;
@@ -74,6 +76,11 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  // Reset the notification store
+  useNotificationStore.setState({
+    notifications: [],
+    centreOpen: false,
+  });
 });
 
 describe("NotificationHistoryApp", () => {
@@ -168,16 +175,47 @@ describe("NotificationHistoryApp", () => {
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     await settle();
     expect(historyCalls().length).toBe(before + 1);
-  });
+   });
 
-  it("expands a row to its full message on click", async () => {
-    historyPages = [{ items: [row(1, { message: "A long message body" })], next_before: null }];
-    render(<NotificationHistoryApp windowId="w1" />);
-    await settle();
+   it("expands a row to its full message on click", async () => {
+     historyPages = [{ items: [row(1, { message: "A long message body" })], next_before: null }];
+     render(<NotificationHistoryApp windowId="w1" />);
+     await settle();
 
-    const btn = screen.getByRole("button", { name: /Note 1/ });
-    expect(btn).toHaveAttribute("aria-expanded", "false");
-    fireEvent.click(btn);
-    expect(btn).toHaveAttribute("aria-expanded", "true");
-  });
-});
+     const btn = screen.getByRole("button", { name: /Note 1/ });
+     expect(btn).toHaveAttribute("aria-expanded", "false");
+     fireEvent.click(btn);
+     expect(btn).toHaveAttribute("aria-expanded", "true");
+   });
+
+   it("shows locally dismissed notifications under On this device", async () => {
+     // Seed the store with a client notification
+     useNotificationStore.getState().addNotification({
+       source: "system",
+       title: "Local thing",
+       body: "b",
+       level: "info",
+     });
+     const state = useNotificationStore.getState();
+     const id = state.notifications[0].id;
+     // Dismiss it
+     state.dismiss(id);
+
+     // Mock server history to be empty
+     historyPages = [{ items: [], next_before: null }];
+
+     render(<NotificationHistoryApp windowId="w1" />);
+     await settle();
+
+     // Expect to see the local archived section and the notification
+     const deviceList = screen.getByRole("list", { name: /notifications on this device/i });
+     expect(deviceList).toBeInTheDocument();
+     expect(deviceList).toHaveTextContent("Local thing");
+   });
+
+   it("custom range ends at the next local midnight minus one second", async () => {
+     expect(rangeBounds("custom", "", "2025-03-09").until).toBe(
+       Math.floor(new Date(2025, 2, 10).getTime() / 1000) - 1
+     );
+   });
+ });
