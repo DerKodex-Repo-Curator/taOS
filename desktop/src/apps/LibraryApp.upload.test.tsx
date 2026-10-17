@@ -45,7 +45,7 @@ const MOCK_SUBSCRIPTIONS = [
 ];
 
 function createFetchMock(overrides: Record<string, Promise<Response>> = {}) {
-  return vi.fn((input: RequestInfo | URL) => {
+  return vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
 
     for (const [prefix, response] of Object.entries(overrides)) {
@@ -126,21 +126,44 @@ function createFetchMock(overrides: Record<string, Promise<Response>> = {}) {
       } as Response);
     }
 
+    if (url === "/api/library/ingest") {
+      return Promise.resolve({
+        ok: true,
+        status: 202,
+        headers: new Map([["content-type", "application/json"]]),
+        json: () => Promise.resolve({ item_id: "lib-1", status: "pending" }),
+      } as Response);
+    }
+
     if (url === "/api/import/upload") {
       return Promise.resolve({
         ok: true,
         status: 200,
         headers: new Map([["content-type", "application/json"]]),
-        json: () => Promise.resolve({ id: "new-item-id", status: "processing" }),
+        json: () => Promise.resolve({ status: "uploaded", filename: "srv_notes.txt", size: 5, path: "/x" }),
       } as Response);
     }
 
     if (url === "/api/import/embed") {
+      // Mirrors import_data.py embed_files: agent_name (str) + non-empty files.
+      let body: { agent_name?: unknown; files?: unknown } = {};
+      try {
+        body = JSON.parse(String(init?.body));
+      } catch {
+        body = {};
+      }
+      const valid =
+        typeof body.agent_name === "string" &&
+        Array.isArray(body.files) &&
+        body.files.length > 0;
+      const payload = valid ? { status: "ok" } : { error: "agent_name is required" };
       return Promise.resolve({
-        ok: true,
-        status: 200,
+        ok: valid,
+        status: valid ? 200 : 400,
+        statusText: valid ? "OK" : "Bad Request",
         headers: new Map([["content-type", "application/json"]]),
-        json: () => Promise.resolve({ status: "ok" }),
+        json: () => Promise.resolve(payload),
+        text: () => Promise.resolve(JSON.stringify(payload)),
       } as Response);
     }
 
@@ -159,6 +182,10 @@ function parseFormData(formData: FormData): Record<string, string | File> {
     result[key] = value;
   }
   return result;
+}
+
+function callsTo(mock: ReturnType<typeof createFetchMock>, path: string) {
+  return mock.mock.calls.filter((call) => String(call[0]) === path);
 }
 
 describe("LibraryApp local file upload (tsk-6gtsvj)", () => {
@@ -183,44 +210,41 @@ describe("LibraryApp local file upload (tsk-6gtsvj)", () => {
     expect(dropZone).toBeInTheDocument();
   });
 
-  it("uploads a file via drag-and-drop and calls /api/import/upload with the file and selected collection", async () => {
+  it("uploads a file via drag-and-drop and posts it to /api/library/ingest", async () => {
     render(<LibraryApp windowId="test-win" />);
 
     await waitFor(() => screen.getByText("YouTube Video"), { timeout: 5000 });
 
     const dropZone = screen.getByLabelText(/drop files here or click to browse/i);
-
     const testFile = new File(["test content"], "test.txt", { type: "text/plain" });
 
-    const dataTransfer = {
-      files: [testFile],
-      types: ["Files"],
-    };
-
     await act(async () => {
-      fireEvent.drop(dropZone, { dataTransfer });
+      fireEvent.drop(dropZone, { dataTransfer: { files: [testFile], types: ["Files"] } });
     });
 
     await waitFor(() => {
-      const uploadCalls = fetchMock.mock.calls.filter((call) =>
-        String(call[0]).includes("/api/import/upload")
-      );
-      expect(uploadCalls.length).toBeGreaterThan(0);
+      const ingestCalls = callsTo(fetchMock, "/api/library/ingest");
+      expect(ingestCalls.length).toBe(1);
+      expect(ingestCalls[0][1]?.method).toBe("POST");
 
-      const uploadCall = uploadCalls[0];
-      const body = uploadCall[1]?.body as FormData;
+      const body = ingestCalls[0][1]?.body as FormData;
       expect(body).toBeInstanceOf(FormData);
-
       const formData = parseFormData(body);
       expect(formData["file"]).toBeInstanceOf(File);
       expect((formData["file"] as File).name).toBe("test.txt");
-      expect((formData["file"] as File).type).toBe("text/plain");
-      // No category selected by default, so category should not be present
+      expect(formData["title"]).toBe("test.txt");
       expect(formData["category"]).toBeUndefined();
     });
+
+    // The queue is refreshed after the upload.
+    await waitFor(() => {
+      expect(callsTo(fetchMock, "/api/library/jobs").length).toBeGreaterThan(0);
+    });
+    // The drop zone no longer uses the import upload route.
+    expect(callsTo(fetchMock, "/api/import/upload")).toHaveLength(0);
   });
 
-  it("uploads a file via file picker (click) and calls /api/import/upload with the file and selected collection", async () => {
+  it("uploads a file via file picker (click) and posts it to /api/library/ingest", async () => {
     render(<LibraryApp windowId="test-win" />);
 
     await waitFor(() => screen.getByText("YouTube Video"), { timeout: 5000 });
@@ -232,166 +256,125 @@ describe("LibraryApp local file upload (tsk-6gtsvj)", () => {
     const testFile = new File(["test content"], "test.txt", { type: "text/plain" });
 
     await act(async () => {
-      fireEvent.change(fileInput, {
-        target: { files: [testFile] },
-      });
+      fireEvent.change(fileInput, { target: { files: [testFile] } });
     });
 
     await waitFor(() => {
-      const uploadCalls = fetchMock.mock.calls.filter((call) =>
-        String(call[0]).includes("/api/import/upload")
-      );
-      expect(uploadCalls.length).toBeGreaterThan(0);
-
-      const uploadCall = uploadCalls[0];
-      const body = uploadCall[1]?.body as FormData;
-      expect(body).toBeInstanceOf(FormData);
-
-      const formData = parseFormData(body);
+      const ingestCalls = callsTo(fetchMock, "/api/library/ingest");
+      expect(ingestCalls.length).toBe(1);
+      const formData = parseFormData(ingestCalls[0][1]?.body as FormData);
       expect(formData["file"]).toBeInstanceOf(File);
       expect((formData["file"] as File).name).toBe("test.txt");
-      expect((formData["file"] as File).type).toBe("text/plain");
-      expect(formData["category"]).toBeUndefined();
+      expect(formData["title"]).toBe("test.txt");
     });
+    expect(callsTo(fetchMock, "/api/import/upload")).toHaveLength(0);
   });
 
-  it("uploads a file with selected category filter and includes category in FormData", async () => {
-    render(<LibraryApp windowId="test-win" />);
-
-    await waitFor(() => screen.getByText("YouTube Video"), { timeout: 5000 });
-
-    // Select a category filter - use the category button in the Categories section (has count badge)
-    const categoryButton = screen.getByRole("button", { name: /video\d/i });
-    fireEvent.click(categoryButton);
-
-    await waitFor(() => {
-      expect(categoryButton).toHaveAttribute("aria-pressed", "true");
-    });
-
-    const dropZone = screen.getByLabelText(/drop files here or click to browse/i);
-    const testFile = new File(["test content"], "test.txt", { type: "text/plain" });
-
-    const dataTransfer = {
-      files: [testFile],
-      types: ["Files"],
-    };
-
-    await act(async () => {
-      fireEvent.drop(dropZone, { dataTransfer });
-    });
-
-    await waitFor(() => {
-      const uploadCalls = fetchMock.mock.calls.filter((call) =>
-        String(call[0]).includes("/api/import/upload")
-      );
-      expect(uploadCalls.length).toBeGreaterThan(0);
-
-      const uploadCall = uploadCalls[0];
-      const body = uploadCall[1]?.body as FormData;
-      const formData = parseFormData(body);
-      expect(formData["file"]).toBeInstanceOf(File);
-      expect(formData["category"]).toBe("video");
-    });
-  });
-
-  it("supports keyboard activation (Enter/Space) on drop zone", async () => {
+  it("supports keyboard activation (Enter/Space) on the Browse button", async () => {
     render(<LibraryApp windowId="test-win" />);
 
     await waitFor(() => screen.getByText("YouTube Video"), { timeout: 5000 });
 
     const dropZone = screen.getByLabelText(/drop files here or click to browse/i);
-    expect(dropZone).toHaveAttribute("tabIndex", "0");
-    expect(dropZone).toHaveAttribute("role", "button");
+    // The drop zone is a plain region; it must not be a button containing a button.
+    expect(dropZone).not.toHaveAttribute("role", "button");
+    expect(dropZone).toHaveAttribute("role", "region");
 
+    const browse = within(dropZone).getByRole("button", { name: "Browse" });
     const fileInput = dropZone.querySelector('input[type="file"]') as HTMLInputElement;
     expect(fileInput).toBeInTheDocument();
 
     const clickSpy = vi.spyOn(fileInput, "click");
 
-    // Simulate Enter key
     await act(async () => {
-      fireEvent.keyDown(dropZone, { key: "Enter" });
+      fireEvent.keyDown(browse, { key: "Enter" });
     });
+    expect(clickSpy).toHaveBeenCalledTimes(1);
 
-    // Verify the file input click was triggered (jsdom may fire keydown/keypress both)
-    expect(clickSpy).toHaveBeenCalled();
+    await act(async () => {
+      fireEvent.keyDown(browse, { key: " " });
+    });
+    expect(clickSpy).toHaveBeenCalledTimes(2);
     clickSpy.mockRestore();
 
-    // Simulate Space key
-    const clickSpy2 = vi.spyOn(fileInput, "click");
+    // Keyboard pick still goes through the ingest route.
+    const testFile = new File(["test content"], "kbd.txt", { type: "text/plain" });
     await act(async () => {
-      fireEvent.keyDown(dropZone, { key: " " });
+      fireEvent.change(fileInput, { target: { files: [testFile] } });
     });
-    expect(clickSpy2).toHaveBeenCalled();
-    clickSpy2.mockRestore();
+    await waitFor(() => {
+      expect(callsTo(fetchMock, "/api/library/ingest")).toHaveLength(1);
+    });
+    expect(callsTo(fetchMock, "/api/import/upload")).toHaveLength(0);
   });
 
-  it("shows embed-now action on uploaded item with agent picker", async () => {
-    const mockUploadedItem = {
-      ...MOCK_ITEMS[0],
-      id: "uploaded-file-1",
-      title: "uploaded-doc.txt",
-      source_type: "file",
-      source_url: "",
-      categories: ["default"],
-    };
-
-    const fetchMockWithUploaded = createFetchMock({
-      "/api/knowledge/items/uploaded-file-1": Promise.resolve({
-        ok: true,
-        status: 200,
-        headers: new Map([["content-type", "application/json"]]),
-        json: () => Promise.resolve(mockUploadedItem),
-      } as Response),
-      "/api/knowledge/items": Promise.resolve({
-        ok: true,
-        status: 200,
-        headers: new Map([["content-type", "application/json"]]),
-        json: () => Promise.resolve({ items: [mockUploadedItem], count: 1 }),
-      } as Response),
-    });
-
-    vi.stubGlobal("fetch", fetchMockWithUploaded as unknown as typeof fetch);
-
+  async function openEmbedPickerAndChooseFile() {
     render(<LibraryApp windowId="test-win" />);
 
-    await waitFor(() => screen.getByText("uploaded-doc.txt"), { timeout: 5000 });
+    await waitFor(() => screen.getByText("YouTube Video"), { timeout: 5000 });
 
-    // Verify the "Open uploaded-doc.txt" button exists
-    const openButton = screen.getByRole("button", { name: /Open uploaded-doc.txt/i });
-    expect(openButton).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /embed files into an agent/i }));
 
-    // Click on the item to open detail view
-    fireEvent.click(openButton);
+    const modal = await screen.findByRole("dialog", { name: /embed file into agent/i });
+    const picker = modal.querySelector('input[type="file"]') as HTMLInputElement;
+    expect(picker).toBeInTheDocument();
 
-    await waitFor(() => screen.getByText("Content 1"), { timeout: 5000 });
+    const notes = new File(["hello"], "notes.txt", { type: "text/plain" });
+    await act(async () => {
+      fireEvent.change(picker, { target: { files: [notes] } });
+    });
+    await waitFor(() => expect(within(modal).getByText("notes.txt")).toBeInTheDocument());
 
-    // Should have an "Embed now" button or similar action
-    const embedButton = screen.getByRole("button", { name: /embed this file into an agent now/i });
-    expect(embedButton).toBeInTheDocument();
+    // Agents are plain buttons, not listbox options.
+    const agent = within(modal).getByRole("button", { name: "Agent 1" });
+    expect(agent).not.toHaveAttribute("role", "option");
+    expect(agent).not.toHaveAttribute("aria-selected");
+    return { modal, agent };
+  }
 
-    // Click embed now - should open agent picker
-    fireEvent.click(embedButton);
+  it("embeds picked files into an agent with the server filename and agent_name", async () => {
+    const { agent } = await openEmbedPickerAndChooseFile();
 
-    // Agent picker should show available agents (scope to modal)
+    fireEvent.click(agent);
+
     await waitFor(() => {
-      const modal = screen.getByRole("dialog", { name: /embed file into agent/i });
-      expect(within(modal).getByText("Agent 1")).toBeInTheDocument();
-      expect(within(modal).getByText("Agent 2")).toBeInTheDocument();
+      const embedCalls = callsTo(fetchMock, "/api/import/embed");
+      expect(embedCalls).toHaveLength(1);
+      expect(JSON.parse(embedCalls[0][1]?.body as string)).toEqual({
+        agent_name: "Agent 1",
+        files: ["srv_notes.txt"],
+      });
     });
 
-    // Select an agent (within modal)
-    const modal = screen.getByRole("dialog", { name: /embed file into agent/i });
-    fireEvent.click(within(modal).getByText("Agent 1"));
+    const uploadCalls = callsTo(fetchMock, "/api/import/upload");
+    expect(uploadCalls).toHaveLength(1);
+    const formData = parseFormData(uploadCalls[0][1]?.body as FormData);
+    expect((formData["file"] as File).name).toBe("notes.txt");
 
-    // Should call /api/import/embed with the chosen agent
     await waitFor(() => {
-      const embedCalls = fetchMockWithUploaded.mock.calls.filter((call) =>
-        String(call[0]).includes("/api/import/embed")
-      );
-      expect(embedCalls.length).toBeGreaterThan(0);
-      const body = JSON.parse(embedCalls[0][1]?.body as string);
-      expect(body.agent).toBe("Agent 1");
+      expect(screen.getByText(/embedded 1 file into agent 1/i)).toBeInTheDocument();
     });
+  });
+
+  it("shows an error to the user when /api/import/embed returns 400", async () => {
+    const failing = createFetchMock({
+      "/api/import/embed": Promise.resolve({
+        ok: false,
+        status: 400,
+        statusText: "Bad Request",
+        headers: new Map([["content-type", "application/json"]]),
+        json: () => Promise.resolve({ error: "agent_name is required" }),
+        text: () => Promise.resolve('{"error":"agent_name is required"}'),
+      } as Response),
+    });
+    vi.stubGlobal("fetch", failing as unknown as typeof fetch);
+
+    const { modal, agent } = await openEmbedPickerAndChooseFile();
+    fireEvent.click(agent);
+
+    const alert = await within(modal).findByRole("alert");
+    expect(alert).toHaveTextContent(/embed failed/i);
+    expect(alert).toHaveTextContent(/400/);
+    expect(alert).toHaveTextContent(/agent_name is required/);
   });
 });
