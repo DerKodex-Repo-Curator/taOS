@@ -70,7 +70,7 @@ def _write_curl(path: Path, help_output: str) -> Path:
         exit 0
         """
     )
-    curl.write_text(content)
+    curl.write_text(content.lstrip("\n"))
     curl.chmod(0o755)
     return path
 

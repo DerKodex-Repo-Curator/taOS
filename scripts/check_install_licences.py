@@ -177,7 +177,11 @@ def undeclared_pip_installs(installer_path: Path | None = None) -> list[str]:
             # Skip flags first, including value options
             if _PIP_FLAG.match(token):
                 if token in _PIP_VALUE_OPTIONS:
-                    i += 2  # skip the option and its value
+                    nxt = tokens[i + 1] if i + 1 < len(tokens) else ""
+                    if nxt and not nxt.startswith("-"):
+                        i += 2
+                    else:
+                        i += 1
                     continue
                 i += 1
                 continue
