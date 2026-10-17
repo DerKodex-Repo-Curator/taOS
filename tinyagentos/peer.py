@@ -33,14 +33,27 @@ from tinyagentos.hub.identity import (
 # Signed envelopes
 # ---------------------------------------------------------------------------
 
+def local_contact_id() -> str:
+    """This node's canonical peer identity: ``hub:<signing fingerprint>``.
+
+    The same form ``routes/hub.py`` keys contact rows on at friend-accept, so
+    the ``from`` and ``to`` of every envelope compare directly against
+    ``contacts.contact_id``.  Reads the hub identity keystore (minting it on
+    first use); no hub_authors row is involved.
+    """
+    return f"hub:{signing_fingerprint()}"
+
+
 def build_envelope(
     *,
-    from_username: str,
-    to_username: str,
+    to_contact_id: str,
     kind: str,
     body: dict | None = None,
 ) -> dict:
     """Build a signed envelope from this node to a remote contact.
+
+    ``to_contact_id`` is the recipient's canonical ``hub:<fingerprint>`` id
+    (the contacts row key); ``from`` is this node's :func:`local_contact_id`.
 
     ``kind`` is one of: ``handshake``, ``collab_invite``, ``delegation_request``,
     ``chat``, ``ack``.  ``body`` is the payload dict.
@@ -52,8 +65,8 @@ def build_envelope(
     Envelope shape::
 
         {
-            "from": "hub:jaylfc",
-            "to":   "hub:hogne",
+            "from": "hub:<sender signing fingerprint>",
+            "to":   "hub:<recipient signing fingerprint>",
             "kind": "collab_invite",
             "body": { ... },
             "ts":   1710000000.0,
@@ -66,8 +79,8 @@ def build_envelope(
     nonce = secrets.token_hex(16)
     ts = time.time()
     envelope: dict = {
-        "from": f"hub:{from_username}",
-        "to": f"hub:{to_username}",
+        "from": local_contact_id(),
+        "to": to_contact_id,
         "kind": kind,
         "ts": ts,
         "nonce": nonce,
@@ -169,19 +182,25 @@ def mint_peer_token(sub: str) -> tuple[str, str]:
 # ---------------------------------------------------------------------------
 # Handshake delivery
 # ---------------------------------------------------------------------------
-# deliver_handshake POSTs to peer-supplied URLs.  Each target URL is passed
-# through the shared SSRF guard (tinyagentos.routes.desktop_browser.ssrf)
-# before the POST, so a peer endpoint can never reach loopback, link-local,
-# multicast, CGNAT (100.64/10, where our own A2A bus lives), or other private
-# ranges.  Endpoints may arrive as bare strings (send_handshake output) or as
-# normalized dicts {"kind", "url", "priority"} (from _try_handshake in
+# Every POST to a peer goes through the shared SSRF guard
+# (tinyagentos.routes.desktop_browser.ssrf): the URL is validated first and
+# the default client pins the connection to the checked address.  Loopback,
+# link-local, multicast, reserved and unspecified are always refused.
+# Private and CGNAT (100.64/10, where our own A2A bus lives) addresses are
+# refused too, EXCEPT an exact (host, port) recorded on the contact's own
+# peer link (``known_endpoints``, built by :func:`known_hostports`).  That set
+# is only ever built from the local contacts store, never from an envelope or
+# a request.  Endpoints may arrive as bare strings (send_handshake output) or
+# as normalized dicts {"kind", "url", "priority"} (from _try_handshake in
 # routes/hub.py, persisted via establish_peer_link); _endpoint_url handles
-# both.  The first caller is A2's friend-accept flow in routes/hub.py.
+# both.
+
+HANDSHAKE_PATH = "/api/peer/handshake"
 
 
 def send_handshake(
     *,
-    to_username: str,
+    to_contact_id: str,
     inbound_token: str,
     endpoints: list[str],
     signing_pubkey: str,
@@ -198,11 +217,6 @@ def send_handshake(
     for delivering it to the peer's endpoints.
     """
     local_ident = public_identity()
-    from_username = resolve_local_identity_id()
-    if from_username is None:
-        raise RuntimeError("cannot send handshake: no local hub identity")
-    # Strip "hub:" prefix to get bare username
-    bare_from = from_username.split(":", 1)[1] if from_username.startswith("hub:") else from_username
 
     body = {
         "inbound_token": inbound_token,
@@ -211,8 +225,7 @@ def send_handshake(
         "encryption_pubkey": encryption_pubkey or local_ident.get("encryption_pubkey", ""),
     }
     return build_envelope(
-        from_username=bare_from,
-        to_username=to_username,
+        to_contact_id=to_contact_id,
         kind="handshake",
         body=body,
     )
@@ -233,65 +246,189 @@ def _endpoint_url(ep: str | dict) -> str | None:
     return None
 
 
-async def deliver_handshake(
-    envelope: dict,
-    peer_endpoints: list[str | dict],
-    *,
-    http_client=None,
-) -> bool:
-    """Deliver a handshake envelope to the peer's endpoints (best-effort).
+def known_hostports(endpoints: list[str | dict] | None) -> frozenset[tuple[str, int]]:
+    """Exact ``(host, port)`` pairs of a peer link's recorded endpoints.
 
-    Handles both bare-string endpoints and the normalized dict form
-    ``{"kind", "url", "priority"}`` used by peer links (see
-    ``_try_handshake`` in routes/hub.py and ``establish_peer_link``).
-
-    Each target URL is validated against the shared SSRF guard before the
-    POST so a peer-supplied pointer can never reach loopback, link-local,
-    multicast, CGNAT (100.64/10, where our own A2A bus lives), or other
-    private ranges.
-
-    Tries each endpoint in order; stops on the first 2xx response.  Returns
-    True if at least one endpoint accepted the envelope, False otherwise.
-
-    ``http_client`` should be an ``httpx.AsyncClient``.  If None, a temporary
-    client is created and torn down.
+    Pass ``contacts_store.get_peer_link(contact_id)["endpoints"]``; never
+    endpoints taken from an envelope or a request.
     """
-    import httpx
+    from urllib.parse import urlparse
 
-    from tinyagentos.routes.desktop_browser.ssrf import (
-        SsrfBlockedError,
-        guarded_async_client,
-        validate_url_or_raise,
-    )
+    from tinyagentos.routes.desktop_browser.ssrf import url_hostport
+
+    pairs = set()
+    for ep in endpoints or []:
+        url = _endpoint_url(ep)
+        if not isinstance(url, str) or not url:
+            continue
+        hp = url_hostport(urlparse(url))
+        if hp is not None:
+            pairs.add(hp)
+    return frozenset(pairs)
+
+
+async def _post_to_endpoints(
+    peer_endpoints: list[str | dict],
+    path: str,
+    payload: dict,
+    *,
+    known_endpoints: frozenset[tuple[str, int]] = frozenset(),
+    http_client=None,
+    headers: dict | None = None,
+    timeout: float = 15.0,
+):
+    """POST ``payload`` to ``<endpoint><path>`` for each endpoint in order.
+
+    Returns the first 2xx ``httpx.Response``, or None.  A URL the SSRF guard
+    refuses is skipped without connecting.
+    """
+    from tinyagentos.routes.desktop_browser import ssrf
 
     own_client = http_client is None
     if own_client:
-        # Guarded: the endpoint URL is peer-supplied, so the address that
-        # passed the blocklist must be the address the POST connects to.
-        http_client = guarded_async_client(timeout=15.0)
+        # Guarded: the address that passed the blocklist must be the address
+        # the POST connects to.
+        http_client = ssrf.guarded_async_client(
+            allow_hostports=known_endpoints, timeout=timeout,
+        )
 
     try:
         for ep in peer_endpoints:
             ep_url = _endpoint_url(ep)
             if not ep_url:
                 continue
-            url = ep_url.rstrip("/") + "/api/peer/inbox"
+            url = ep_url.rstrip("/") + path
             try:
-                validate_url_or_raise(url)
-            except SsrfBlockedError:
+                ssrf.validate_url_or_raise(url, allow_hostports=known_endpoints)
+            except ssrf.SsrfBlockedError:
                 continue
             try:
-                resp = await http_client.post(
-                    url, json={"envelope": envelope},
-                )
+                resp = await http_client.post(url, json=payload, headers=headers)
                 if 200 <= resp.status_code < 300:
-                    return True
+                    return resp
             except Exception:
                 continue
-        return False
+        return None
     finally:
         if own_client:
             await http_client.aclose()
+
+
+async def deliver_handshake(
+    envelope: dict,
+    peer_endpoints: list[str | dict],
+    *,
+    http_client=None,
+    known_endpoints: frozenset[tuple[str, int]] = frozenset(),
+) -> bool:
+    """Deliver a handshake envelope to the peer's ``POST /api/peer/handshake``.
+
+    Tries each endpoint in order; stops on the first 2xx response.  Returns
+    True if at least one endpoint accepted the envelope, False otherwise.
+
+    ``known_endpoints`` comes from :func:`known_hostports` over the contact's
+    stored peer link; only those exact ``(host, port)`` pairs may be private
+    or CGNAT.  ``http_client`` should be an ``httpx.AsyncClient``.  If None,
+    a guarded client is created and torn down.
+    """
+    resp = await _post_to_endpoints(
+        peer_endpoints, HANDSHAKE_PATH, {"envelope": envelope},
+        known_endpoints=known_endpoints, http_client=http_client,
+    )
+    return resp is not None
+
+
+async def exchange_handshake(
+    envelope: dict,
+    peer_endpoints: list[str | dict],
+    *,
+    http_client=None,
+    known_endpoints: frozenset[tuple[str, int]] = frozenset(),
+) -> dict | None:
+    """Deliver a handshake like :func:`deliver_handshake`; return the reply envelope.
+
+    The reply is unverified: pass it to :func:`verify_handshake_reply`.
+    Returns None when nothing accepted the handshake or the body has no
+    envelope.
+    """
+    resp = await _post_to_endpoints(
+        peer_endpoints, HANDSHAKE_PATH, {"envelope": envelope},
+        known_endpoints=known_endpoints, http_client=http_client,
+    )
+    if resp is None:
+        return None
+    try:
+        reply = resp.json().get("envelope")
+    except (ValueError, AttributeError):
+        return None
+    return reply if isinstance(reply, dict) else None
+
+
+def verify_handshake_reply(
+    reply: dict | None,
+    *,
+    handshake: dict,
+    sender_ed25519_pub: str,
+) -> str | None:
+    """Return the token the peer minted for us, or None if the reply fails.
+
+    The reply must be a fresh ``handshake_reply`` from the contact we sent
+    ``handshake`` to, addressed to us, answering that handshake's nonce, and
+    signed by the key we pinned for them.
+    """
+    if not isinstance(reply, dict):
+        return None
+    ok, _err = verify_envelope(reply, expected_kind="handshake_reply")
+    if not ok:
+        return None
+    if reply.get("from") != handshake.get("to"):
+        return None
+    if reply.get("to") != local_contact_id():
+        return None
+    if not verify_envelope_signature(reply, sender_ed25519_pub):
+        return None
+    body = reply.get("body")
+    if not isinstance(body, dict) or body.get("reply_to") != handshake.get("nonce"):
+        return None
+    token = body.get("inbound_token")
+    if not isinstance(token, str) or not token:
+        return None
+    return token
+
+
+async def deliver_to_peer(
+    contacts_store,
+    contact_id: str,
+    path: str,
+    envelope: dict,
+    *,
+    http_client=None,
+) -> bool:
+    """POST ``envelope`` to a contact's ``path`` with our outbound bearer.
+
+    Endpoints, the outbound token, and the known-endpoint SSRF allowance all
+    come from the contact's stored peer link.  Endpoints are tried in
+    priority order.  Returns True on the first 2xx.
+    """
+    link = await contacts_store.get_peer_link(contact_id)
+    if link is None or not link.get("endpoints"):
+        return False
+    token = link.get("outbound_token") or ""
+    if not token:
+        # Handshake never completed: the peer would refuse an empty bearer.
+        return False
+    endpoints = sorted(
+        link["endpoints"],
+        key=lambda e: e.get("priority", 99) if isinstance(e, dict) else 99,
+    )
+    resp = await _post_to_endpoints(
+        endpoints, path, {"envelope": envelope},
+        known_endpoints=known_hostports(link["endpoints"]),
+        http_client=http_client,
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=10.0,
+    )
+    return resp is not None
 
 
 # ---------------------------------------------------------------------------
@@ -305,7 +442,10 @@ def _canonical_json(obj: dict) -> bytes:
 
 
 def resolve_local_identity_id(data_dir: str | Path | None = None) -> str | None:
-    """Return this node's local hub identity ID (``"hub:<username>"``), or None.
+    """Return this node's hub DIRECTORY identity (``"hub:<username>"``), or None.
+
+    Username form: only the hub/relay recipient binding (routes/account_proxy.py)
+    uses it.  Peer envelopes use :func:`local_contact_id` instead.
 
     Resolved from the hub identity keystore and the hub_authors table in
     hub.db.  Returns None if the node has not registered a hub identity

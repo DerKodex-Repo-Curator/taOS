@@ -716,19 +716,26 @@ different project, and 403 when the agent lacks the `canvas_read` scope or the
   and the trash restore/purge/empty routes. NOTE: the files routes key on the
   project SLUG in the path, not the id.
 - **decisions_write**: `POST /api/decisions` (raise a human-in-the-loop
-  decision), `POST /api/decisions/{id}/answer/agent` (mirror an answer),
+  decision; a `metadata.kind` naming a server-owned gate, `execution_gate`,
+  `delegation_gate`, `device_pairing`, `app_grant`, `project_create` or
+  `collab_delegation_gate`, is refused with 400 for every caller, since only
+  the server's internal raisers may open a gate, tsk-mul5pa), `POST /api/decisions/{id}/answer/agent` (mirror an answer),
   `GET /api/decisions/{id}/agent` (read its own), `GET /api/decisions/agent`
   (list its own), `POST /api/decisions/{id}/withdraw` (withdraw its own pending
   decision as moot: body `{"reason": "..."}`, reason required (400), allowed
   only from `pending` (409 otherwise), the asking agent only (any other caller
   gets 404); the record stays in history as `status=withdrawn` with the reason,
   and the withdraw is audit-logged). The same withdraw route also serves the
-  session path for the decision's owner or an admin. The GENERAL routes stay
-  session-only -- `GET /api/decisions`,
-  `GET /api/decisions/{id}`, `GET /api/decisions/{id}/history` and
-  `POST /api/decisions/{id}/answer`. The agent set is a separate, narrower
-  allowlist distinguished by the `/agent` suffix, except withdraw, which is one
-  route serving both callers (`_is_agent_decisions_path` in
+  session path for the decision's owner or an admin. `GET /api/decisions`
+  also accepts the registry JWT (tsk-f75p3z): with a registry JWT it returns ONLY
+  the decisions this agent raised in its granted projects (the same set as
+  `GET /api/decisions/agent`, honouring the `status`, `project_id` and `limit`
+  query params), never the user's inbox; with a session it is unchanged. The
+  other GENERAL routes stay session-only -- `GET /api/decisions/{id}`,
+  `GET /api/decisions/{id}/history` and `POST /api/decisions/{id}/answer`.
+  The agent set is a separate, narrower allowlist distinguished by the
+  `/agent` suffix, except withdraw and the list, which are one route serving
+  both callers (`_is_agent_decisions_path` in
   `tinyagentos/auth_middleware.py`).
 - **observatory_control**: the Observatory fleet dials.
   `GET|POST /api/observatory/pause`, `GET|POST /api/observatory/throttle`,
@@ -1104,8 +1111,12 @@ that SAME canonical_id instead:
   or replace the bound. The scope request's own `duration_secs` (if present) is
   also wired through as `expires_at`. An expired existing grant is replaced by a
   fresh bounded re-approval, or kept as-is if the re-approval is unbounded.
-- `POST /api/agents/registry/{canonical_id}/scope-requests/{req_id}/deny`:
-  owner/admin only.
+- `POST /api/agents/registry/{canonical_id}/scope-requests/{req_id}/deny`
+  `{reason?}`: owner/admin only. The optional `reason` (max 2000 chars) is
+  recorded on the row as `deny_reason` so the agent can read back WHY it was
+  refused; a bare deny with no body (the bell / toast) stays valid and records
+  `deny_reason: null`. The Decisions app always sends one: its Deny is two-step
+  and Confirm stays disabled until a reason is typed.
 - `GET /api/agents/registry/{canonical_id}/scope-requests` (optional
   `?status=pending|accepted|refused`): list an agent's scope requests, oldest
   first. Authorized EXACTLY like create -- the agent's own registry bearer
@@ -1120,7 +1131,7 @@ that SAME canonical_id instead:
 
 Both reads return the same PUBLIC shape -- `{id, canonical_id,
 requested_scopes, project_id, reason, status, granted_scopes, created_ts,
-decided_ts}` -- projected explicitly from the stored row rather than returned
+decided_ts, deny_reason}` -- projected explicitly from the stored row rather than returned
 raw. `decided_by` (the owner/admin user_id that approved or denied) is
 deliberately withheld: an agent's own registry token may read these routes, and
 no other agent-reachable route discloses its owner's internal user id. The
@@ -1163,7 +1174,19 @@ should poll the list route rather than re-requesting a scope they cannot see.
 The desktop Agents app renders each active agent's pending requests inline
 (`PendingScopeRequests` in `desktop/src/apps/agents/RegistryPanel.tsx`, reusing
 the same `ConsentActions` Allow/Deny control the notification renders), so
-approval no longer depends on an ephemeral toast.
+approval no longer depends on an ephemeral toast. The Decisions app lists every
+pending scope request the caller may decide (`GET /api/agents/scope-requests?status=pending`)
+in a "Scope requests" section beside access requests (tsk-6ghcrv): each row
+shows the canonical_id, requested scopes, the requested project (labelled
+"Requested project", or "No project requested" for a null `project_id`),
+reason and age. The binding that will actually apply is shown separately: a
+grant with no project scope is sent without a `project_id` and lands OS-wide
+whatever the agent asked for, so the row says "Grants OS-wide (all projects)"
+before Allow. The list loads on its own, so a failed decisions load never hides
+it. The deny reason box is capped at the route's 2000 characters. Every requested scope has a tick box, so Approve can grant a strict
+SUBSET (the unticked scopes are simply not sent in `granted_scopes`); Allow is
+disabled with nothing ticked. Deny requires a reason. Either decision drops the
+row from the pending list on the refetch.
 
 All owner-gated registry routes are existence-hiding (#2106): an authenticated
 caller who is not the owner gets the same 404 body as a nonexistent
@@ -1263,6 +1286,14 @@ request gets a 429 carrying `Retry-After` in whole seconds:
   `Accept: application/json` gets the redeem contract (`{method, path, fields}`);
   a browser gets a minimal HTML page. No PIN check here; it only advertises the
   contract.
+
+The invite create body accepts a `kind` field (default `agent`; valid values
+`agent` or `cloud_agent`; any other value returns 400 with the valid list).
+For `cloud_agent` the controller must have `TAOS_CONTROLLER_RELAY_URL` set to a
+safe public `https://` URL or minting fails with "set up taOSgo first".
+`cloud_agent` defaults `check_interval_secs` to 900 (the `agent` kind keeps its
+existing default of 1800). The redeemed `cloud_agent` bundle carries ONLY relay
+endpoints (LAN and mesh are stripped).
 
 The redeem response carries a **connection bundle** (design section 4 plus the
 Approved-build addendum). It contains NO token or secret (the token still
@@ -1618,6 +1649,23 @@ A Civitai URL added to the Library takes the same path: `detect_kind` tags it
 `url:civitai` and `CivitaiProcessor` runs the identical ingest job, linking the
 resulting `lora_id` back onto the library item.
 
+## Cast discovery status (`GET /api/cast/discovery/status`, session-only)
+
+Route module `tinyagentos/routes/cast_discovery.py`. Session cookie only; no
+registry scope reaches it. It reports whether the opt-in mDNS reflector
+(`mdns_reflector.enabled` in config.yaml, off by default) is actually bridging
+cast discovery across a container boundary.
+
+- `{"state": "ok"}` -- running, bridging at least two interfaces, traffic seen.
+- `{"state": "unavailable", "reason": ...}` -- enabled but not bridging.
+  `reason` is `not_running`, `single_interface`, `bind_failed`, `send_failed`,
+  `no_traffic`, or `start_failed` (enabled in config but the reflector raised
+  during startup; `error` carries the message).
+- `{"state": "disabled"}` -- not enabled; it makes no claim either way.
+
+The cast device list must treat `unavailable` as "discovery is not working",
+never as an empty network.
+
 ## What `GET /api/decisions/agent` returns (grant scoping)
 
 Route module `tinyagentos/routes/decisions.py`, scope `decisions_write`. Lists
@@ -1628,23 +1676,22 @@ Which of its own decisions come back depends on the shape of the grant:
 
 | grant | returns |
 |---|---|
-| global (null-project) | **null-project decisions ONLY** |
+| global (null-project) only | **null-project decisions ONLY** |
 | exactly one project | that project's decisions, filtered in the store query |
-| two or more projects | fetched by agent, then filtered in Python |
+| two or more scopes (global counts as one) | the union, one store query per scope, merged newest first |
 
 **A global grant does NOT mean "see everything".** It means null-project
 decisions, matching the rule `_resolve_decision_actor` already applies when the
 agent POSTS a decision: an agent with a global grant raises null-project
-decisions, so that is what it reads back. Anything relying on a global grant
-returning every project's decisions is relying on the older, wider behaviour.
+decisions, so that is what it reads back. An agent that also holds a grant on
+project B can post there too, so it also reads back its project-B decisions;
+projects it holds no grant for stay hidden. The registry-JWT path of
+`GET /api/decisions` returns the same set.
 
-**The `limit` interacts with scoping and only two of the three paths are safe.**
-The global and single-project paths push the project filter into the store query,
-so the 500 limit applies AFTER scoping (issue #2194). The **two-or-more-project
-path still fetches up to 500 rows for the agent and filters afterwards in
-Python**, so an agent holding grants on several projects and carrying more than
-500 decisions in total can still lose allowed-project rows to the limit. Same
-shape as the original bug, narrower blast radius.
+**The `limit` applies AFTER scoping (issue #2194).** Each granted scope
+(global, or one project) is its own store query with the project filter inside
+it, and the merged result is capped at 500 newest first, so decisions in
+ungranted projects can never crowd allowed ones out of the list.
 
 ## MCP tool calls (`POST /api/mcp/call`)
 
@@ -1680,6 +1727,122 @@ server that writes more than a pipe buffer to stdout used to block in `write()`
 forever while `get_status()` still reported it `running` — for a
 stdio-transport server stdout is the JSON-RPC channel, so that was the primary
 data path, not an edge case.
+
+## MCP marketplace (`/api/mcp/marketplace/*`)
+
+Route module `tinyagentos/routes/mcp_marketplace.py`, backed by
+`tinyagentos/mcp/marketplace.py`. This is the *browse and install* half of the
+MCP surface: the bundled plugins under `app-catalog/plugins/` are installed
+through the app Store, while a marketplace entry is a community MCP server
+described by a manifest in the curated registry.
+
+| route | gate | what it does |
+|---|---|---|
+| `GET /api/mcp/marketplace/servers?q=&category=` | any signed-in user | browse/search the registry; each entry carries `installed` + `running` |
+| `GET /api/mcp/marketplace/categories` | any signed-in user | the union of entry categories |
+| `GET /api/mcp/marketplace/servers/{id}` | any signed-in user | one entry plus the stored config when installed |
+| `POST /api/mcp/marketplace/servers/{id}/install` | `require_admin` | resolve → run the install command → register the server |
+| `DELETE /api/mcp/marketplace/servers/{id}` | `require_admin` | uninstall (drops attachments and `mcp:<id>:` secrets) |
+| `POST /api/mcp/marketplace/reload` | `require_admin` | re-read the registry directory |
+
+Install answers `404` for an unknown entry, `409` when it is already installed,
+`409` when the id belongs to a server another installer wrote (see the namespace
+note below), and `502` when the install command fails — **a failed install leaves
+the store untouched**, so a half-installed entry never shows up as launchable.
+Uninstalling is `404` for something that was never installed, and `409` for a
+row the marketplace did not write.
+
+### Id namespace: the marketplace shares one table with the Store
+
+`mcp_servers` is a single namespace that every installer on the platform writes
+to. The app Store registers a bundled `app-catalog/plugins/mcp-*` manifest under
+its **app id** with an empty config and relies on `MCPSupervisor._resolve_cmd`'s
+app-catalog fallback; the marketplace registers a curated entry under its
+**manifest id** with an explicit `cmd`. Two installers writing the same id means
+each destroys the other's row:
+
+- a Store install of that app replaces the marketplace's config (`source:
+  marketplace`, `cmd`, `permissions`) with `{}` and drops the version — with the
+  real catalog registered, `_resolve_cmd` then returns `None` and `start()`
+  returns `False`, so the server the marketplace provisioned quietly stops being
+  launchable;
+- a marketplace `DELETE` removes the shared row while the Store's
+  `installed.json` still reports the app installed — the two surfaces disagree
+  about state.
+
+Curated ids therefore live in their own namespace, **`mcp-community-`**
+(`MARKETPLACE_ID_PREFIX`): `mcp-community-filesystem`, `mcp-community-fetch`,
+`mcp-community-git`, `mcp-community-memory`, `mcp-community-time`,
+`mcp-community-github`. `tests/test_mcp_marketplace.py` scans every
+`app-catalog/**/manifest.yaml` and fails if a curated id ever equals an
+app-catalog id again, so the disjointness is enforced rather than remembered.
+
+The runtime does not rely on the convention alone. Rows the marketplace writes
+carry `config["source"] == "marketplace"` (`MARKETPLACE_SOURCE`), which tells a
+marketplace-owned row from one another installer wrote. `install` refuses to
+overwrite a row it did not write (409 with an explicit "already in use by a
+server installed outside the marketplace" message, instead of the bare "already
+installed", which would read as *this* entry being present), and `uninstall`
+refuses to delete one (409) so it cannot desync the Store's own bookkeeping.
+Browse and detail expose both flags: `installed` is true whenever the id is
+occupied in `mcp_servers` (the Store may own it), and
+`installed_by_marketplace` is true only when the stored config is the one this
+marketplace wrote.
+
+A manifest (`app-catalog/mcp-registry/<id>.yaml`, one per entry) declares
+`id`, `name`, `description`, `version`, `author`, `categories`, `transport`,
+the install command (`install.command`), the launch command (`run.command` +
+`run.args`) and the **permissions the server states it needs**. The permission
+set is validated at load time against a closed vocabulary — an unknown
+permission, a wildcard (`*`/`all`), or a `:write` without the matching `:read`
+is rejected, and the entry is skipped and reported in `reload`'s `errors`
+rather than listed. `validate_permissions` in `tinyagentos/mcp/marketplace.py`
+is the single source of that rule. `transport` is `stdio` only
+(`SUPPORTED_TRANSPORTS`): the built-in supervisor launches a subprocess, so
+accepting an `sse`/`http` entry would register a server with no resolvable
+launch command that the start route can only `500` on.
+
+`{workspace}` (`WORKSPACE_TOKEN`) in a manifest's `run.command`/`run.args`/env
+keys or values is replaced by the installer with `<data_dir>/mcp-servers/<id>`,
+which the install flow creates once the install command has succeeded — a
+failed or timed-out install leaves no directory behind. It exists so a curated
+entry can point a server at a private empty directory instead of an existing
+one: the filesystem and git servers both need a directory that exists before
+they start, and pointing them at the taOS data directory would expose the
+secrets store and the SQLite databases. A manifest that needs a workspace and
+has no workspace root configured is refused (500) before the install command
+runs, and a manifest that puts the placeholder in `install.command` is refused
+(400) — the placeholder is expanded from the run configuration only, so an
+install command carrying it would execute the literal token. The install
+command itself runs under a bounded timeout (`INSTALL_TIMEOUT_S`, 600 s): on
+expiry the child is killed and reaped and the install reports 502 with the
+store untouched — an ASGI server has a graceful-shutdown timeout, not a request
+timeout, so an unbounded runner could hold an admin's request open forever.
+
+The curated registry is read from `app-catalog/mcp-registry/` —
+`default_registry_dir()` derives it from the checkout, the same way `create_app`
+derives the app catalog from `PROJECT_DIR`, and the supported install is a
+source checkout with an editable install (`scripts/install-server.sh` runs
+`pip install -e ".[proxy]"`). A registry directory that is not there is
+recorded in the registry's `errors` and logged, so
+`POST /api/mcp/marketplace/reload` reports *why* the marketplace is empty
+instead of showing a curated registry with zero entries; a readable but empty
+directory is not an error. `MCPRegistry` takes the directory as a constructor
+argument, so a mounted or downloaded copy of a hosted registry is a one-line
+change.
+
+**Declared permissions are requirements, not grants.** Install records them in
+the server config (`config["permissions"]`); who may call which tool is still
+decided by the attachment model (`MCPServerStore` attachments +
+`check_permission`). Installing a server therefore never widens an agent's
+access on its own.
+
+`MCPMarketplace.install` writes the config `MCPSupervisor._resolve_cmd` already
+reads (`cmd`), so an installed server is launchable by the existing loader with
+no extra wiring; a manifest's non-secret `run.env` is merged over the
+controller's environment at spawn time (never replacing it — replacing `PATH`
+would break an `npx`/`uvx` launch command). Credentials belong in the secrets
+store, not in a registry manifest.
 
 ## Config save and restore (`/api/config`, session-only)
 
@@ -1852,8 +2015,49 @@ snapshot, not a lock.
   capabilities and loaded models, and those are not reachable capacity, so an
   offline node's retained capabilities land in `installed_nodes` instead.
   Capability strings are reported as the workers and catalog manifests write
-  them (`chat`, `image-generation`, `llm-chat`, ...); the endpoint does not
-  invent a normalised vocabulary.
+   them (`chat`, `image-generation`, `llm-chat`, ...); the endpoint does not
+   invent a normalised vocabulary.
+
+## Cluster resource inventory (`GET /api/cluster/resources`, admin-only)
+
+Route module `tinyagentos/routes/cluster_resources.py`. **Admin session only**:
+the auth middleware answers `401` to a cookie-less caller (this path is not in the
+exempt list) and `_require_admin` answers `403` to a signed-in non-admin, so no
+agent scope reaches it. Read-only by construction --- it owns no state, adds no
+methods to `ClusterManager`, and aggregates per request from existing getters
+(`config.agents`, `cluster_manager.get_workers()`, `installed_apps.list_installed()`
+plus `list_containers`), so it cannot drift from the routing/scheduling source of
+truth.
+
+- `resources` -- one flat row per resource taOS runs across the whole mesh:
+  - `agent`: one row per agent record in config, joined to its incus container
+    (`container_name` or the `taos-agent-<name>` fallback) via
+    `list_containers(prefix="taos-agent-")`. Worker is always `"local"` (the
+    agent record's `host` is a container IP, not a worker name). `project` is
+    the agent record's `project` field when one exists, else null. `state` is
+    mapped from the incus status (`running`/`stopped`/`frozen`, else `unknown`).
+  - `backend`: one row per backend declared by each registered worker
+    (`worker.backends`, walked exactly as `cluster_map` does). `state` is
+    `running` when the backend status is in `RUNNING_BACKEND_STATUS` (`ok`,
+    `running`, `healthy`) *and* the worker's heartbeat health is `online` or
+    `stale`; otherwise `stopped`. A backend on an offline worker reports
+    `stopped`.
+  - `app`: one row per installed app (`installed_apps.list_installed()`),
+    mirroring `GET /api/apps/installed`: `state` is `running` when the app has
+    a runtime host + port, else `unknown`. If `installed_apps` is None, no app
+    rows and no error.
+  - `controller`: exactly one row (`controller:local`, always `running`).
+- `errors` -- names of sources that failed during aggregation (e.g.
+  `containers` when `list_containers` raises). A failing source does not 500
+  the response: its rows fall back to safe defaults (`agent` rows get
+  `state` `unknown`) and the rest of the inventory still ships.
+- `generated_at` -- Unix timestamp of the snapshot.
+
+Each row has exactly: `id` (`<type>:<name>` except backend ids are
+`backend:<worker>:<name>`), `type`, `name`, `worker`, `project` (string or
+null), `state`, `cpu_cores` (int or null), `memory_mb` (int or null), and
+`warnings` (list of short strings, may be empty). Rows are sorted by
+`(type, worker, name)`.
 
 ## Controller generation echo (split-brain protection)
 
@@ -1923,6 +2127,38 @@ A `single_select` or `multi_select` decision can be answered off-menu by sending
   options. `source` is still derived server-side and cannot be spoofed, so the
   audit trail still distinguishes `in_app` from `mirrored_from_chat`, but the
   VALUE is no longer bounded by the option list.
+
+## Screencast cast tokens (`/cast/media/`, token-only)
+
+A TV (Chromecast, Apple TV) fetches cast media ITSELF and carries no taOS
+session, cookie or bearer. So casting never hands a TV an ordinary taOS URL:
+
+- `POST /api/cast/sessions` (session-only) `{view: "canvas:<project_id>",
+  device_id, mode: "still", device_address?}` mints a cast for ONE view the
+  caller owns (non-owner: existence-hiding 404) and returns the token once,
+  plus `media_url`, `expires_at`, `ttl_seconds` and `refresh_interval_seconds`
+  (how stale a still frame can be; show it in the UI). `mode: "live"` answers
+  501 until the HLS encoder lands.
+- `POST /api/cast/sessions/{cast_id}/refresh` extends an ACTIVE cast by one
+  TTL; an expired cast answers 409 (or 404 once pruned), an ended cast
+  answers 404, and neither can be revived.
+- `DELETE /api/cast/sessions/{cast_id}` ends the cast; the token dies at once.
+- `GET|HEAD /cast/media/{kind}/{view_id}/still.png?token=...` is what the TV
+  fetches. AuthMiddleware exempts exactly the `/cast/media/` prefix for
+  GET/HEAD; the route is gated solely by the cast token: unknown, expired or
+  revoked -> 401, a token for another view -> 403, a token bound to a
+  `device_address` fetched from another address -> 403.
+  The address check reads the TCP peer, so it holds only on a direct LAN
+  listener: behind a local reverse proxy (tailscale serve, the gateway
+  listener) the peer is the proxy and a bound cast always answers 403.
+
+The token (`tcast_...`) is a separate random secret stored only as a SHA-256
+hash, in memory (a restart revokes every cast). It is never a session token or
+a registry JWT and is accepted by nothing but the cast media route. It rides
+in `?token=` because a TV cannot send headers, so the uvicorn access log
+redacts it to `tcast_[redacted]`. The paired-device registry's unpair MUST call
+`app.state.cast_tokens.revoke_for_device(device_id)`; cast-end revocation alone
+does not cover a device unpaired mid-cast.
 
 ## Identity rules
 
@@ -2276,3 +2512,56 @@ The agent's own A2A identity token (`.taos_agent_token`) is a2a-only
 (scope `a2a_send` + `a2a_receive`) and covers none of the above endpoints.
 Leaving PicoClaw, or any controller start into opencode, revokes the old
 credential and mints a fresh one.
+
+## Peer handshake (friend-accept)
+
+The private/CGNAT endpoint allowance comes from endpoints the OTHER side supplies (directory response or handshake body), so a friend can make this node POST to a private host:port on the fixed handshake/inbox paths; loopback, link-local and metadata addresses stay blocked.
+
+## taOS Agent action gate (pending, confirm, execute)
+
+Every tier-B operation the taOS Agent wants to perform (an external write such
+as a GitHub PR or issue, or an irreversible local change) goes through a
+two-step gate in `tinyagentos/routes/taos_agent_actions.py`. The gate is a
+server-side mechanism, so it binds every harness the same way.
+
+- `POST /api/taos-agent/actions` `{kind, summary, payload}` stores the action
+  and answers `{action_id, kind, summary, state, confirmed_by}`. Under the
+  default `ask` policy the state is `pending` and a `taos_agent.action_pending`
+  event (`{action_id, kind, summary}`) goes to the owner's `user:<id>` event
+  channel for the chat confirm card. Under `auto` the state is `confirmed`,
+  `confirmed_by` is `auto`, and no card is shown.
+- `GET /api/taos-agent/actions?state=pending` lists the caller's own actions
+  (`{actions: [...]}`, oldest first, optional `state` filter), so a confirm
+  card lost to a restart or a failed event publish can be shown again.
+- `POST /api/taos-agent/actions/{id}/confirm` and `/decline` answer a pending
+  action (`confirmed_by` becomes `user` or `declined`). A second answer is a
+  409. Both are refused with 403 for anything but a signed-in browser session:
+  an agent credential can ask, never answer for the user.
+- `POST /api/taos-agent/actions/{id}/execute` runs the executor registered for
+  the action's kind (`app.state.taos_agent_action_executors[kind]`) exactly
+  once. The row reads `executing` while the executor runs and `executed` only
+  after it returns. Anything not `confirmed` is a 409 (pending, declined,
+  executing, executed or failed); a kind with no executor is a 422. A raising
+  executor marks the action `failed` (502) and it is never re-run. A row left
+  `executing` by a stopped process is never replayed either, because the
+  external write may already have happened: it stays visible in the list.
+- `PUT /api/taos-agent/actions/policy` `{kind, policy: ask|auto}` (browser
+  session only) sets `action_policy[kind]` in the signed-in user's own
+  `(<user id>, "taos_agent")` preference blob, so one account's `auto` never
+  skips the card for another account. Every kind defaults to `ask`.
+
+Another user's action answers 404. Rows live in `taos_agent_actions.db`.
+
+Every request and outcome is audited as a trace row of kind `external_write`
+on the `taos-agent` trace (`GET /api/agents/taos-agent/trace?kind=external_write`):
+`{target, action, user_id, repo, url, diff_sha256, confirmed_by, action_id,
+latency_ms, state}`. Creating an action writes the request row (`state`
+`pending` with `confirmed_by` `pending`, or `confirmed` with `auto`); execute
+writes one `executed` or `failed` row and decline one `declined` row. The
+reversible local fixes use kind `local_fix` `{tool, target, undo, user_id}`.
+The trace store refuses either kind with a field missing, and
+`POST /api/trace` refuses both (400): only taOS writes its own audit trail.
+`GET /api/agents/{name}/trace` returns a row of either kind only to the
+signed-in user whose `user_id` it carries, so one account never reads
+another's audit trail. The rows show in the Agents app trace list (kind filter) and in the taOS
+agent's Activity tab.

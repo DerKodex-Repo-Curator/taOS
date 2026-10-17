@@ -1,5 +1,14 @@
 import type { ComponentType } from "react";
 
+/**
+ * The kind of engine an app runs on. Powers the app-type indicator badge: a
+ * taOS app needs no badge (it IS the platform), while a Linux/Android/web/
+ * container/agent app gets a small corner chip so the user sees at a glance
+ * what is running under the hood. Built-in manifests omit this and default to
+ * "taos" (see appRuntime).
+ */
+export type AppRuntime = "taos" | "linux" | "android" | "web" | "container" | "agent";
+
 export interface AppManifest {
   id: string;
   name: string;
@@ -41,6 +50,12 @@ export interface AppManifest {
   /** If true, the app is a file handler: hidden from the launcher but still
    *  openable by id (agents open them directly). */
   handler?: boolean;
+  /**
+   * The engine the app runs on. Omit to default to "taos" (built-in apps are
+   * taOS-native); set explicitly for userspace apps (see appRuntime) and for
+   * any third-party manifest that wants a non-taos badge.
+   */
+  runtime?: AppRuntime;
 }
 
 export const apps: AppManifest[] = [
@@ -64,7 +79,6 @@ export const apps: AppManifest[] = [
   { id: "channels", name: "Channels", icon: "radio", category: "platform", component: () => import("@/apps/ChannelsApp").then((m) => ({ default: m.ChannelsApp })), defaultSize: { w: 800, h: 500 }, minSize: { w: 450, h: 350 }, singleton: true, pinned: false, launchpadOrder: 9, tier: 3 },
   { id: "secrets", name: "Secrets", icon: "key-round", category: "platform", component: () => import("@/apps/SecretsApp").then((m) => ({ default: m.SecretsApp })), defaultSize: { w: 750, h: 500 }, minSize: { w: 400, h: 300 }, singleton: true, pinned: false, launchpadOrder: 10, tier: 2, group: "System" },
   { id: "tasks", name: "Routines", icon: "calendar-clock", category: "platform", component: () => import("@/apps/TasksApp").then((m) => ({ default: m.TasksApp })), defaultSize: { w: 800, h: 500 }, minSize: { w: 450, h: 350 }, singleton: true, pinned: false, launchpadOrder: 11 },
-  { id: "import", name: "Import", icon: "upload", category: "platform", component: () => import("@/apps/ImportApp").then((m) => ({ default: m.ImportApp })), defaultSize: { w: 700, h: 450 }, minSize: { w: 400, h: 300 }, singleton: true, pinned: false, launchpadOrder: 12 },
   { id: "images", name: "Images", icon: "image", category: "platform", component: () => import("@/apps/ImagesApp").then((m) => ({ default: m.ImagesApp })), defaultSize: { w: 900, h: 600 }, minSize: { w: 500, h: 400 }, singleton: true, pinned: false, launchpadOrder: 13 },
   { id: "coding-studio", name: "Coding Studio", icon: "code-2", category: "studio", component: () => import("@/apps/CodingStudioApp").then((m) => ({ default: m.CodingStudioApp })), defaultSize: { w: 1080, h: 760 }, minSize: { w: 680, h: 540 }, singleton: true, pinned: false, launchpadOrder: 13.25, optional: true, tier: 5 },
   { id: "design-studio", name: "Design Studio", icon: "palette", category: "studio", component: () => import("@/apps/DesignStudioApp").then((m) => ({ default: m.DesignStudioApp })), defaultSize: { w: 1080, h: 720 }, minSize: { w: 680, h: 520 }, singleton: true, pinned: false, launchpadOrder: 13.26, optional: true, tier: 5 },

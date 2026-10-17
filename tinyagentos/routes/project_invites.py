@@ -34,7 +34,8 @@ router = APIRouter()
 class MintInviteIn(BaseModel):
     scopes: list[str] = Field(default_factory=list)
     approval_mode: str = Field(default="auto", pattern="^(auto|manual)$")
-    check_interval_secs: int = Field(default=1800, ge=60)
+    check_interval_secs: int | None = Field(default=None, ge=60)
+    kind: str = Field(default="agent")
     # How long the invite stays redeemable. Omitted means the store default
     # (1 hour). Capped at 24 hours: the PIN is the security gate, expiry is
     # hygiene, but an indefinitely live link is not a state we want.
@@ -448,6 +449,12 @@ async def build_connection_bundle(
 
     controller = await _build_controller_dict(request)
 
+    # cloud_agent kind: bundle must contain ONLY relay endpoints.
+    if invite_record.get("kind") == "cloud_agent":
+        controller["endpoints"] = [
+            ep for ep in controller["endpoints"] if ep.get("kind") == "relay"
+        ]
+
     # --- agent_handle scoped api surface ----------------------------------
     apis: dict = {}
     scopeset = set(granted_scopes)
@@ -825,13 +832,42 @@ async def mint_invite(
             {"error": f"unknown scopes: {unknown}; valid: {sorted(VALID_SCOPES)}"},
             status_code=400,
         )
+
+    kind = payload.kind
+    if kind not in ("agent", "cloud_agent"):
+        return JSONResponse(
+            {"error": f"invalid invite kind: {kind}; valid: ['agent', 'cloud_agent']"},
+            status_code=400,
+        )
+
+    check_interval_secs = payload.check_interval_secs
+
+    # cloud_agent kind: require a safe HTTPS relay URL and default check_interval_secs to 900.
+    if kind == "cloud_agent":
+        relay_url = os.environ.get("TAOS_CONTROLLER_RELAY_URL", "").strip()
+        if not relay_url or not _is_url_safe_for_credential(relay_url, allow_private=False):
+            return JSONResponse(
+                {
+                    "error": (
+                        "this taOS is not reachable from the internet: "
+                        "set up taOSgo first"
+                    )
+                },
+                status_code=400,
+            )
+        if check_interval_secs is None:
+            check_interval_secs = 900
+    elif check_interval_secs is None:
+        check_interval_secs = 1800
+
     try:
         result = await store.mint(
             project_id=project_id,
             scopes=list(payload.scopes),
             approval_mode=payload.approval_mode,
-            check_interval_secs=payload.check_interval_secs,
+            check_interval_secs=check_interval_secs,
             created_by=user.user_id,
+            kind=kind,
             ttl_secs=payload.ttl_secs,
         )
     except InvitePendingCapError as exc:
@@ -1114,19 +1150,12 @@ async def mint_collab_invite(
     envelope: dict | None = None
     delivery_error: str | None = None
     try:
-        from tinyagentos.peer import build_envelope, resolve_local_identity_id
+        from tinyagentos.peer import build_envelope, deliver_to_peer, local_contact_id
 
-        # Resolve the local hub identity and the contact's hub username.
-        contact_username = (contact.get("hub_username") or "").strip()
-        if not contact_username:
-            delivery_error = "contact has no hub_username"
-        local_id = await asyncio.to_thread(
-            resolve_local_identity_id, request.app.state.data_dir
-        )
-        if local_id is None:
-            delivery_error = "hub identity not configured"
-        if delivery_error is None and contact_username and local_id:
-            local_username = local_id.removeprefix("hub:")
+        # Both ends are canonical hub:<fingerprint> ids: ours from the
+        # keystore, theirs is the contact row key.  hub_username is display only.
+        local_id = await asyncio.to_thread(local_contact_id)
+        if delivery_error is None:
             envelope_body = {
                 "invite_id": record["invite_id"],
                 "project_id": project_id,
@@ -1137,46 +1166,25 @@ async def mint_collab_invite(
                 "display_name": payload.display_name,
             }
             envelope = build_envelope(
-                from_username=local_username,
-                to_username=contact_username,
+                to_contact_id=payload.contact_id,
                 kind="collab_invite",
                 body=envelope_body,
             )
 
             # POST the envelope to the remote contact's peer inbox.
-            # The peer link's endpoints are tried in priority order.
+            # The peer link's endpoints are tried in priority order, through
+            # the SSRF guard with the link's own endpoints as the allowance.
             peer_link = await contacts_store.get_peer_link(payload.contact_id)
             if peer_link is None or not peer_link.get("endpoints"):
                 delivery_error = "no peer endpoints for contact"
-            else:
-                import httpx
-
-                outbound_token = peer_link.get("outbound_token", "")
-                delivered = False
-                for ep in sorted(
-                    peer_link["endpoints"],
-                    key=lambda e: e.get("priority", 99),
-                ):
-                    inbox_url = f"{ep['url'].rstrip('/')}/api/peer/inbox"
-                    try:
-                        async with httpx.AsyncClient(timeout=10.0) as client:
-                            resp = await client.post(
-                                inbox_url,
-                                json={"envelope": envelope},
-                                headers={
-                                    "Authorization": f"Bearer {outbound_token}",
-                                    "Content-Type": "application/json",
-                                },
-                            )
-                            if 200 <= resp.status_code < 300:
-                                delivered = True
-                                break
-                    except Exception:
-                        continue
-                if not delivered:
-                    delivery_error = (
-                        "failed to deliver invite envelope to any peer endpoint"
-                    )
+            elif not peer_link.get("outbound_token"):
+                delivery_error = "peer handshake incomplete: no token for contact"
+            elif not await deliver_to_peer(
+                contacts_store, payload.contact_id, "/api/peer/inbox", envelope,
+            ):
+                delivery_error = (
+                    "failed to deliver invite envelope to any peer endpoint"
+                )
     except Exception as exc:
         delivery_error = f"envelope delivery failed: {exc}"
 
