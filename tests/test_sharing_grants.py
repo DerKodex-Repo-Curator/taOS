@@ -519,3 +519,58 @@ async def test_list_shared_with_me_only_active(client, app):
         assert len(grants) == 1
         assert grants[0]["artifact_id"] == project2_id
         assert grants[0]["status"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_other_owner_cannot_hijack_active_grant(client, app):
+    # Create a project artifact owned by admin
+    project_store = app.state.project_store
+    admin_id = client._transport.app.state.auth.find_user("admin")["id"]
+    project = await project_store.create_project(
+        name="Test Project Hijack",
+        slug="test-project-hijack",
+        created_by=admin_id,
+        user_id=admin_id,
+        description="Test project for ownership validation"
+    )
+    project_id = project["id"]
+
+    # Owner A (admin) creates an active grant on project P for grantee G
+    r1 = await client.post(
+        "/api/sharing/grants",
+        json={"artifact_id": project_id, "artifact_kind": "project", "grantee": "zed"},
+    )
+    assert r1.status_code == 200
+    grant_a = r1.json()
+
+    # Create a different user B (not P's owner)
+    invite_code = app.state.auth.add_user_invite("userb", "admin")
+    app.state.auth.complete_invite("userb", invite_code, "User B", "userb@example.com", "testpass")
+    user_b_record = app.state.auth.find_user("userb")
+    user_b_token = app.state.auth.create_session(user_id=user_b_record["id"], long_lived=True)
+
+    from httpx import AsyncClient, ASGITransport
+    import secrets
+    csrf_token = secrets.token_hex(32)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        cookies={"taos_session": user_b_token, "csrf_token": csrf_token},
+        headers={"X-CSRF-Token": csrf_token},
+    ) as user_b_client:
+        # User B POSTs the same grant for P and G
+        r2 = await user_b_client.post(
+            "/api/sharing/grants",
+            json={"artifact_id": project_id, "artifact_kind": "project", "grantee": "zed"},
+        )
+        assert r2.status_code == 403
+        assert r2.json()["error"] == "you do not own this artifact"
+        r3 = await user_b_client.get("/api/sharing/grants/mine")
+        assert r3.status_code == 200
+        assert r3.json() == []
+
+        store = app.state.sharing_grants
+        current_grant_a = await store.get(grant_a["id"])
+        assert current_grant_a["status"] == "active"
+        assert current_grant_a["owner_id"] != user_b_record["id"]

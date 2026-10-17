@@ -126,15 +126,14 @@ class TestCreateGrantAppKindRejectsEvenWithConsent:
         # First, record app consent for "app-x" through app.state.app_grants
         # using the set_decision method
         app_grants_store = getattr(app.state, "app_grants", None)
-        if app_grants_store is not None:
-            # Use the admin user ID from the client fixture
-            admin_id = client._transport.app.state.auth.find_user("admin")["id"]
-            await app_grants_store.set_decision(
-                user_id=admin_id,
-                app_id="app-x",
-                capability="read",
-                decision="granted"
-            )
+        admin_id = client._transport.app.state.auth.find_user("admin")["id"]
+        assert app_grants_store is not None
+        await app_grants_store.set_decision(
+            user_id=admin_id,
+            app_id="app-x",
+            capability="read",
+            decision="granted"
+        )
         
         # Try to create a grant for app-x (app-kind)
         resp = await client.post(
