@@ -856,6 +856,10 @@ class TestManualApprovalWiring:
         request.app.state.project_invites = invite_store
         request.app.state.project_store = project_store
         request.app.state.decision_store = decision_store
+        # No delivery in this test: a truthy MagicMock contacts_store would make
+        # _deliver_delegation_invite call the real send_envelope, whose hub
+        # keystore writes data/hub/identity.json into the repo's data dir.
+        request.app.state.contacts_store = None
 
         decision = await decision_store.create(
             from_agent="hub:sponsor",
