@@ -259,8 +259,8 @@ describe("APP_REDIRECTS", () => {
     expect(typeof APP_REDIRECTS).toBe("object");
   });
 
-  it("redirects notification-archive to the notifications app with section archive", () => {
-    expect(APP_REDIRECTS["notification-archive"]).toEqual({ appId: "notifications", section: "archive" });
+  it("redirects notification-archive to the Notification History app with no section", () => {
+    expect(APP_REDIRECTS["notification-archive"]).toEqual({ appId: "notification-history" });
   });
 });
 
@@ -285,15 +285,15 @@ describe("resolvePinnedId", () => {
     delete APP_REDIRECTS["legacy-id"];
   });
 
-  it("resolves notification-archive to notifications with section archive via APP_REDIRECTS", () => {
-    expect(resolvePinnedId("notification-archive")).toEqual({ id: "notifications", section: "archive" });
+  it("resolves notification-archive to notification-history via APP_REDIRECTS", () => {
+    expect(resolvePinnedId("notification-archive")).toEqual({ id: "notification-history" });
   });
 });
 
 describe("pinnedAppId", () => {
   it("returns the app a pin renders and launches as", () => {
     expect(pinnedAppId("messages")).toBe("messages");
-    expect(pinnedAppId("notification-archive")).toBe("notifications");
+    expect(pinnedAppId("notification-archive")).toBe("notification-history");
   });
 
   it("keeps the pin id when no app claims it yet", () => {
@@ -303,7 +303,13 @@ describe("pinnedAppId", () => {
 
 describe("pinnedLaunchProps", () => {
   it("turns a pin's section into the props its launch must carry", () => {
-    expect(pinnedLaunchProps("notification-archive")).toEqual({ section: "archive" });
+    APP_REDIRECTS["legacy-id"] = { appId: "agents", section: "logs" };
+    expect(pinnedLaunchProps("legacy-id")).toEqual({ section: "logs" });
+    delete APP_REDIRECTS["legacy-id"];
+  });
+
+  it("is undefined for the notification-archive pin, which opens History's default view", () => {
+    expect(pinnedLaunchProps("notification-archive")).toBeUndefined();
   });
 
   it("is undefined for a pin that opens the app's default view", () => {
