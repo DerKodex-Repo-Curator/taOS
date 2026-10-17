@@ -115,7 +115,7 @@ describe("isDefaultSurfaceApp (shared default-surface tier rule)", () => {
   });
 
   it("excludes tier 3 apps (discoverable via Store/search)", () => {
-    for (const id of ["providers", "mcp", "channels", "notification-archive"]) {
+    for (const id of ["providers", "mcp", "channels", "notification-history"]) {
       expect(isDefaultSurfaceApp(getApp(id)!), `tier-3 app "${id}" should NOT be a default-surface app`).toBe(false);
     }
   });
@@ -326,23 +326,22 @@ describe("pinnedLaunchProps", () => {
   });
 });
 
-describe("notification-archive tier and launcher visibility", () => {
-  it("has tier 3 in the manifest", () => {
-    expect(getApp("notification-archive")?.tier).toBe(3);
-  });
-
+describe("notification-history tier and launcher visibility", () => {
   it("is absent from launcher listings", () => {
     const ids = getLaunchableApps(new Set()).map((a) => a.id);
-    expect(ids).not.toContain("notification-archive");
-  });
-
-  it("is still openable programmatically via getApp", () => {
-    expect(getApp("notification-archive")?.id).toBe("notification-archive");
+    expect(ids).not.toContain("notification-history");
   });
 
   it("notifications app is present and launchable", () => {
     const ids = getLaunchableApps(new Set()).map((a) => a.id);
     expect(ids).toContain("notifications");
     expect(getApp("notifications")?.tier).toBeUndefined();
+  });
+});
+
+describe("retired notification-archive app", () => {
+  it("getApp is undefined and pinnedAppId redirects to Notification History", () => {
+    expect(getApp("notification-archive")).toBeUndefined();
+    expect(pinnedAppId("notification-archive")).toBe("notification-history");
   });
 });
