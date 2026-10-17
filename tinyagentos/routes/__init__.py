@@ -197,6 +197,9 @@ def register_all_routers(app):
     from tinyagentos.routes.cluster_map import router as cluster_map_router
     app.include_router(cluster_map_router, dependencies=_csrf)
 
+    from tinyagentos.routes.cluster_resources import router as cluster_resources_router
+    app.include_router(cluster_resources_router, dependencies=_csrf)
+
     from tinyagentos.routes.cluster_ble import router as cluster_ble_router
     app.include_router(cluster_ble_router, dependencies=_csrf)
 

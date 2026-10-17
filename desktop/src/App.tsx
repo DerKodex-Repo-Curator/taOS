@@ -214,7 +214,7 @@ export function App() {
   const effWallpaperFallback = useLightWallpaper ? wallpaperLightFallback : wallpaperFallback;
   const windows = useProcessStore((s) => s.windows);
   const openWindow = useProcessStore((s) => s.openWindow);
-  const closeWindow = useProcessStore((s) => s.closeWindow);
+  const removeWindow = useProcessStore((s) => s.removeWindow);
   const minimizeWindow = useProcessStore((s) => s.minimizeWindow);
 
   // Browser-mode flag: when on mobile but not in PWA, apply browser-safe
@@ -373,10 +373,12 @@ export function App() {
 
   const handleMobileClose = useCallback(() => {
     if (activeWindowId) {
-      closeWindow(activeWindowId);
+      // Remove, do not just mark closing: MobileAppWindow has no close
+      // animation to finish it, so the app would stay in the switcher.
+      removeWindow(activeWindowId);
       setActiveWindowId(null);
     }
-  }, [activeWindowId, closeWindow]);
+  }, [activeWindowId, removeWindow]);
 
   const handleMobileMinimise = useCallback(() => {
     if (activeWindowId) {
