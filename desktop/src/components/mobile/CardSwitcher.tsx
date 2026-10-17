@@ -11,6 +11,8 @@ import {
   listShellWindows,
   type ShellWindow,
 } from "@/lib/mobile-shell";
+import { appRuntime, shellWindowRuntime, type AppRuntime } from "@/lib/app-runtime";
+import { AppTypeBadge } from "@/components/AppTypeBadge";
 
 const SHELL_POLL_MS = 2000;
 
@@ -42,7 +44,9 @@ function shellWindowIcon(w: ShellWindow): icons.LucideIcon {
 
 export function CardSwitcher({ open, onClose, onSelectApp, onLaunchpad }: Props) {
   const windows = useProcessStore((s) => s.windows);
-  const closeWindow = useProcessStore((s) => s.closeWindow);
+  // removeWindow, not closeWindow: closeWindow only marks a window closing for
+  // the desktop Window's close animation, which the phone layout never mounts.
+  const removeWindow = useProcessStore((s) => s.removeWindow);
   const [dismissing, setDismissing] = useState<Record<string, number>>({});
   const touchStartY = useRef<Record<string, number>>({});
   const [shellWindows, setShellWindows] = useState<ShellWindow[]>([]);
@@ -112,6 +116,7 @@ export function CardSwitcher({ open, onClose, onSelectApp, onLaunchpad }: Props)
     key: string,
     name: string,
     IconComponent: icons.LucideIcon,
+    runtime: AppRuntime,
     onSelect: () => void,
     onDismiss: () => void,
   ) => {
@@ -167,7 +172,10 @@ export function CardSwitcher({ open, onClose, onSelectApp, onLaunchpad }: Props)
           <X size={14} className="text-white/70" />
         </button>
 
-        <IconComponent size={40} className="text-white/60 mb-3" />
+        <span className="relative mb-3 inline-flex rounded-lg">
+          <IconComponent size={40} className="text-white/60" />
+          <AppTypeBadge runtime={runtime} size="lg" />
+        </span>
         <span className="text-white/80 text-sm font-medium">{name}</span>
       </div>
     );
@@ -236,11 +244,12 @@ export function CardSwitcher({ open, onClose, onSelectApp, onLaunchpad }: Props)
               win.id,
               app?.name ?? win.appId,
               IconComponent,
+              app ? appRuntime(app) : "taos",
               () => {
                 onSelectApp(win.id);
                 onClose();
               },
-              () => closeWindow(win.id),
+              () => removeWindow(win.id),
             );
           })}
           {visibleShellWindows.map((w) =>
@@ -248,6 +257,7 @@ export function CardSwitcher({ open, onClose, onSelectApp, onLaunchpad }: Props)
               `shell-${w.con_id}`,
               shellWindowName(w),
               shellWindowIcon(w),
+              shellWindowRuntime(w.app_id),
               () => {
                 void focusShellWindow(w.con_id);
                 onClose();

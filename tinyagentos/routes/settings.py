@@ -626,7 +626,7 @@ async def check_for_updates(request: Request):
         # `--` forces `branch` to be read as a refspec, never an option, even
         # though resolve_tracked_branch already validates it (defence in depth).
         "git", "fetch", "origin", "--", branch,
-        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
         cwd=project_dir,
     )
     fetch_out, _ = await fetch_proc.communicate()
