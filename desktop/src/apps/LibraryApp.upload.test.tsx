@@ -156,7 +156,14 @@ function createFetchMock(overrides: Record<string, Promise<Response>> = {}) {
         typeof body.agent_name === "string" &&
         Array.isArray(body.files) &&
         body.files.length > 0;
-      const payload = valid ? { status: "ok" } : { error: "agent_name is required" };
+      const payload = valid
+        ? {
+            status: "embedded",
+            embedded: true,
+            count: body.files.length,
+            files: body.files.map((f: unknown) => ({ filename: String(f), embedded: true })),
+          }
+        : { error: "agent_name is required" };
       return Promise.resolve({
         ok: valid,
         status: valid ? 200 : 400,
@@ -376,5 +383,45 @@ describe("LibraryApp local file upload (tsk-6gtsvj)", () => {
     expect(alert).toHaveTextContent(/embed failed/i);
     expect(alert).toHaveTextContent(/400/);
     expect(alert).toHaveTextContent(/agent_name is required/);
+  });
+
+  it("shows an error and keeps the picker open when embed returns embedded:false", async () => {
+    const failing = createFetchMock({
+      "/api/import/embed": Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: new Map([["content-type", "application/json"]]),
+        json: () =>
+          Promise.resolve({
+            status: "embedded",
+            embedded: false,
+            count: 1,
+            files: [{ filename: "srv_notes.txt", embedded: false }],
+          }),
+        text: () =>
+          Promise.resolve(
+            JSON.stringify({
+              status: "embedded",
+              embedded: false,
+              count: 1,
+              files: [{ filename: "srv_notes.txt", embedded: false }],
+            }),
+          ),
+      } as Response),
+    });
+    vi.stubGlobal("fetch", failing as unknown as typeof fetch);
+
+    const { modal, agent } = await openEmbedPickerAndChooseFile();
+    fireEvent.click(agent);
+
+    const alert = await within(modal).findByRole("alert");
+    expect(alert).toHaveTextContent(/embed failed/i);
+    expect(alert).toHaveTextContent(/srv_notes.txt/);
+
+    // The picker must stay open: the dialog is still in the document.
+    expect(await screen.findByRole("dialog", { name: /embed file into agent/i })).toBeInTheDocument();
+
+    // No success message about embedding a file.
+    expect(screen.queryByText(/embedded 1 file into agent 1/i)).not.toBeInTheDocument();
   });
 });

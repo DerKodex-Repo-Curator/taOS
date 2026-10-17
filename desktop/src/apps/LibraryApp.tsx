@@ -435,12 +435,27 @@ export function LibraryApp({ windowId: _windowId }: { windowId: string }) {
         body: JSON.stringify({ agent_name: agentName, files: serverNames }),
       }));
       if (res.ok) {
-        setEmbedMessage({
-          kind: "success",
-          text: `Embedded ${serverNames.length} file${serverNames.length === 1 ? "" : "s"} into ${agentName}`,
-        });
-        setEmbedAgentPickerOpen(false);
-        setEmbedFiles([]);
+        const data = await res.json().catch(() => null);
+        if (data && typeof data === "object" && (data as Record<string, unknown>).embedded === true) {
+          setEmbedMessage({
+            kind: "success",
+            text: `Embedded ${serverNames.length} file${serverNames.length === 1 ? "" : "s"} into ${agentName}`,
+          });
+          setEmbedAgentPickerOpen(false);
+          setEmbedFiles([]);
+        } else {
+          const body = data as Record<string, unknown> | null;
+          const files = Array.isArray(body?.files) ? body.files : [];
+          const failedFiles = files
+            .filter((f: unknown) => f && typeof f === "object" && (f as Record<string, unknown>).embedded === false)
+            .map((f: unknown) => String((f as Record<string, unknown>).filename ?? "unknown"));
+          setEmbedMessage({
+            kind: "error",
+            text: failedFiles.length > 0
+              ? `Embed failed for: ${failedFiles.join(", ")}`
+              : "Embed failed",
+          });
+        }
       } else {
         const errText = await res.text().catch(() => "");
         setEmbedMessage({ kind: "error", text: `Embed failed: ${res.status} ${errText || res.statusText}` });

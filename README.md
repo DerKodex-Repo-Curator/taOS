@@ -347,7 +347,7 @@ Create shared file spaces for agents, groups, and departments. The design team s
 - **Secrets Manager.** Encrypted storage with per-agent access control
 - **Inter-Agent Relationships.** Groups, departments, lead agents, permissions matrix
 - **Scheduled Tasks.** Cron jobs with presets, per-agent or group assignment
-- **Data Import.** Drag-and-drop file upload to Library (ingests .txt, .md, .pdf, .html, .json, .csv; auto-embeds via subscriptions or manual "Embed now")
+- **Data Import.** Drag-and-drop file upload to Library (ingests .txt, .md, .pdf, .html, .json, .csv; auto-embeds via subscriptions or manual "Embed files into an agent")
 - **Memory Browser.** Keyword + semantic vector search across all agents
 - **Agent Export/Import.** Portable JSON export of agent config, channels, and group memberships
 
