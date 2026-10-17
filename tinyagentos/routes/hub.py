@@ -238,22 +238,39 @@ async def _try_handshake(
             signing_pubkey="",
             encryption_pubkey="",
         )
-        reply = await peer_channel.exchange_handshake(
-            envelope,
-            link_endpoints,
-            known_endpoints=peer_channel.known_hostports(link_endpoints),
-        )
-        their_token = peer_channel.verify_handshake_reply(
-            reply, handshake=envelope, sender_ed25519_pub=ed25519_pub,
-        )
-        if their_token:
-            await contacts_store.set_outbound_token(contact_id, their_token)
-            logger.info("friend-accept handshake completed: contact=%s", contact_id)
-        else:
-            logger.warning(
-                "friend-accept handshake not completed: no verified reply from %s",
-                contact_id,
+        known_endpoints = peer_channel.known_hostports(link_endpoints)
+
+        # Only the network exchange runs in the background; everything it
+        # needs is captured as locals above (never ``request``).
+        async def _exchange() -> None:
+            reply = await peer_channel.exchange_handshake(
+                envelope,
+                link_endpoints,
+                known_endpoints=known_endpoints,
             )
+            their_token = peer_channel.verify_handshake_reply(
+                reply, handshake=envelope, sender_ed25519_pub=ed25519_pub,
+            )
+            if their_token:
+                await contacts_store.set_outbound_token(contact_id, their_token)
+                logger.info("friend-accept handshake completed: contact=%s", contact_id)
+            else:
+                logger.warning(
+                    "friend-accept handshake not completed: no verified reply from %s",
+                    contact_id,
+                )
+
+        async def _exchange_guarded() -> None:
+            try:
+                await asyncio.wait_for(_exchange(), timeout=30)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "friend-accept handshake timed out for %s", contact_id
+                )
+            except Exception:
+                logger.exception("friend-accept handshake failed for %s", contact_id)
+
+        task_utils._create_supervised_task(_exchange_guarded(), _BACKGROUND_TASKS)
     except Exception:
         logger.exception("friend-accept handshake failed for %s", contact_id)
 
@@ -493,16 +510,7 @@ async def accept_friend_request(
     # When the directory omits these fields, we fall back to the locally cached
     # hub_authors record (populated during the friend-request flow).
     if peer:
-        async def _handshake():
-            try:
-                await asyncio.wait_for(
-                    _try_handshake(request, resp, peer),
-                    timeout=30,
-                )
-            except Exception:
-                logger.exception("friend-accept handshake task failed for %s", peer)
-
-        task = task_utils._create_supervised_task(_handshake(), _BACKGROUND_TASKS)
+        await _try_handshake(request, resp, peer)
 
     return {"state": "accepted", "peer": peer, "directory": resp}
 
