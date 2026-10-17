@@ -172,7 +172,7 @@ export function CardSwitcher({ open, onClose, onSelectApp, onLaunchpad }: Props)
           <X size={14} className="text-white/70" />
         </button>
 
-        <span className="relative mb-3 inline-flex">
+        <span className="relative mb-3 inline-flex rounded-lg">
           <IconComponent size={40} className="text-white/60" />
           <AppTypeBadge runtime={runtime} size="lg" />
         </span>
