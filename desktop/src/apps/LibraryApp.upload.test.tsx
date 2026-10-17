@@ -424,4 +424,35 @@ describe("LibraryApp local file upload (tsk-6gtsvj)", () => {
     // No success message about embedding a file.
     expect(screen.queryByText(/embedded 1 file into agent 1/i)).not.toBeInTheDocument();
   });
+
+  it("clears a previous embed error when new files are picked", async () => {
+    const failing = createFetchMock({
+      "/api/import/embed": Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: new Map([["content-type", "application/json"]]),
+        json: () =>
+          Promise.resolve({
+            status: "embedded",
+            embedded: false,
+            count: 1,
+            files: [{ filename: "srv_notes.txt", embedded: false }],
+          }),
+        text: () => Promise.resolve(""),
+      } as Response),
+    });
+    vi.stubGlobal("fetch", failing as unknown as typeof fetch);
+
+    const { modal, agent } = await openEmbedPickerAndChooseFile();
+    fireEvent.click(agent);
+    expect(await within(modal).findByRole("alert")).toHaveTextContent(/embed failed/i);
+
+    const picker = modal.querySelector('input[type="file"]') as HTMLInputElement;
+    const other = new File(["again"], "other.txt", { type: "text/plain" });
+    await act(async () => {
+      fireEvent.change(picker, { target: { files: [other] } });
+    });
+    await waitFor(() => expect(within(modal).getByText("other.txt")).toBeInTheDocument());
+    expect(within(modal).queryByRole("alert")).not.toBeInTheDocument();
+  });
 });

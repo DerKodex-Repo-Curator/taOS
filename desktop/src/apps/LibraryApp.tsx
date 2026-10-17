@@ -2411,7 +2411,10 @@ export function LibraryApp({ windowId: _windowId }: { windowId: string }) {
               multiple
               accept={ACCEPTED_TYPES.join(",")}
               onChange={(e) => {
-                if (e.target.files) setEmbedFiles(Array.from(e.target.files));
+                if (e.target.files) {
+                  setEmbedFiles(Array.from(e.target.files));
+                  setEmbedMessage(null);
+                }
                 e.target.value = "";
               }}
               className="hidden"
