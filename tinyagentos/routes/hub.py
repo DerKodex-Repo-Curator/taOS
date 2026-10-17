@@ -252,8 +252,11 @@ async def _try_handshake(
                 reply, handshake=envelope, sender_ed25519_pub=ed25519_pub,
             )
             if their_token:
-                await contacts_store.set_outbound_token(contact_id, their_token)
-                logger.info("friend-accept handshake completed: contact=%s", contact_id)
+                success = await contacts_store.set_outbound_token(contact_id, their_token, expected_inbound_token=inbound_token)
+                if success:
+                    logger.info("friend-accept handshake completed: contact=%s", contact_id)
+                else:
+                    logger.warning("friend-accept handshake superseded for %s", contact_id)
             else:
                 logger.warning(
                     "friend-accept handshake not completed: no verified reply from %s",
