@@ -1392,6 +1392,10 @@ def create_app(data_dir: Path | None = None, catalog_dir: Path | None = None) ->
         from tinyagentos.agent_heartbeat import agent_heartbeat_loop
         _create_supervised_task(agent_heartbeat_loop(app.state), app.state._background_tasks)
 
+        from tinyagentos.projects.dispatcher import DispatcherService, dispatcher_tick_loop
+        app.state.dispatcher_service = DispatcherService(app.state)
+        _create_supervised_task(dispatcher_tick_loop(app.state), app.state._background_tasks)
+
         try:
             canvas_snapshotter = CanvasSnapshotter(
                 project_store=project_store,
