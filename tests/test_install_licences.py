@@ -103,6 +103,30 @@ def test_value_option_without_value_does_not_swallow_next_flag(tmp_path):
     )
 
 
+def test_no_binary_value_is_not_a_package(tmp_path):
+    """--no-binary :all: must not be read as a package name."""
+    fake_installer = tmp_path / "install.sh"
+    fake_installer.write_text("""#!/bin/bash
+./.venv/bin/pip install --no-binary :all: notarealpkg
+""")
+    result = check_install_licences.undeclared_pip_installs(fake_installer)
+    assert result == ["notarealpkg"], (
+        f"expected [\"notarealpkg\"], got {result}"
+    )
+
+
+def test_only_binary_value_is_not_a_package(tmp_path):
+    """--only-binary :all: must not be read as a package name."""
+    fake_installer = tmp_path / "install.sh"
+    fake_installer.write_text("""#!/bin/bash
+./.venv/bin/pip install --only-binary :all: notarealpkg
+""")
+    result = check_install_licences.undeclared_pip_installs(fake_installer)
+    assert result == ["notarealpkg"], (
+        f"expected [\"notarealpkg\"], got {result}"
+    )
+
+
 def test_unreadable_licence_is_its_own_failing_finding():
     """A PyPI release with no expression/license/classifiers must fail the gate.
 

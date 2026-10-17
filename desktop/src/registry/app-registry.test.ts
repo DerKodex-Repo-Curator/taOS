@@ -346,3 +346,19 @@ describe("notification-archive tier and launcher visibility", () => {
     expect(getApp("notifications")?.tier).toBeUndefined();
   });
 });
+
+describe("Import app retirement (tsk-6gtsvj)", () => {
+  it("registry has no import app id", () => {
+    expect(getApp("import")).toBeUndefined();
+  });
+
+  it("import is not in launchable apps", () => {
+    const ids = getLaunchableApps(new Set()).map((a) => a.id);
+    expect(ids).not.toContain("import");
+  });
+
+  it("import is not in all apps list", () => {
+    const ids = getAllApps().map((a) => a.id);
+    expect(ids).not.toContain("import");
+  });
+});
