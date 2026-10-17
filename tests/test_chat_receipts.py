@@ -743,3 +743,42 @@ async def test_patch_receipts_non_json_object_returns_400(client):
     assert resp.json()["error"] == "Expected JSON object"
 
     client.cookies.clear()
+@pytest.mark.asyncio
+async def test_admin_non_member_get_and_patch_receipts_200(client):
+    """Admin session that is NOT a channel member can GET and PATCH receipts (200)."""
+    app = client._transport.app
+    auth = app.state.auth
+    ch_store = app.state.chat_channels
+    msg_store = app.state.chat_messages
+    hub = app.state.chat_hub
+
+    # Create a channel where user1 is a member, but admin is NOT
+    ch = await ch_store.create_channel(name="test-ch-admin-nonmember", type="dm", created_by="user1", members=["user1"])
+    msg = await msg_store.send_message(
+        channel_id=ch["id"], author_id="user1", author_type="user", content="hello"
+    )
+    mid = msg["id"]
+
+    # Use admin session (admin exists by default in conftest; admin is NOT in members)
+    admin_record = auth.find_user("admin")
+    admin_id = admin_record["id"] if admin_record else "admin"
+    token = auth.create_session(user_id=admin_id, long_lived=True)
+    client.cookies.set("taos_session", token)
+
+    # GET should succeed for admin even if not a member
+    resp = await client.get(f"/api/chat/messages/{mid}/receipts")
+    assert resp.status_code == 200
+    assert "receipts" in resp.json()
+
+    # PATCH should succeed for admin even if not a member
+    resp = await client.patch("/api/chat/receipts", json={"message_id": mid})
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "marked"
+
+    # Verify receipt was created
+    receipts = await msg_store.get_receipts(mid)
+    assert len(receipts) == 1
+    assert receipts[0]["reader_id"] == admin_id
+    assert receipts[0]["reader_type"] == "user"
+
+    client.cookies.clear()

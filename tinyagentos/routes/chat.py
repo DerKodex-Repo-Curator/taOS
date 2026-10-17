@@ -44,7 +44,7 @@ def _validate_slash_target(content: str, channel: dict | None) -> str | None:
     the channel, producing N different /help outputs and (in some
     frameworks) triggering destructive side effects like /clear on
     unaddressed agents. Applies to HTTP /api/chat/messages and the
-    WS "message" branch — the safety must not be transport-dependent (#268).
+    WS "message" branch -- the safety must not be transport-dependent (#268).
     """
     if not content.lstrip().startswith("/"):
         return None
@@ -247,7 +247,7 @@ async def chat_ws(websocket: WebSocket):
                     continue
                 if msg["author_id"] != user_id:
                     continue
-                # Only truncate subsequent messages in DM channels —
+                # Only truncate subsequent messages in DM channels --
                 # editing in a multi-human group must not delete other
                 # people's messages.  The agent is only re-triggered in
                 # DM channels for the same reason.
@@ -672,7 +672,7 @@ async def edit_message_endpoint(message_id: str, request: Request):
     caller_id = session_user["id"] if session_user else None
     if msg["author_id"] != caller_id:
         return JSONResponse({"error": "not the author"}, status_code=403)
-    # Only truncate subsequent messages in DM channels — editing in a
+    # Only truncate subsequent messages in DM channels -- editing in a
     # multi-human group must not delete other people's messages.  The
     # agent is only re-triggered in DM channels for the same reason.
     ch_store = request.app.state.chat_channels
@@ -1004,13 +1004,9 @@ async def get_message_receipts(message_id: str, request: Request, user: CurrentU
     if channel is None:
         return JSONResponse({"error": "Channel not found"}, status_code=404)
     # Check membership
-    is_device = getattr(request.state, "_device", None) is not None
-    if is_device:
-        # For device bearers, the user from the dependency is the user associated with the device.
-        pass
     members = channel.get("members") or []
     user_id_str = str(user.user_id)
-    if user_id_str not in members:
+    if not user.is_admin and user_id_str not in members:
         return JSONResponse({"error": "Not a member of this channel"}, status_code=403)
     receipts = await msg_store.get_receipts(message_id)
     # SPA's Receipt type uses agent_id = reader_id
@@ -1055,13 +1051,9 @@ async def mark_receipt_seen(request: Request, user: CurrentUser = Depends(curren
     if channel is None:
         return JSONResponse({"error": "Channel not found"}, status_code=404)
     # Check membership
-    is_device = getattr(request.state, "_device", None) is not None
-    if is_device:
-        # For device bearers, the user from the dependency is the user associated with the device.
-        pass
     members = channel.get("members") or []
     user_id_str = str(user.user_id)
-    if user_id_str not in members:
+    if not user.is_admin and user_id_str not in members:
         return JSONResponse({"error": "Not a member of this channel"}, status_code=403)
     
     hub = request.app.state.chat_hub
