@@ -3,13 +3,12 @@
 import pytest
 import pytest_asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
 
 from tinyagentos.projects.dispatcher import DispatcherService
 from tinyagentos.projects.dispatcher_store import DispatcherConfig
 from tinyagentos.projects.dispatch_policy import is_candidate
-from tinyagentos.wake_budget import can_wake
-from tests.projects.conftest import seed_board_with_cards, register_agent_with_grant
+from tinyagentos.wake_budget import can_wake, record_scheduled_wake
+from .conftest import seed_board_with_cards, register_agent_with_grant
 
 
 @pytest_asyncio.fixture
@@ -83,7 +82,7 @@ class TestDispatcherServiceTickUser:
         result = await dispatcher_service.tick_user("u1", await real_stores.dispatcher_store.get_config("u1"), 1000.0)
 
         # Verify counts
-        assert result["boards_held"] == 2
+        assert result["boards_held"] == 0
         assert result["candidates_considered"] == 3
         assert result["assignments_made"] == 2
         assert result["races_skipped"] == 0
@@ -135,7 +134,7 @@ class TestDispatcherServiceTickUser:
         result = await dispatcher_service.tick_user("u1", await real_stores.dispatcher_store.get_config("u1"), 1000.0)
 
         # Only board A's card should be assigned (board B has no grant)
-        assert result["boards_held"] == 2
+        assert result["boards_held"] == 0
         assert result["candidates_considered"] == 2
         assert result["assignments_made"] == 1
 
@@ -303,7 +302,7 @@ class TestDispatcherServiceTickUser:
         assert len(leases) == 0
 
     @pytest.mark.asyncio
-    async def test_wakes_even_when_heartbeat_disabled_but_respects_wake_budget(self, dispatcher_service, real_stores):
+    async def test_wakes_even_when_heartbeat_disabled_but_respects_wake_budget(self, dispatcher_service, real_stores, monkeypatch):
         """Deployed agent in config.agents with status=running gets woken via
         wake_agent_with_task; monkeypatch that function to verify call."""
         board_row, tasks = await seed_board_with_cards(real_stores, "u1", "Wake Board", 1)
@@ -340,18 +339,89 @@ class TestDispatcherServiceTickUser:
             updated_by="test",
         )
 
-        # Monkeypatch wake_agent_with_task
-        with patch("tinyagentos.projects.dispatcher.wake_agent_with_task", new_callable=AsyncMock) as mock_wake:
-            mock_wake.return_value = True
+        # Mock wake_agent_with_task using monkeypatch
+        mock_wake_calls = []
+        async def mock_wake(app_state, agent_dict, task_row):
+            mock_wake_calls.append((app_state, agent_dict, task_row))
+            return True
 
-            result = await dispatcher_service.tick_user("u1", await real_stores.dispatcher_store.get_config("u1"), 1000.0)
+        monkeypatch.setattr("tinyagentos.projects.dispatcher.wake_agent_with_task", mock_wake)
 
-            assert result["assignments_made"] == 1
-            assert result["wakes"] == 1
-            mock_wake.assert_called_once()
-            call_args = mock_wake.call_args
-            assert call_args[0][1] is deployed_agent  # agent_dict
-            assert call_args[0][2]["project_id"] == board_row["id"]  # task project_id matches board
+        result = await dispatcher_service.tick_user("u1", await real_stores.dispatcher_store.get_config("u1"), 1000.0)
+
+        assert result["assignments_made"] == 1
+        assert result["wakes"] == 1
+        assert len(mock_wake_calls) == 1
+        call_args = mock_wake_calls[0]
+        assert call_args[1] is deployed_agent  # agent_dict
+        assert call_args[2]["project_id"] == board_row["id"]  # task project_id matches board
+
+    @pytest.mark.asyncio
+    async def test_exhausted_wake_budget_takes_no_lease_and_no_wake(self, dispatcher_service, real_stores, monkeypatch):
+        """Exhausted wake budget results in no lease and no wake."""
+        board_row, tasks = await seed_board_with_cards(real_stores, "u1", "Wake Budget Board", 1)
+        board_id = board_row["id"]
+
+        # Add claimable label to task
+        await real_stores.task_store._db.execute(
+            "UPDATE project_tasks SET labels = json_array('claimable') WHERE id = ?",
+            (tasks[0]["id"],),
+        )
+        await real_stores.task_store._db.commit()
+
+        # Register agent
+        agent_cid = await register_agent_with_grant(real_stores, "wake-budget-agent", board_id, "project_tasks")
+
+        # Add deployed agent to config with id "cfg-hex-123"
+        deployed_agent = {
+            "id": "cfg-hex-123",
+            "name": "wake-budget-agent",
+            "registry_canonical_id": agent_cid,
+            "status": "running",
+        }
+        dispatcher_service.app_state.config.agents = [deployed_agent]
+
+        # Set wake budget to 1 for global_default
+        dispatcher_service.app_state.config.wake_budget = {"global_default": 1}
+
+        # Use up the wake budget for this agent on this board
+        record_scheduled_wake(dispatcher_service.app_state.data_dir, "cfg-hex-123", board_id)
+
+        await real_stores.dispatcher_store.set_config(
+            "u1",
+            DispatcherConfig(
+                user_id="u1",
+                enabled=True,
+                eligible_agents=[agent_cid],
+                max_concurrent_per_agent=1,
+                lease_seconds=900,
+            ),
+            updated_by="test",
+        )
+
+        # Mock wake_agent_with_task to record calls
+        mock_wake_calls = []
+        async def mock_wake(app_state, agent_dict, task_row):
+            mock_wake_calls.append((app_state, agent_dict, task_row))
+            return True
+
+        monkeypatch.setattr("tinyagentos.projects.dispatcher.wake_agent_with_task", mock_wake)
+
+        result = await dispatcher_service.tick_user("u1", await real_stores.dispatcher_store.get_config("u1"), 1000.0)
+
+        # Assertions
+        assert result["assignments_made"] == 0
+        assert result["wakes"] == 0
+        assert len(mock_wake_calls) == 0  # wake_agent_with_task never called
+
+        # No lease should be inserted
+        leases = await real_stores.dispatcher_store.pending_for_agent(agent_cid)
+        assert len(leases) == 0
+
+        # Task row's assignee should still be empty/None
+        task_row = await real_stores.task_store.get_task(tasks[0]["id"])
+        assert task_row["assignee_id"] is None
+
 
     @pytest.mark.asyncio
     async def test_manual_claim_unaffected(self, dispatcher_service, real_stores):
@@ -401,7 +471,7 @@ class TestDispatcherServiceTickUser:
         assert leases[0]["task_id"] == task2_id
 
     @pytest.mark.asyncio
-    async def test_race_claim_between_select_and_assign_is_skipped(self, dispatcher_service, real_stores):
+    async def test_race_claim_between_select_and_assign_is_skipped(self, dispatcher_service, real_stores, monkeypatch):
         """When assign_if_unassigned returns False (race), no lease row, no wake."""
         board_row, tasks = await seed_board_with_cards(real_stores, "u1", "Race Board", 1)
         board_id = board_row["id"]
@@ -427,22 +497,26 @@ class TestDispatcherServiceTickUser:
             updated_by="test",
         )
 
-        # Monkeypatch assign_if_unassigned to return False
-        with patch.object(
-            real_stores.task_store, "assign_if_unassigned", new_callable=AsyncMock
-        ) as mock_assign:
-            mock_assign.return_value = False
+        # Mock assign_if_unassigned to return False using monkeypatch
+        mock_assign_calls = []
+        async def mock_assign(task_id, assignee_value, assigned_by):
+            mock_assign_calls.append((task_id, assignee_value, assigned_by))
+            return False
 
-            result = await dispatcher_service.tick_user("u1", await real_stores.dispatcher_store.get_config("u1"), 1000.0)
+        monkeypatch.setattr(
+            real_stores.task_store, "assign_if_unassigned", mock_assign
+        )
 
-            assert result["candidates_considered"] == 1
-            assert result["assignments_made"] == 0
-            assert result["races_skipped"] == 1
-            assert result["wakes"] == 0
+        result = await dispatcher_service.tick_user("u1", await real_stores.dispatcher_store.get_config("u1"), 1000.0)
 
-            # No lease should be inserted
-            leases = await real_stores.dispatcher_store.pending_for_agent(agent_cid)
-            assert len(leases) == 0
+        assert result["candidates_considered"] == 1
+        assert result["assignments_made"] == 0
+        assert result["races_skipped"] == 1
+        assert result["wakes"] == 0
+
+        # No lease should be inserted
+        leases = await real_stores.dispatcher_store.pending_for_agent(agent_cid)
+        assert len(leases) == 0
 
 
 class TestDispatcherServiceTick:
@@ -514,7 +588,7 @@ class TestDispatcherServiceTick:
         assert result["users_processed"] == 2
         assert result["users_failed"] == 0
         assert result["assignments_made"] == 2
-        assert result["boards_held"] == 2
+        assert result["boards_held"] == 0
 
     @pytest.mark.asyncio
     async def test_tick_one_user_failure_does_not_stop_others(self, real_stores, tmp_path):

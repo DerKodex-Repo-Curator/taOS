@@ -39,7 +39,7 @@ class DispatcherService:
         """Run one dispatcher tick for a single user.
 
         Returns a dict with stage counts:
-        - boards_held: number of boards considered (active, owned, dispatchable)
+        - boards_held: number of boards skipped because of a board-level dispatch hold
         - candidates_considered: total claimable cards across boards
         - assignments_made: number of successful assignments (leases inserted)
         - races_skipped: number of assign_if_unassigned races lost
@@ -89,9 +89,8 @@ class DispatcherService:
 
             # Check board-level dispatch hold
             if not is_board_dispatchable(project):
+                boards_held += 1
                 continue
-
-            boards_held += 1
 
             # Get ready tasks for this board
             candidates = await task_store.list_ready_tasks(board_id, limit=500)
