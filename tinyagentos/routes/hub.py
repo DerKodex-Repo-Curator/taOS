@@ -26,6 +26,7 @@ dependency (401), exactly like every other local app route.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -38,10 +39,13 @@ from pydantic import BaseModel
 from tinyagentos import peer as peer_channel
 from tinyagentos.auth_context import CurrentUser, current_user
 from tinyagentos.contacts_store import generate_peer_token
+from tinyagentos import task_utils
 from tinyagentos.hub import identity, posts, relationships, store as hub_store
 from tinyagentos.routes.account_proxy import _forward_to
 
 logger = logging.getLogger(__name__)
+
+_BACKGROUND_TASKS: set[asyncio.Task] = set()
 
 router = APIRouter()
 
@@ -234,22 +238,42 @@ async def _try_handshake(
             signing_pubkey="",
             encryption_pubkey="",
         )
-        reply = await peer_channel.exchange_handshake(
-            envelope,
-            link_endpoints,
-            known_endpoints=peer_channel.known_hostports(link_endpoints),
-        )
-        their_token = peer_channel.verify_handshake_reply(
-            reply, handshake=envelope, sender_ed25519_pub=ed25519_pub,
-        )
-        if their_token:
-            await contacts_store.set_outbound_token(contact_id, their_token)
-            logger.info("friend-accept handshake completed: contact=%s", contact_id)
-        else:
-            logger.warning(
-                "friend-accept handshake not completed: no verified reply from %s",
-                contact_id,
+        known_endpoints = peer_channel.known_hostports(link_endpoints)
+
+        # Only the network exchange runs in the background; everything it
+        # needs is captured as locals above (never ``request``).
+        async def _exchange() -> None:
+            reply = await peer_channel.exchange_handshake(
+                envelope,
+                link_endpoints,
+                known_endpoints=known_endpoints,
             )
+            their_token = peer_channel.verify_handshake_reply(
+                reply, handshake=envelope, sender_ed25519_pub=ed25519_pub,
+            )
+            if their_token:
+                success = await contacts_store.set_outbound_token(contact_id, their_token, expected_inbound_token=inbound_token)
+                if success:
+                    logger.info("friend-accept handshake completed: contact=%s", contact_id)
+                else:
+                    logger.warning("friend-accept handshake superseded for %s", contact_id)
+            else:
+                logger.warning(
+                    "friend-accept handshake not completed: no verified reply from %s",
+                    contact_id,
+                )
+
+        async def _exchange_guarded() -> None:
+            try:
+                await asyncio.wait_for(_exchange(), timeout=30)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "friend-accept handshake timed out for %s", contact_id
+                )
+            except Exception:
+                logger.exception("friend-accept handshake failed for %s", contact_id)
+
+        task_utils._create_supervised_task(_exchange_guarded(), _BACKGROUND_TASKS)
     except Exception:
         logger.exception("friend-accept handshake failed for %s", contact_id)
 
