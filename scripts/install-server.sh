@@ -153,7 +153,7 @@ die()  { printf '\033[1;31m[server-install]\033[0m %s\n' "$*" >&2; exit 1; }
 
 # Curl retry flags: use --retry-all-errors only if supported (curl >= 7.71)
 CURL_RETRY=(--retry 5 --retry-delay 3 --connect-timeout 15 --max-time 60)
-if curl --help all 2>/dev/null | grep -q -- '--retry-all-errors'; then
+if curl --help all 2>/dev/null | grep -- '--retry-all-errors' >/dev/null; then
     CURL_RETRY+=(--retry-all-errors)
 fi
 
