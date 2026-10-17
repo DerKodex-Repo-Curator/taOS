@@ -648,5 +648,78 @@ class TestDispatcherServiceTick:
         # so this test mainly verifies the try/except structure exists
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+@pytest.mark.asyncio
+async def test_dispatcher_loop_cancel_raises_cancelled_error():
+    """start the loop as a task, cancel it, assert CancelledError, not NameError"""
+    import asyncio
+    from tinyagentos.projects.dispatcher import dispatcher_tick_loop
+
+    # Minimal app_state
+    from types import SimpleNamespace
+
+    class DummyStore:
+        async def list_configs(self):
+            return []
+
+    app_state = SimpleNamespace(
+        dispatcher_service=SimpleNamespace(
+            _last_tick_times={},
+            _locks={},
+        ),
+        dispatcher_store=DummyStore(),
+    )
+
+    async def dummy_tick_user(*a, **k):
+        return None
+
+    app_state.dispatcher_service.tick_user = dummy_tick_user
+    # But the loop calls tick_user on the service; and also accesses locks/last_tick_times
+
+    task = asyncio.create_task(dispatcher_tick_loop(app_state, interval=10))
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+@pytest.mark.asyncio
+async def test_loop_survives_a_failing_tick():
+    """The loop catches Exception and continues (does not crash)."""
+    import asyncio
+    from tinyagentos.projects.dispatcher import dispatcher_tick_loop
+    from types import SimpleNamespace
+
+    class DummyStore:
+        def __init__(self):
+            self.calls = 0
+
+        async def list_configs(self):
+            self.calls += 1
+            if self.calls == 1:
+                # return one config that will cause failure
+                from tinyagentos.projects.dispatcher_store import DispatcherConfig
+                return [DispatcherConfig(user_id="u1", enabled=True, poll_seconds=0)]
+            return []
+
+    class FailingService:
+        def __init__(self):
+            self._last_tick_times = {}
+            self._locks = {}
+            self.fails = True
+
+        async def tick_user(self, *a, **k):
+            if self.fails:
+                self.fails = False
+                raise ValueError("boom")
+            return {}
+
+    app_state = SimpleNamespace(
+        dispatcher_service=FailingService(),
+        dispatcher_store=DummyStore(),
+    )
+
+    task = asyncio.create_task(dispatcher_tick_loop(app_state, interval=0.001))
+    await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task

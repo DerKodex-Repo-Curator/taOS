@@ -7,6 +7,7 @@ tick_user/tick functions.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Any
@@ -298,3 +299,53 @@ class DispatcherService:
                 total["users_failed"] += 1
 
         return total
+
+
+async def dispatcher_tick_loop(app_state, interval: float = 10.0) -> None:
+    """Module-level loop that runs the dispatcher tick continuously.
+
+    Loop: await app_state.dispatcher_service.tick(); honour each user's poll_seconds
+    (skip a user whose last tick was < poll_seconds ago, keep a dict of last tick
+    times on the service); a per-user asyncio.Lock so ticks never overlap; catch
+    Exception -> logger.exception and continue; RE-RAISE asyncio.CancelledError.
+    """
+    dispatcher_service = app_state.dispatcher_service
+
+    # Initialize state on the service if not present
+    if not hasattr(dispatcher_service, "_last_tick_times"):
+        dispatcher_service._last_tick_times = {}
+    if not hasattr(dispatcher_service, "_locks"):
+        dispatcher_service._locks = {}
+
+    while True:
+        try:
+            now = time.time()
+            dispatcher_store: DispatcherStore = app_state.dispatcher_store
+            configs = await dispatcher_store.list_configs()
+
+            for cfg in configs:
+                if not cfg.enabled:
+                    continue
+
+                # Ensure lock exists for this user
+                if cfg.user_id not in dispatcher_service._locks:
+                    dispatcher_service._locks[cfg.user_id] = asyncio.Lock()
+
+                lock = dispatcher_service._locks[cfg.user_id]
+                async with lock:
+                    last_tick = dispatcher_service._last_tick_times.get(cfg.user_id, 0.0)
+                    if now - last_tick < cfg.poll_seconds:
+                        continue
+                    try:
+                        await dispatcher_service.tick_user(cfg.user_id, cfg, now)
+                    except Exception:
+                        logger.exception("dispatcher: tick failed for user %s", cfg.user_id)
+                        continue
+                    dispatcher_service._last_tick_times[cfg.user_id] = now
+
+            await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("dispatcher: loop iteration crashed")
+            await asyncio.sleep(interval)
