@@ -319,7 +319,6 @@ async def dispatcher_tick_loop(app_state, interval: float = 10.0) -> None:
 
     while True:
         try:
-            now = time.time()
             dispatcher_store: DispatcherStore = app_state.dispatcher_store
             configs = await dispatcher_store.list_configs()
 
@@ -333,6 +332,7 @@ async def dispatcher_tick_loop(app_state, interval: float = 10.0) -> None:
 
                 lock = dispatcher_service._locks[cfg.user_id]
                 async with lock:
+                    now = time.time()
                     last_tick = dispatcher_service._last_tick_times.get(cfg.user_id, 0.0)
                     if now - last_tick < cfg.poll_seconds:
                         continue
@@ -341,7 +341,7 @@ async def dispatcher_tick_loop(app_state, interval: float = 10.0) -> None:
                     except Exception:
                         logger.exception("dispatcher: tick failed for user %s", cfg.user_id)
                         continue
-                    dispatcher_service._last_tick_times[cfg.user_id] = now
+                    dispatcher_service._last_tick_times[cfg.user_id] = time.time()
 
             await asyncio.sleep(interval)
         except asyncio.CancelledError:

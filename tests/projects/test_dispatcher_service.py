@@ -723,3 +723,145 @@ async def test_loop_survives_a_failing_tick():
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+@pytest.mark.asyncio
+async def test_loop_gives_each_user_a_fresh_now_and_records_completion():
+    """The loop gives each user a fresh now and records completion time."""
+    import asyncio
+    from tinyagentos.projects.dispatcher import dispatcher_tick_loop
+    from types import SimpleNamespace
+
+    from tinyagentos.projects.dispatcher_store import DispatcherConfig
+
+    class DummyStore:
+        def __init__(self):
+            self.calls = 0
+
+        async def list_configs(self):
+            self.calls += 1
+            if self.calls == 1:
+                return [
+                    DispatcherConfig(user_id="u1", enabled=True, poll_seconds=0),
+                    DispatcherConfig(user_id="u2", enabled=True, poll_seconds=0),
+                ]
+            return []
+
+    class DummyService:
+        def __init__(self):
+            self._last_tick_times = {}
+            self._locks = {}
+            self.tick_calls = []
+
+        async def tick_user(self, user_id, cfg, now):
+            self.tick_calls.append((user_id, now))
+            return {}
+
+    app_state = SimpleNamespace(
+        dispatcher_service=DummyService(),
+        dispatcher_store=DummyStore(),
+    )
+
+    # Monkeypatch time
+    from tinyagentos.projects import dispatcher
+    original_time = dispatcher.time
+
+    class FakeTime:
+        def __init__(self):
+            self.t = 1000.0
+
+        def time(self):
+            return self.t
+
+        def advance(self, delta):
+            self.t += delta
+
+    fake_time = FakeTime()
+    dispatcher.time = fake_time
+
+    try:
+        task = asyncio.create_task(dispatcher_tick_loop(app_state, interval=0.001))
+        # Let it run once
+        await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        dispatcher.time = original_time
+
+    # Check results
+    calls = app_state.dispatcher_service.tick_calls
+    assert len(calls) == 2
+    # Find calls by user
+    call_dict = {user: now for user, now in calls}
+    assert call_dict["u1"] == 1000.0
+    assert call_dict["u2"] == 1100.0  # u1 advanced clock by 100, then u2 got fresh now
+    assert app_state.dispatcher_service._last_tick_times["u1"] == 1100.0
+
+
+@pytest.mark.asyncio
+async def test_loop_gives_each_user_a_fresh_now_and_records_completion():
+    """The loop gives each user a fresh now and records completion time."""
+    import asyncio
+    from tinyagentos.projects.dispatcher import dispatcher_tick_loop
+    from types import SimpleNamespace
+    from tinyagentos.projects.dispatcher_store import DispatcherConfig
+    from tinyagentos.projects import dispatcher
+
+    class DummyStore:
+        def __init__(self):
+            self.calls = 0
+
+        async def list_configs(self):
+            self.calls += 1
+            if self.calls == 1:
+                return [
+                    DispatcherConfig(user_id="u1", enabled=True, poll_seconds=0),
+                    DispatcherConfig(user_id="u2", enabled=True, poll_seconds=0),
+                ]
+            return []
+
+    class FakeTime:
+        def __init__(self):
+            self.t = 1000.0
+
+        def time(self):
+            return self.t
+
+        def advance(self, delta):
+            self.t += delta
+
+    class DummyService:
+        def __init__(self):
+            self._last_tick_times = {}
+            self._locks = {}
+            self.tick_calls = []
+
+        async def tick_user(self, user_id, cfg, now):
+            self.tick_calls.append((user_id, now))
+            if user_id == "u1":
+                dispatcher.time.advance(100)
+            return {}
+
+    fake_time = FakeTime()
+    original_time = dispatcher.time
+    dispatcher.time = fake_time
+
+    try:
+        app_state = SimpleNamespace(
+            dispatcher_service=DummyService(),
+            dispatcher_store=DummyStore(),
+        )
+        task = asyncio.create_task(dispatcher_tick_loop(app_state, interval=0.001))
+        await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        dispatcher.time = original_time
+
+    calls = app_state.dispatcher_service.tick_calls
+    assert len(calls) == 2
+    call_dict = {user: now for user, now in calls}
+    assert call_dict["u1"] == 1000.0
+    assert call_dict["u2"] == 1100.0
+    assert app_state.dispatcher_service._last_tick_times["u1"] == 1100.0
