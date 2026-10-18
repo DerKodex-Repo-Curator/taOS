@@ -463,12 +463,12 @@ describe("ProjectMembers external registry reload for late-approved agents", () 
     });
     await flush();
 
-    // After reload, the member should be in the External / Connected agents section
-    const externalSection = screen.getByText("External / Connected agents").closest("section")!;
-    expect(externalSection).toBeInTheDocument();
-    expect(within(externalSection).getByText("New")).toBeInTheDocument();
+    // After reload, the member should be in the External project members list
+    const externalList = screen.getByRole("list", { name: "External project members" });
+    expect(externalList).toBeInTheDocument();
+    expect(within(externalList).getByText("New")).toBeInTheDocument();
     // The handle @new appears in the title attribute (tooltip), not as visible text
-    expect(within(externalSection).getByTitle("@new")).toBeInTheDocument();
+    expect(within(externalList).getByTitle("@new")).toBeInTheDocument();
 
     // And NOT in the main Project members list
     const mainList = screen.getByRole("list", { name: "Project members" });
