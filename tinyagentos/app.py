@@ -130,6 +130,10 @@ from tinyagentos.knowledge_ingest import IngestPipeline
 from tinyagentos.knowledge_categories import CategoryEngine
 from tinyagentos.knowledge_monitor import MonitorService
 from tinyagentos.mcp import MCPServerStore, MCPSupervisor
+from tinyagentos.mcp.marketplace import (
+    MCPMarketplace,
+    MCPRegistry,
+)
 from tinyagentos.frameworks import FRAMEWORKS, FrameworkManifestError, validate_framework_manifest
 
 PROJECT_DIR = Path(__file__).parent.parent
@@ -378,6 +382,21 @@ def create_app(data_dir: Path | None = None, catalog_dir: Path | None = None) ->
     notif_store = NotificationStore(data_dir / "notifications.db")
     notif_push_store = NotificationPushStore(data_dir / "notif_push.db")
     mcp_store = MCPServerStore(data_dir / "mcp.db")
+    # The marketplace registry is a directory of YAML manifests shipped with
+    # the package; loading is deferred, so building it here costs nothing at
+    # boot.  The supervisor is attached by the lifespan (the install path only
+    # needs the store; uninstall uses the supervisor when one is wired).
+    # Resolved from catalog_dir (not the source tree) so a relocated catalog
+    # — e.g. create_app(catalog_dir=...) in tests — serves its own registry.
+    mcp_marketplace = MCPMarketplace(
+        registry=MCPRegistry(catalog_dir / "mcp-registry"),
+        store=mcp_store,
+        # Where a manifest's `{workspace}` placeholder is expanded to, and the
+        # directory the install flow creates for it.  Deliberately NOT data_dir
+        # itself: a filesystem/git MCP server pointed at the data dir would see
+        # the secrets store and the SQLite databases.
+        workspace_root=data_dir / "mcp-servers",
+    )
     qmd_client = QmdClient(config.qmd.get("url", "http://localhost:7832"))
     http_client = httpx.AsyncClient(timeout=30)
     torrent_settings_store = TorrentSettingsStore(data_dir / "torrent_settings.json")
@@ -752,6 +771,9 @@ def create_app(data_dir: Path | None = None, catalog_dir: Path | None = None) ->
         await mcp_store.init()
         mcp_supervisor = MCPSupervisor(mcp_store, catalog=registry, notif_store=notif_store, secrets_store=secrets_store)
         app.state.mcp_supervisor = mcp_supervisor
+        # The marketplace uninstall path delegates to the supervisor (it drops
+        # the server's attachments and mcp:<id>: secrets with it).
+        mcp_marketplace.supervisor = mcp_supervisor
         await knowledge_monitor.start()
         await agent_browsers.init()
         app.state.agent_browsers = agent_browsers
@@ -1370,6 +1392,10 @@ def create_app(data_dir: Path | None = None, catalog_dir: Path | None = None) ->
         from tinyagentos.agent_heartbeat import agent_heartbeat_loop
         _create_supervised_task(agent_heartbeat_loop(app.state), app.state._background_tasks)
 
+        from tinyagentos.projects.dispatcher import DispatcherService, dispatcher_tick_loop
+        app.state.dispatcher_service = DispatcherService(app.state)
+        _create_supervised_task(dispatcher_tick_loop(app.state), app.state._background_tasks)
+
         try:
             canvas_snapshotter = CanvasSnapshotter(
                 project_store=project_store,
@@ -1500,6 +1526,8 @@ def create_app(data_dir: Path | None = None, catalog_dir: Path | None = None) ->
         # go back to). A no-op unless __main__ recorded the listener port.
         from tinyagentos.llm_gateway.cutover import run_startup_reconcile
         _create_supervised_task(run_startup_reconcile(app.state), app.state._background_tasks)
+        from tinyagentos.agent_controller_listener import run_startup_reconcile as _agent_ctl_reconcile
+        _create_supervised_task(_agent_ctl_reconcile(app.state), app.state._background_tasks)
 
         app.state._startup_complete = True
         logger.info("startup complete — accepting requests")
@@ -1851,6 +1879,10 @@ def create_app(data_dir: Path | None = None, catalog_dir: Path | None = None) ->
     app.state.routine_store = routine_store
     app.state.project_event_broker = project_event_broker
     app.state.desktop_command_broker = desktop_command_broker
+    # Screencast cast tokens (in memory: a restart revokes every cast).
+    from tinyagentos.cast_tokens import CastTokenStore, install_access_log_redaction
+    app.state.cast_tokens = CastTokenStore()
+    install_access_log_redaction()
     app.state.project_canvas_store = project_canvas_store
     app.state.doc_review_store = doc_review_store
     app.state.project_notes_store = project_notes_store
@@ -1914,6 +1946,7 @@ def create_app(data_dir: Path | None = None, catalog_dir: Path | None = None) ->
     app.state.ingest_pipeline = knowledge_ingest
     app.state.knowledge_monitor = knowledge_monitor
     app.state.mcp_store = mcp_store
+    app.state.mcp_marketplace = mcp_marketplace
     # mcp_supervisor, orchestrator, trace_registry, bridge_sessions,
     # copilot_ticket_store, copilot_hub, and vapid_keypair are all created by
     # the lifespan.  Setting None here ensures attribute-existence checks in

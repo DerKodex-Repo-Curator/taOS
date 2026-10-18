@@ -197,6 +197,9 @@ def register_all_routers(app):
     from tinyagentos.routes.cluster_map import router as cluster_map_router
     app.include_router(cluster_map_router, dependencies=_csrf)
 
+    from tinyagentos.routes.cluster_resources import router as cluster_resources_router
+    app.include_router(cluster_resources_router, dependencies=_csrf)
+
     from tinyagentos.routes.cluster_ble import router as cluster_ble_router
     app.include_router(cluster_ble_router, dependencies=_csrf)
 
@@ -235,6 +238,9 @@ def register_all_routers(app):
 
     from tinyagentos.routes.desktop_control import router as desktop_control_router
     app.include_router(desktop_control_router, dependencies=_csrf)
+
+    from tinyagentos.routes.cast import router as cast_router
+    app.include_router(cast_router, dependencies=_csrf)
 
     from tinyagentos.routes.shared_folders import router as shared_folders_router
     app.include_router(shared_folders_router, dependencies=_csrf)
@@ -340,6 +346,9 @@ def register_all_routers(app):
 
     from tinyagentos.routes.mcp import router as mcp_router
     app.include_router(mcp_router, dependencies=_csrf)
+
+    from tinyagentos.routes.mcp_marketplace import router as mcp_marketplace_router
+    app.include_router(mcp_marketplace_router, dependencies=_csrf)
 
     from tinyagentos.routes.trace import router as trace_router
     app.include_router(trace_router, dependencies=_csrf)
@@ -510,6 +519,8 @@ def register_all_routers(app):
 
     from tinyagentos.routes.peer import router as peer_router
     app.include_router(peer_router)  # CSRF-exempt — bearer-only auth
+    from tinyagentos.routes.peer import handshake_router as peer_handshake_router
+    app.include_router(peer_handshake_router)  # CSRF-exempt: signature-authenticated, no cookie
 
     from tinyagentos.routes.council import router as council_router
     app.include_router(council_router, dependencies=_csrf)
