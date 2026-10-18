@@ -1262,6 +1262,25 @@ target user so the desktop consent actions can approve or deny:
 - `DELETE /api/shares/{id}` -- revoke a share. Owner or admin only
   (requires `require_owner_or_admin` against the share's `owner_user_id`).
 
+### Sharing grants (/api/sharing/grants)
+
+Route module `tinyagentos/routes/sharing.py`. `POST /api/sharing/grants` creates a
+grant only when the caller owns the artifact, checked in `_caller_owns_artifact`
+before the store is touched. For kind `project`, ownership is the project's
+`user_id`; kinds `app`, `game`, `workflow` and `studio` currently fail closed
+(403). A non-owner therefore gets 403 `{"error": "you do not own this artifact"}`,
+and the grant is never written.
+
+- `POST /api/sharing/grants` -- body `{artifact_id, artifact_kind, grantee}`.
+  Ownership is verified first; on success the grant is created via
+  `SharingGrantStore.grant` and returned, with 200.
+- `DELETE /api/sharing/grants/{grant_id}` -- revoke a grant. Owner only
+  (`_require_owner` against the grant's `owner_id`; 403 `only the owner may revoke
+  this grant` otherwise).
+- `GET /api/sharing/grants/mine` -- list grants the caller owns.
+- `GET /api/sharing/grants/shared-with-me` -- list active grants addressed to the
+  caller by username or email.
+
 ## Project invite redeem route (link + PIN)
 
 A project invite lets an external agent join without going through the consent
