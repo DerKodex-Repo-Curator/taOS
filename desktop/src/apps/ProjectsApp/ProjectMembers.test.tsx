@@ -412,3 +412,108 @@ const registryEntry = {
   origin: "external-selfjoin",
   status: "active",
 };
+
+describe("ProjectMembers external registry reload for late-approved agents", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("moves a newly approved external agent into External / Connected agents after registry reload", async () => {
+    let registryCallCount = 0;
+    const fetchMock = vi.fn().mockImplementation((input: string) => {
+      if (input === "/api/projects/prj-test/members") {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ items: [{ ...externalMember, member_id: "agent-new" }] }),
+          text: async () => "",
+        });
+      }
+      if (input === "/api/agents") {
+        return Promise.resolve({ ok: true, json: async () => [], text: async () => "" });
+      }
+      if (input === "/api/agents/registry") {
+        registryCallCount++;
+        if (registryCallCount === 1) {
+          return Promise.resolve({ ok: true, json: async () => [], text: async () => "" });
+        }
+        return Promise.resolve({
+          ok: true,
+          json: async () => [
+            {
+              origin: "external-selfjoin",
+              status: "active",
+              canonical_id: "agent-new",
+              handle: "@new",
+              display_name: "New",
+            },
+          ],
+          text: async () => "",
+        });
+      }
+      throw new Error(`Unmocked fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<ProjectMembers project={project} onChanged={vi.fn()} />);
+    await flush();
+
+    // Wait for the effect to detect the unresolved member and reload the registry
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 100));
+    });
+    await flush();
+
+    // After reload, the member should be in the External / Connected agents section
+    const externalSection = screen.getByText("External / Connected agents").closest("section")!;
+    expect(externalSection).toBeInTheDocument();
+    expect(within(externalSection).getByText("New")).toBeInTheDocument();
+    // The handle @new appears in the title attribute (tooltip), not as visible text
+    expect(within(externalSection).getByTitle("@new")).toBeInTheDocument();
+
+    // And NOT in the main Project members list
+    const mainList = screen.getByRole("list", { name: "Project members" });
+    expect(within(mainList).queryByText("New")).not.toBeInTheDocument();
+    expect(within(mainList).queryByText("agent-new")).not.toBeInTheDocument();
+  });
+
+  it("does not loop when registry never contains the member id (fetches at most twice)", async () => {
+    let registryCallCount = 0;
+    const fetchMock = vi.fn().mockImplementation((input: string) => {
+      if (input === "/api/projects/prj-test/members") {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ items: [{ ...externalMember, member_id: "agent-unknown" }] }),
+          text: async () => "",
+        });
+      }
+      if (input === "/api/agents") {
+        return Promise.resolve({ ok: true, json: async () => [], text: async () => "" });
+      }
+      if (input === "/api/agents/registry") {
+        registryCallCount++;
+        return Promise.resolve({ ok: true, json: async () => [], text: async () => "" });
+      }
+      throw new Error(`Unmocked fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<ProjectMembers project={project} onChanged={vi.fn()} />);
+    await flush();
+
+    // Wait for potential reload attempts
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 200));
+    });
+    await flush();
+
+    // Registry should be fetched at most twice (initial + one reload attempt)
+    expect(registryCallCount).toBeLessThanOrEqual(2);
+
+    // Member should stay in the main Project members list
+    const mainList = screen.getByRole("list", { name: "Project members" });
+    expect(within(mainList).getByText("agent-unknown")).toBeInTheDocument();
+
+    // External section should not render (no external members)
+    expect(screen.queryByText("External / Connected agents")).not.toBeInTheDocument();
+  });
+});

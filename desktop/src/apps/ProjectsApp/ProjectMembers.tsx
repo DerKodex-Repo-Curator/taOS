@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { projectsApi, type Project, type ProjectMember } from "@/lib/projects";
 import { AddAgentDialog } from "./AddAgentDialog";
 import { InviteAgentDialog } from "./InviteAgentDialog";
@@ -334,8 +334,10 @@ export function ProjectMembers({ project, onChanged }: { project: Project; onCha
     return m.member_id;
   };
 
-  const refresh = () =>
+  const refresh = () => {
     projectsApi.members.list(project.id).then(setMembers).catch(() => setMembers([]));
+    reloadExternalRegistry();
+  };
 
   // Reload the external registry roster so a rename (which updates a registry
   // display_name, not a project_members row) is reflected in the label. Members
@@ -447,6 +449,24 @@ export function ProjectMembers({ project, onChanged }: { project: Project; onCha
     }
     return m;
   }, [externalAgents]);
+
+  // Track the last set of unresolved member IDs we reloaded for, to avoid loops.
+  const lastReloadedUnresolvedRef = useRef<string>("");
+
+  // When the registry has loaded and there are members not in byId or byHandle,
+  // reload the registry once per distinct unresolved set.
+  useEffect(() => {
+    if (!externalRegistryLoaded) return;
+    const unresolved = members
+      .filter((m) => !byId.has(m.member_id) && !byHandle.has(m.member_id))
+      .map((m) => m.member_id)
+      .sort()
+      .join(",");
+    if (unresolved && unresolved !== lastReloadedUnresolvedRef.current) {
+      lastReloadedUnresolvedRef.current = unresolved;
+      reloadExternalRegistry();
+    }
+  }, [externalRegistryLoaded, members, byId, byHandle, reloadExternalRegistry]);
 
   const { mainMembers, externalMembers } = useMemo(() => {
     const main: ProjectMember[] = [];
