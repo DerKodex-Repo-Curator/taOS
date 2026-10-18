@@ -8,7 +8,7 @@ import {
   type NotificationHistoryQuery,
 } from "@/lib/server-notifications";
 
-const SEARCH_DEBOUNCE_MS = 250;
+export const SEARCH_DEBOUNCE_MS = 250;
 const PAGE_SIZE = 50;
 
 function formatTime(ts: number): string {
