@@ -66,7 +66,7 @@ if (typeof globalThis.structuredClone === "undefined") {
     if (ArrayBuffer.isView(value)) {
       const buffer = value.buffer as ArrayBuffer;
       const Constructor = value.constructor as { new (buffer: ArrayBuffer, byteOffset?: number, length?: number): typeof value };
-      return new Constructor(buffer.slice(0));
+      return new Constructor(buffer, value.byteOffset, value.byteLength);
     }
 
     if (value instanceof Map) {

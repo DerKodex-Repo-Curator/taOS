@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import { createContext, runInContext } from "node:vm";
 
 const originalHasOwn = Object.hasOwn;
 const originalStructuredClone = globalThis.structuredClone;
@@ -49,26 +50,93 @@ function restoreGlobals() {
 async function testWithPolyfill<T>(
   name: string,
   setup: () => void,
-  testFn: () => T | Promise<T>
+  testFn: (polyfillRefs?: { at?: typeof Array.prototype.at }) => T | Promise<T>
 ): Promise<T> {
   setup();
   vi.resetModules();
   try {
     await import("./polyfills");
-    return await testFn();
+    // For Array.prototype.at, capture the polyfill then restore native so vitest internals work
+    const atPolyfill = Array.prototype.at;
+    if (originalAt !== undefined) {
+      Array.prototype.at = originalAt;
+    }
+    return await testFn({ at: atPolyfill });
   } finally {
     restoreGlobals();
   }
 }
 
-// Polyfill implementation for direct testing (matches polyfills.ts)
-function arrayAtPolyfill(this: unknown, index: number): unknown {
-  const arr = Array.from(this);
-  const len = arr.length;
-  if (len === 0) return undefined;
-  const idx = index >= 0 ? index : len + index;
-  if (idx < 0 || idx >= len) return undefined;
-  return arr[idx];
+// Run Array.prototype.at polyfill test in a fresh VM context where we can safely delete Array.prototype.at
+async function testArrayAtInVmContext() {
+  const context = createContext({
+    Array,
+    Object,
+    globalThis: globalThis,
+    console,
+    Error,
+    WeakMap,
+    Map,
+    Set,
+    Date,
+    RegExp,
+    ArrayBuffer,
+    Uint8Array,
+    Int8Array,
+    Uint16Array,
+    Int16Array,
+    Uint32Array,
+    Int32Array,
+    Float32Array,
+    Float64Array,
+    DataView,
+    Symbol,
+    // Minimal vitest-like test functions
+    expect: (actual: any) => ({
+      toBe: (expected: any) => { if (actual !== expected) throw new Error(`Expected ${actual} to be ${expected}`); },
+      toBeUndefined: () => { if (actual !== undefined) throw new Error(`Expected undefined, got ${actual}`); },
+      toBeInstanceOf: (ctor: any) => { if (!(actual instanceof ctor)) throw new Error(`Expected instanceof ${ctor.name}`); },
+      not: { toBe: (expected: any) => { if (actual === expected) throw new Error(`Expected not to be ${expected}`); } },
+    }),
+  });
+
+  // Delete Array.prototype.at in the VM context
+  runInContext("delete Array.prototype.at", context);
+
+  // Load and execute the polyfill code in the VM context
+  const polyfillCode = `
+    if (typeof Array.prototype.at === "undefined") {
+      Object.defineProperty(Array.prototype, "at", {
+        value: function at(index) {
+          const arr = Array.from(this);
+          const len = arr.length;
+          if (len === 0) return undefined;
+          const idx = index >= 0 ? index : len + index;
+          if (idx < 0 || idx >= len) return undefined;
+          return arr[idx];
+        },
+        writable: true,
+        configurable: true,
+        enumerable: false,
+      });
+    }
+  `;
+  runInContext(polyfillCode, context);
+
+  // Run tests in the VM context
+  const testCode = `
+    const arr = [1, 2, 3];
+    if (typeof arr.at !== "function") throw new Error("at is not a function");
+    if (arr.at(0) !== 1) throw new Error("at(0) failed");
+    if (arr.at(-1) !== 3) throw new Error("at(-1) failed");
+    if (arr.at(-2) !== 2) throw new Error("at(-2) failed");
+    if (arr.at(5) !== undefined) throw new Error("at(5) failed");
+    if (arr.at(-5) !== undefined) throw new Error("at(-5) failed");
+    const arrayLike = { 0: "a", 1: "b", 2: "c", length: 3 };
+    if (Array.prototype.at.call(arrayLike, 0) !== "a") throw new Error("arrayLike at(0) failed");
+    if (Array.prototype.at.call(arrayLike, -1) !== "c") throw new Error("arrayLike at(-1) failed");
+  `;
+  runInContext(testCode, context);
 }
 
 describe("polyfills", () => {
@@ -85,24 +153,7 @@ describe("polyfills", () => {
   });
 
   it("Array.prototype.at polyfill exists and works", async () => {
-    // Note: Cannot delete Array.prototype.at globally as vitest internals depend on it.
-    // Test the polyfill logic directly instead.
-    const polyfill = arrayAtPolyfill;
-    const arr = [1, 2, 3];
-    expect(polyfill.call(arr, 0)).toBe(1);
-    expect(polyfill.call(arr, -1)).toBe(3);
-    expect(polyfill.call(arr, -2)).toBe(2);
-    expect(polyfill.call(arr, 5)).toBeUndefined();
-    expect(polyfill.call(arr, -5)).toBeUndefined();
-    // Also test on array-like object
-    const arrayLike = { 0: "a", 1: "b", 2: "c", length: 3 };
-    expect(polyfill.call(arrayLike, 0)).toBe("a");
-    expect(polyfill.call(arrayLike, -1)).toBe("c");
-    // Verify native at() works the same (polyfill matches native behavior)
-    if (originalAt) {
-      expect(arr.at(0)).toBe(polyfill.call(arr, 0));
-      expect(arr.at(-1)).toBe(polyfill.call(arr, -1));
-    }
+    await testArrayAtInVmContext();
   });
 
   it("globalThis.structuredClone polyfill exists and works", async () => {
@@ -134,13 +185,23 @@ describe("polyfills", () => {
 
   it("structuredClone throws DataCloneError for functions", async () => {
     await testWithPolyfill("structuredClone throws on function", deleteGlobalStructuredClone, () => {
-      expect(() => globalThis.structuredClone(() => {})).toThrow();
+      try {
+        globalThis.structuredClone(() => {});
+        throw new Error("Expected to throw");
+      } catch (e: any) {
+        expect(e.name).toBe("DataCloneError");
+      }
     });
   });
 
   it("structuredClone throws DataCloneError for symbols", async () => {
     await testWithPolyfill("structuredClone throws on symbol", deleteGlobalStructuredClone, () => {
-      expect(() => globalThis.structuredClone(Symbol("test"))).toThrow();
+      try {
+        globalThis.structuredClone(Symbol("test"));
+        throw new Error("Expected to throw");
+      } catch (e: any) {
+        expect(e.name).toBe("DataCloneError");
+      }
     });
   });
 
