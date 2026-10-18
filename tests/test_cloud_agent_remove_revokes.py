@@ -24,20 +24,11 @@ async def test_concurrent_revoke_race(client, app, monkeypatch, tmp_path):
     # Step 1: Set up race condition by monkeypatching registry.revoke
     registry = app.state.agent_registry
     
-    # Keep track of how many times revoke has been called
-    revoke_call_count = 0
     original_revoke = registry.revoke
     
     async def racing_revoke(canonical_id):
-        nonlocal revoke_call_count
-        revoke_call_count += 1
-        if revoke_call_count == 1:
-            # First call succeeds (simulating concurrent DELETE)
-            await original_revoke(canonical_id)
-        else:
-            # Second call raises ValueError (simulating lifecycle transition conflict)
-            # This tests the except branch in _revoke_cloud_agent_identity
-            raise ValueError("lifecycle transition conflict")
+        await original_revoke(canonical_id)
+        return await original_revoke(canonical_id)
     
     monkeypatch.setattr(registry, "revoke", racing_revoke)
     
