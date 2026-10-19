@@ -311,6 +311,7 @@ export function ProjectMembers({ project, onChanged }: { project: Project; onCha
   // mirror of project.lead_member_id so the selector reflects changes instantly
   // (the backend enforces the one-lead invariant structurally on write).
   const [leadMemberId, setLeadMemberId] = useState<string | null>(project.lead_member_id ?? null);
+  const registryReqSeq = useRef(0);
 
   useEffect(() => {
     setLeadMemberId(project.lead_member_id ?? null);
@@ -342,10 +343,12 @@ export function ProjectMembers({ project, onChanged }: { project: Project; onCha
   // Reload the external registry roster so a rename (which updates a registry
   // display_name, not a project_members row) is reflected in the label. Members
   // list alone does not carry the display_name, so onRefresh is not enough.
-  const reloadExternalRegistry = () =>
-    fetch("/api/agents/registry", { credentials: "include" })
+  const reloadExternalRegistry = () => {
+    const seq = ++registryReqSeq.current;
+    return fetch("/api/agents/registry", { credentials: "include" })
       .then((r) => (r.ok ? r.json() : []))
       .then((rows) => {
+        if (seq !== registryReqSeq.current) return;
         if (!Array.isArray(rows)) return;
         const active = rows.filter(
           (e: { origin?: string; status?: string }) =>
@@ -363,6 +366,7 @@ export function ProjectMembers({ project, onChanged }: { project: Project; onCha
         );
       })
       .catch(() => {});
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -396,10 +400,12 @@ export function ProjectMembers({ project, onChanged }: { project: Project; onCha
 
   useEffect(() => {
     let cancelled = false;
+    const seq = ++registryReqSeq.current;
     fetch("/api/agents/registry", { credentials: "include" })
       .then((r) => (r.ok ? r.json() : []))
       .then((rows) => {
         if (cancelled) return;
+        if (seq !== registryReqSeq.current) return;
         if (Array.isArray(rows)) {
           const active = rows.filter(
             (entry: { origin?: string; status?: string }) =>
