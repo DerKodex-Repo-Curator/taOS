@@ -1000,6 +1000,7 @@ export function MessagesApp({
   const reconnectDelayRef = useRef(1000);
   const reconnectAttemptsRef = useRef(0);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const agentListTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const prevChannelRef = useRef<string | null>(null);
   const lastFetchRef = useRef<number>(0);
 
@@ -1418,9 +1419,9 @@ export function MessagesApp({
     const THROTTLE_MS = 10000;
 
     const clearTimer = () => {
-      if (timerRef.current) {
-        clearTimeout(timerRef.current);
-        timerRef.current = null;
+      if (agentListTimerRef.current) {
+        clearTimeout(agentListTimerRef.current);
+        agentListTimerRef.current = null;
       }
     };
 
@@ -1429,8 +1430,8 @@ export function MessagesApp({
       if (now - lastFetchRef.current < THROTTLE_MS) return;
       lastFetchRef.current = now;
       clearTimer();
-      timerRef.current = setTimeout(() => {
-        timerRef.current = null;
+      agentListTimerRef.current = setTimeout(() => {
+        agentListTimerRef.current = null;
         fetchAgentLists();
       }, 0);
     };

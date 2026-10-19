@@ -286,4 +286,38 @@ describe("MessagesApp agent list refresh on focus (tsk-sh4djp)", () => {
 
     nowSpy.mockRestore();
   });
+
+  it("refetches agent lists when document becomes visible after 10s throttle", async () => {
+    const { mock: fetchMock, calls } = makeFetchMock();
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<MessagesApp windowId="test" />);
+    await openFirstSocket();
+    await act(async () => {});
+
+    // Initial mount fetches agent lists twice (live + archived)
+    const initialAgentCalls = calls.filter((u) => u.includes("/api/agents")).length;
+    expect(initialAgentCalls).toBe(2);
+
+    // Advance time by 11s (past the 10s throttle)
+    const nowSpy = vi.spyOn(Date, "now");
+    const baseTime = Date.now();
+    nowSpy.mockImplementation(() => baseTime + 11000);
+
+    // Dispatch visibilitychange event (document becomes visible)
+    Object.defineProperty(document, "hidden", { value: false, configurable: true });
+    document.dispatchEvent(new Event("visibilitychange"));
+    await act(async () => {});
+
+    // Flush the setTimeout(0) scheduled by the effect
+    await act(async () => {
+      vi.advanceTimersByTime(10);
+    });
+
+    // Should have fetched agent lists once more (2 more calls: live + archived)
+    const afterVisibilityAgentCalls = calls.filter((u) => u.includes("/api/agents")).length;
+    expect(afterVisibilityAgentCalls).toBe(initialAgentCalls + 2);
+
+    nowSpy.mockRestore();
+  });
 });
