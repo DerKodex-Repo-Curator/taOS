@@ -574,6 +574,9 @@ describe("ProjectMembers registry race condition guard", () => {
             };
           });
         }
+        if (reloadCallCount > 2) {
+          return Promise.resolve({ ok: true, json: async () => [], text: async () => "" });
+        }
         // Second reload (triggered by user action) - deferred, resolves FIRST with agent-new
         return call2Promise.then(() => {
           call2Returned = true;
@@ -649,6 +652,8 @@ describe("ProjectMembers registry race condition guard", () => {
       await new Promise((r) => setTimeout(r, 0));
     });
     await flush();
+
+    expect(reloadCallCount).toBe(2);
 
     // call1Returned should be true now (first reload resolved after)
     expect(call1Returned).toBe(true);
