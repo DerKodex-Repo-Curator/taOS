@@ -1307,6 +1307,26 @@ export function MessagesApp({
               ),
             );
             break;
+
+          case "receipt":
+            if (data.message_id) {
+              setReceipts((prev) => {
+                const existing = prev[data.message_id] ?? [];
+                const idx = existing.findIndex((r) => r.agent_id === data.agent_id);
+                const updated: Receipt = {
+                  message_id: data.message_id,
+                  agent_id: data.agent_id,
+                  reader_type: data.reader_type,
+                  delivered_at: data.delivered_at ?? existing[idx]?.delivered_at ?? null,
+                  seen_at: data.seen_at ?? existing[idx]?.seen_at ?? null,
+                };
+                const next = [...existing];
+                if (idx >= 0) next[idx] = updated;
+                else next.push(updated);
+                return { ...prev, [data.message_id]: next };
+              });
+            }
+            break;
         }
       } catch {
         /* bad json */
@@ -1334,42 +1354,6 @@ export function MessagesApp({
     };
 
     wsRef.current = ws;
-  }, []);
-
-  /* ---- A2A bus stream: live receipt updates ---- */
-  useEffect(() => {
-    if (typeof EventSource === "undefined") {
-      console.debug("[MessagesApp] EventSource unavailable, skipping A2A bus stream");
-      return;
-    }
-    const es = new EventSource("/api/a2a/bus/stream");
-    es.onmessage = (ev) => {
-      try {
-        const data = JSON.parse(ev.data);
-        if (data.type === "receipt" && data.message_id) {
-          setReceipts((prev) => {
-            const existing = prev[data.message_id] ?? [];
-            const idx = existing.findIndex((r) => r.agent_id === data.agent_id);
-            const updated: Receipt = {
-              message_id: data.message_id,
-              agent_id: data.agent_id,
-              delivered_at: data.delivered_at ?? existing[idx]?.delivered_at ?? null,
-              seen_at: data.seen_at ?? existing[idx]?.seen_at ?? null,
-            };
-            const next = [...existing];
-            if (idx >= 0) next[idx] = updated;
-            else next.push(updated);
-            return { ...prev, [data.message_id]: next };
-          });
-        }
-      } catch {
-        /* ignore malformed stream event */
-      }
-    };
-    es.onerror = () => {
-      /* let the browser reconnect; do not force-close */
-    };
-    return () => es.close();
   }, []);
 
   /* ---- emoji popover: escape and outside click ---- */
