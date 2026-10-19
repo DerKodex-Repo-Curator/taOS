@@ -2,6 +2,7 @@
 
 import pytest
 import pytest_asyncio
+import uuid
 from types import SimpleNamespace
 
 from tinyagentos.projects.dispatcher import DispatcherService
@@ -88,18 +89,21 @@ class TestDispatcherReconcile:
         # reconcile_user should resolve it as 'expired'
         assert "expired" in result or result.get("expired_count", 0) == 1
 
-        # Check the lease state is 'expired'
-        leases = await real_stores.dispatcher_store.pending_for_agent(agent_cid)
-        assert len(leases) == 1
-        assert leases[0]["state"] == "expired"
-        assert leases[0]["resolved_at"] is not None
+        # Check the lease state is 'expired' by querying the ledger directly
+        async with real_stores.dispatcher_store._read(
+            "SELECT state, resolved_at FROM dispatch_ledger WHERE id = ?", (lease_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        assert row is not None
+        assert row[0] == "expired"
+        assert row[1] is not None
 
         # Check backoff was bumped: n=1, next_eligible_at = now + 900
-        backoff = await real_stores.dispatcher_store._db.execute(
+        async with real_stores.dispatcher_store._read(
             "SELECT consecutive_expiries, next_eligible_at FROM dispatch_agent_backoff WHERE canonical_id = ?",
             (agent_cid,),
-        )
-        row = await backoff.fetchone()
+        ) as cur:
+            row = await cur.fetchone()
         assert row is not None
         assert row[0] == 1  # consecutive_expiries
         assert row[1] == now + 900  # next_eligible_at
@@ -108,9 +112,16 @@ class TestDispatcherReconcile:
         # (We need a fresh now that is after the first next_eligible_at)
         now2 = now + 2000  # well past the first backoff
         result2 = await dispatcher_service.tick_user("u1", await real_stores.dispatcher_store.get_config("u1"), now2)
-        leases2 = await real_stores.dispatcher_store.pending_for_agent(agent_cid)
-        # Should still be expired
-        assert leases2[0]["state"] == "expired"
+        # Check the lease state is still 'expired' by querying the ledger directly
+        async with real_stores.dispatcher_store._read(
+            "SELECT state FROM dispatch_ledger WHERE canonical_id = ? AND task_id = ?",
+            (agent_cid, task_id),
+        ) as cur:
+            row2 = await cur.fetchone()
+        assert row2 is not None
+        assert row2[0] == "expired"
+
+        # Backoff should be n=2
 
         # Backoff should be n=2
         backoff2 = await real_stores.dispatcher_store._db.execute(
@@ -243,10 +254,15 @@ class TestDispatcherReconcile:
         result = await dispatcher_service.tick_user("u1", await real_stores.dispatcher_store.get_config("u1"), now + 100)
         assert result.get("overridden_count", 0) == 1 or "overridden" in result
 
-        # Lease state should be 'overridden'
-        leases = await real_stores.dispatcher_store.pending_for_agent(agent_cid)
-        assert len(leases) == 1
-        assert leases[0]["state"] == "overridden"
+# Lease state should be 'overridden' - query ledger directly since pending_for_agent
+        # only returns state='pending' rows
+        async with real_stores.dispatcher_store._read(
+            "SELECT state, resolved_at FROM dispatch_ledger WHERE task_id = ? AND canonical_id = ?",
+            (task_id, agent_cid),
+        ) as cur:
+            row = await cur.fetchone()
+        assert row is not None
+        assert row[0] == "overridden"
 
     @pytest.mark.asyncio
     async def test_card_closed(self, dispatcher_service, real_stores, tmp_path):
@@ -299,10 +315,16 @@ class TestDispatcherReconcile:
         result = await dispatcher_service.tick_user("u1", await real_stores.dispatcher_store.get_config("u1"), now + 100)
         assert result.get("closed_count", 0) == 1 or "closed" in result
 
-        # Lease state should be 'closed'
-        leases = await real_stores.dispatcher_store.pending_for_agent(agent_cid)
-        assert len(leases) == 1
-        assert leases[0]["state"] == "closed"
+        # Lease state should be 'closed' - query ledger directly since pending_for_agent
+        # only returns state='pending' rows
+        async with real_stores.dispatcher_store._read(
+            "SELECT state, resolved_at FROM dispatch_ledger WHERE task_id = ? AND canonical_id = ?",
+            (task_id, agent_cid),
+        ) as cur:
+            row = await cur.fetchone()
+        assert row is not None
+        assert row[0] == "closed"
+        assert row[1] is not None
 
     @pytest.mark.asyncio
     async def test_backed_off_agent_no_assignment_next_tick(self, dispatcher_service, real_stores, tmp_path):
@@ -413,39 +435,29 @@ class TestDispatcherReconcile:
         await real_stores.task_store._db.commit()
 
         # Now set up 5 'expired' entries in the ledger for this task
-        # We need to insert additional rows with state='expired'
-        # Actually, let me reconsider - the test is about expired_counts_48h
-
-        # Configure dispatcher
-        await real_stores.dispatcher_store.set_config(
-            "u1",
-            DispatcherConfig(
-                user_id="u1",
-                enabled=True,
-                eligible_agents=[agent_cid],
-                max_concurrent_per_agent=1,
-                lease_seconds=900,
-            ),
-            updated_by="test",
-        )
-
-        # Test with 5 expired entries - card should NOT be assigned
-        # First create 5 expired entries
+        # Insert rows directly as 'expired' since insert_lease has a unique constraint
+        # on task_id WHERE state='pending' which prevents duplicate pending rows
         for i in range(5):
-            expired_lease_id = await real_stores.dispatcher_store.insert_lease(
-                user_id="u1",
-                task_id=task_id,
-                project_id=board1_id,
-                canonical_id=agent_cid,
-                assignee_written=agent_cid,
-                reason="test",
-                assigned_at=now - 100 - i * 100,
-                lease_expires_at=now - 50 - i * 100,
-            )
-            # Mark as expired
+            expired_lease_id = uuid.uuid4().hex
             await real_stores.dispatcher_store._db.execute(
-                "UPDATE dispatch_ledger SET state = 'expired', resolved_at = ? WHERE id = ?",
-                (now - 100, expired_lease_id),
+                """
+                INSERT INTO dispatch_ledger
+                    (id, user_id, task_id, project_id, canonical_id, assignee_written, state, reason, assigned_at, lease_expires_at, resolved_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    expired_lease_id,
+                    "u1",
+                    task_id,
+                    board1_id,
+                    agent_cid,
+                    agent_cid,
+                    "expired",
+                    "test",
+                    now - 100 - i * 100,
+                    now - 50 - i * 100,
+                    now - 100,
+                ),
             )
         await real_stores.dispatcher_store._db.commit()
 
@@ -539,7 +551,12 @@ class TestDispatcherReconcile:
         # and un-assign the expired lease
         result = await dispatcher_service.tick(now=now + 100)
         # u1 should be processed (users_processed should include it or the lease should be resolved)
-        # The lease state should be 'expired'
-        leases = await real_stores.dispatcher_store.pending_for_agent(agent_cid)
-        assert len(leases) == 1
-        assert leases[0]["state"] == "expired"
+        # The lease state should be 'expired' - query ledger directly since pending_for_agent
+        # only returns state='pending' rows
+        async with real_stores.dispatcher_store._read(
+            "SELECT state, resolved_at FROM dispatch_ledger WHERE task_id = ? AND canonical_id = ?",
+            (task_id, agent_cid),
+        ) as cur:
+            row = await cur.fetchone()
+        assert row is not None
+        assert row[0] == "expired"

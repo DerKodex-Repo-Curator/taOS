@@ -344,7 +344,7 @@ class DispatcherStore(ProjectsDBStore):
                 """
                 SELECT id, user_id, task_id, project_id, canonical_id, assignee_written, state, reason, assigned_at, lease_expires_at, resolved_at
                 FROM dispatch_ledger
-                WHERE canonical_id = ? AND state = 'pending'
+                WHERE user_id = ? AND state = 'pending'
                 """,
                 (user_id,),
             ) as cur:
@@ -420,7 +420,7 @@ class DispatcherStore(ProjectsDBStore):
             await self._db.execute(
                 """
                 INSERT INTO dispatch_agent_backoff (canonical_id, consecutive_expiries, next_eligible_at, last_assigned_at)
-                VALUES (?, 0, 0, last_assigned_at)
+                VALUES (?, 0, 0, 0)
                 ON CONFLICT(canonical_id) DO UPDATE SET
                     consecutive_expiries = 0,
                     next_eligible_at = 0

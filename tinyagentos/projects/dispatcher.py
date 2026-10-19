@@ -70,7 +70,7 @@ class DispatcherService:
             # Case 2: task claimed_by is set and equals one of the agent's aliases
             task_claimed_by = task.get("claimed_by")
             aliases_result = await resolve_agent_refs(
-                [canonical_id], cfg, agent_registry
+                [canonical_id], self.app_state.config, agent_registry
             )
             # Fall back to {canonical_id} if unresolved
             agent_aliases = set()
@@ -85,20 +85,7 @@ class DispatcherService:
                 counts["claimed"] += 1
                 continue
 
-            # Case 3: claimed_by set to someone else, or assignee_id != row assignee_written -> resolve 'overridden'
-            task_assignee_id = task.get("assignee_id")
-            if task_claimed_by is not None and task_claimed_by not in agent_aliases:
-                # claimed_by is set to someone else (not this agent)
-                await dispatcher_store.resolve(lease_id, "overridden", now)
-                counts["overridden"] += 1
-                continue
-            if task_assignee_id != assignee_written:
-                # assignee changed by human
-                await dispatcher_store.resolve(lease_id, "overridden", now)
-                counts["overridden"] += 1
-                continue
-
-            # Case 5: now > lease_expires_at and still open + unclaimed -> unassign + bump_backoff
+            # Case 3: now > lease_expires_at and still open + unclaimed -> unassign + bump_backoff
             if now > row["lease_expires_at"]:
                 ok = await task_store.unassign_if(task_id, assignee_written, actor="dispatcher")
                 if ok:
@@ -117,6 +104,21 @@ class DispatcherService:
                         await dispatcher_store.resolve(lease_id, "overridden", now)
                         counts["overridden"] += 1
                 continue
+
+            # Case 4: claimed_by set to someone else, or assignee_id != row assignee_written -> resolve 'overridden'
+            if task_claimed_by is not None and task_claimed_by not in agent_aliases:
+                # claimed_by is set to someone else (not this agent)
+                await dispatcher_store.resolve(lease_id, "overridden", now)
+                counts["overridden"] += 1
+                continue
+            task_assignee_id = task.get("assignee_id")
+            if task_assignee_id != assignee_written:
+                # assignee changed by human
+                await dispatcher_store.resolve(lease_id, "overridden", now)
+                counts["overridden"] += 1
+                continue
+
+            # Otherwise leave pending (no state change)
 
             # Otherwise leave pending (no state change)
 
@@ -163,9 +165,6 @@ class DispatcherService:
         agents_backed_off = 0
         cards_paused = 0
 
-        # Step 1: Reconcile pending leases FIRST
-        reconcile_counts = await self.reconcile_user(user_id, cfg, now)
-
         # Get recent expiries and card expiry counts (moved before board loop)
         recent_expiries = await dispatcher_store.recent_expiries(now - 48 * 3600)
         card_expiry_counts = await dispatcher_store.expired_counts_48h(now)
@@ -177,9 +176,8 @@ class DispatcherService:
         )
 
         # Filter out backed-off agents
-        now_time = now
         all_canonical_ids = [ref.canonical_id for ref in agent_refs]
-        backed_off = await dispatcher_store.backed_off(all_canonical_ids, now_time)
+        backed_off = await dispatcher_store.backed_off(all_canonical_ids, now)
         board_agent_refs = []
         for ref in agent_refs:
             if ref.canonical_id in backed_off:
@@ -409,6 +407,12 @@ class DispatcherService:
             "wakes": 0,
             "users_processed": 0,
             "users_failed": 0,
+            "agents_backed_off": 0,
+            "cards_paused": 0,
+            "claimed_count": 0,
+            "overridden_count": 0,
+            "closed_count": 0,
+            "expired_count": 0,
         }
 
         for cfg in configs:
@@ -426,6 +430,12 @@ class DispatcherService:
                 for k in ("boards_held", "candidates_considered", "assignments_made", "races_skipped", "wakes"):
                     total[k] += result[k]
                 total["users_processed"] += 1
+                total["agents_backed_off"] += result.get("agents_backed_off", 0)
+                total["cards_paused"] += result.get("cards_paused", 0)
+                total["claimed_count"] += result.get("claimed_count", 0)
+                total["overridden_count"] += result.get("overridden_count", 0)
+                total["closed_count"] += result.get("closed_count", 0)
+                total["expired_count"] += result.get("expired_count", 0)
             except Exception:
                 logger.exception("dispatcher: tick failed for user %s", cfg.user_id)
                 total["users_failed"] += 1
