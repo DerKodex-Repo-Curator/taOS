@@ -320,4 +320,55 @@ describe("MessagesApp agent list refresh on focus (tsk-sh4djp)", () => {
 
     nowSpy.mockRestore();
   });
+
+  it("refetches agent lists when focus inside throttle window schedules trailing refresh (tsk-hre6f5)", async () => {
+    const { mock: fetchMock, calls } = makeFetchMock();
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<MessagesApp windowId="test" />);
+    await openFirstSocket();
+    await act(async () => {});
+
+    // Initial mount fetches agent lists twice (live + archived)
+    const initialAgentCalls = calls.filter((u) => u.includes("/api/agents")).length;
+    expect(initialAgentCalls).toBe(2);
+
+    // First focus inside the 10s throttle window
+    window.dispatchEvent(new Event("focus"));
+    await act(async () => {});
+
+    // Advance 2000ms (inside the 10s window)
+    const baseTime1 = Date.now();
+    const nowSpy1 = vi.spyOn(Date, "now");
+    nowSpy1.mockImplementation(() => baseTime1 + 2000);
+
+    await act(async () => {
+      vi.advanceTimersByTime(2000);
+    });
+
+    nowSpy1.mockRestore();
+
+    // Second focus still inside the 10s window
+    window.dispatchEvent(new Event("focus"));
+    await act(async () => {});
+
+    // Advance 8001ms (total 10001ms from initial fetch, still within 10s window)
+    const baseTime2 = Date.now();
+    const nowSpy2 = vi.spyOn(Date, "now");
+    nowSpy2.mockImplementation(() => baseTime2 + 10001);
+
+    await act(async () => {
+      vi.advanceTimersByTime(8001);
+    });
+
+    nowSpy2.mockRestore();
+
+    // Should have fetched agent lists twice (initial + trailing refresh)
+    const finalAgentCalls = calls.filter((u) => u.includes("/api/agents")).length;
+    expect(finalAgentCalls).toBe(4);
+
+    // Two focus events inside the window should still produce only ONE trailing fetch
+    // So the agent list should only be fetched once extra (not twice)
+    vi.clearAllTimers();
+  });
 });

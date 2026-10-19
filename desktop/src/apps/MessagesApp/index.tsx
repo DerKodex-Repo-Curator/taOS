@@ -1427,11 +1427,21 @@ export function MessagesApp({
 
     const scheduleFetch = () => {
       const now = Date.now();
-      if (now - lastFetchRef.current < THROTTLE_MS) return;
+      if (now - lastFetchRef.current < THROTTLE_MS) {
+        if (agentListTimerRef.current === null) {
+          agentListTimerRef.current = setTimeout(() => {
+            agentListTimerRef.current = null;
+            lastFetchRef.current = Date.now();
+            fetchAgentLists();
+          }, THROTTLE_MS - (now - lastFetchRef.current));
+        }
+        return;
+      }
       lastFetchRef.current = now;
       clearTimer();
       agentListTimerRef.current = setTimeout(() => {
         agentListTimerRef.current = null;
+        lastFetchRef.current = Date.now();
         fetchAgentLists();
       }, 0);
     };
