@@ -539,6 +539,8 @@ describe("ProjectMembers registry race condition guard", () => {
 
     let totalRegistryCallCount = 0;
     let reloadCallCount = 0;
+    let call1Returned = false;
+    let call2Returned = false;
     const fetchMock = vi.fn().mockImplementation((input: string) => {
       if (input === "/api/projects/prj-test/members") {
         return Promise.resolve({
@@ -564,27 +566,33 @@ describe("ProjectMembers registry race condition guard", () => {
         reloadCallCount++;
         if (reloadCallCount === 1) {
           // First reload (unresolved-member effect) - deferred, resolves LAST with empty
-          return call1Promise.then(() => ({
-            ok: true,
-            json: async () => [],
-            text: async () => "",
-          }));
+          return call1Promise.then(() => {
+            call1Returned = true;
+            return {
+              ok: true,
+              json: async () => [],
+              text: async () => "",
+            };
+          });
         }
         // Second reload (triggered by user action) - deferred, resolves FIRST with agent-new
-        return call2Promise.then(() => ({
-          ok: true,
-          json: async () => [
-            registryEntry,
-            {
-              origin: "external-selfjoin",
-              status: "active",
-              canonical_id: "agent-new",
-              handle: "@new",
-              display_name: "New Agent",
-            },
-          ],
-          text: async () => "",
-        }));
+        return call2Promise.then(() => {
+          call2Returned = true;
+          return {
+            ok: true,
+            json: async () => [
+              registryEntry,
+              {
+                origin: "external-selfjoin",
+                status: "active",
+                canonical_id: "agent-new",
+                handle: "@new",
+                display_name: "New Agent",
+              },
+            ],
+            text: async () => "",
+          };
+        });
       }
       if (input === "/api/agents/registry/grok-taos-20260711-000736") {
         return Promise.resolve({ ok: true, json: async () => ({ ok: true }), text: async () => "" });
@@ -620,6 +628,10 @@ describe("ProjectMembers registry race condition guard", () => {
     });
     await flush();
 
+    // Immediately before resolveCall2({}), assert expect(reloadCallCount).toBe(2)
+    // Both deferred reloads started, neither resolved yet
+    expect(reloadCallCount).toBe(2);
+
     // Now we have two deferred reloads in flight: call 1 (unresolved-member) and call 2 (permission change -> refresh)
     // Resolve the SECOND reload first (newer response with the agent-new)
     resolveCall2({});
@@ -628,12 +640,20 @@ describe("ProjectMembers registry race condition guard", () => {
     });
     await flush();
 
+    // Record which call returned which payload for assertion messages
+    // call2Returned should be true now (second reload resolved first)
+    expect(call2Returned).toBe(true);
+    expect(call1Returned).toBe(false);
+
     // Then resolve the FIRST reload (older empty response)
     resolveCall1({});
     await act(async () => {
       await new Promise((r) => setTimeout(r, 0));
     });
     await flush();
+
+    // call1Returned should be true now (first reload resolved after)
+    expect(call1Returned).toBe(true);
 
     // After both settle, agent-new should be in External / Connected agents
     const externalList = screen.getByRole("list", { name: "External project members" });
