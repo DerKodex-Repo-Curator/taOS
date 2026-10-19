@@ -16,12 +16,13 @@ if (typeof Object.hasOwn === "undefined") {
 if (typeof Array.prototype.at === "undefined") {
   Object.defineProperty(Array.prototype, "at", {
     value: function at(this: unknown, index: number): unknown {
-      const arr = Array.from(this as ArrayLike<unknown>);
-      const len = arr.length;
+      const o = Object(this);
+      const len = o.length >>> 0;
       if (len === 0) return undefined;
-      const idx = index >= 0 ? index : len + index;
-      if (idx < 0 || idx >= len) return undefined;
-      return arr[idx];
+      let n = Math.trunc(Number(index)) || 0;
+      if (n < 0) n += len;
+      if (n < 0 || n >= len) return undefined;
+      return o[n];
     },
     writable: true,
     configurable: true,
@@ -60,13 +61,19 @@ if (typeof globalThis.structuredClone === "undefined") {
     }
 
     if (value instanceof ArrayBuffer) {
-      return value.slice(0);
+      const copy = value.slice(0);
+      seen.set(value, copy);
+      return copy;
     }
 
     if (ArrayBuffer.isView(value)) {
       const buffer = value.buffer as ArrayBuffer;
-      const Constructor = value.constructor as { new (buffer: ArrayBuffer, byteOffset?: number, length?: number): typeof value };
-      return new Constructor(buffer, value.byteOffset, value.byteLength);
+      const copy = buffer.slice(value.byteOffset, value.byteOffset + value.byteLength);
+      const cloned = value instanceof DataView
+        ? new DataView(copy)
+        : new (value.constructor as any)(copy);
+      seen.set(value, cloned);
+      return cloned;
     }
 
     if (value instanceof Map) {

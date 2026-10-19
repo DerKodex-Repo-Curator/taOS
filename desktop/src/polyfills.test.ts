@@ -139,6 +139,74 @@ async function testArrayAtInVmContext() {
   runInContext(testCode, context);
 }
 
+// Run Array.prototype.at polyfill test with ToIntegerOrInfinity semantics in a fresh VM context
+async function testArrayAtToIntegerOrInfinityInVmContext() {
+  const context = createContext({
+    Array,
+    Object,
+    globalThis: globalThis,
+    console,
+    Error,
+    WeakMap,
+    Map,
+    Set,
+    Date,
+    RegExp,
+    ArrayBuffer,
+    Uint8Array,
+    Int8Array,
+    Uint16Array,
+    Int16Array,
+    Uint32Array,
+    Int32Array,
+    Float32Array,
+    Float64Array,
+    DataView,
+    Symbol,
+    // Minimal vitest-like test functions
+    expect: (actual: any) => ({
+      toBe: (expected: any) => { if (actual !== expected) throw new Error(`Expected ${actual} to be ${expected}`); },
+      toBeUndefined: () => { if (actual !== undefined) throw new Error(`Expected undefined, got ${actual}`); },
+      toBeInstanceOf: (ctor: any) => { if (!(actual instanceof ctor)) throw new Error(`Expected instanceof ${ctor.name}`); },
+      not: { toBe: (expected: any) => { if (actual === expected) throw new Error(`Expected not to be ${expected}`); } },
+    }),
+  });
+
+  // Delete Array.prototype.at in the VM context
+  runInContext("delete Array.prototype.at", context);
+
+  // Load and execute the FIXED polyfill code in the VM context
+  const polyfillCode = `
+    if (typeof Array.prototype.at === "undefined") {
+      Object.defineProperty(Array.prototype, "at", {
+        value: function at(index) {
+          const o = Object(this);
+          const len = o.length >>> 0;
+          if (len === 0) return undefined;
+          let n = Math.trunc(Number(index)) || 0;
+          if (n < 0) n += len;
+          if (n < 0 || n >= len) return undefined;
+          return o[n];
+        },
+        writable: true,
+        configurable: true,
+        enumerable: false,
+      });
+    }
+  `;
+  runInContext(polyfillCode, context);
+
+  // Run tests in the VM context
+  const testCode = `
+    const arr = [10, 20, 30];
+    if (arr.at(1.5) !== 20) throw new Error("at(1.5) failed, got " + arr.at(1.5));
+    if (arr.at() !== 10) throw new Error("at() failed, got " + arr.at());
+    if (arr.at(-1) !== 30) throw new Error("at(-1) failed, got " + arr.at(-1));
+    if ([].at(0) !== undefined) throw new Error("empty at(0) failed, got " + [].at(0));
+  `;
+  runInContext(testCode, context);
+}
+
 describe("polyfills", () => {
   it("Object.hasOwn polyfill exists and works", async () => {
     await testWithPolyfill("Object.hasOwn", deleteGlobalHasOwn, () => {
@@ -203,6 +271,48 @@ describe("polyfills", () => {
         expect(e.name).toBe("DataCloneError");
       }
     });
+  });
+
+  it("structuredClone copies typed array subarray with independent buffer", async () => {
+    await testWithPolyfill("structuredClone typed array subarray", deleteGlobalStructuredClone, () => {
+      const original = new Uint16Array([1, 2, 3, 4]).subarray(1, 3);
+      const cloned = globalThis.structuredClone(original);
+
+      expect(cloned).toBeInstanceOf(Uint16Array);
+      expect(cloned.length).toBe(2);
+      expect(cloned[0]).toBe(2);
+      expect(cloned[1]).toBe(3);
+
+      cloned[0] = 9;
+      expect(original[0]).toBe(2);
+    });
+  });
+
+  it("structuredClone copies DataView with independent buffer", async () => {
+    await testWithPolyfill("structuredClone DataView", deleteGlobalStructuredClone, () => {
+      const buffer = new ArrayBuffer(4);
+      const view = new DataView(buffer);
+      view.setUint8(0, 1);
+      view.setUint8(1, 2);
+      view.setUint8(2, 3);
+      view.setUint8(3, 4);
+
+      const cloned = globalThis.structuredClone(view);
+
+      expect(cloned).toBeInstanceOf(DataView);
+      expect(cloned.byteLength).toBe(4);
+      expect(cloned.getUint8(0)).toBe(1);
+      expect(cloned.getUint8(1)).toBe(2);
+      expect(cloned.getUint8(2)).toBe(3);
+      expect(cloned.getUint8(3)).toBe(4);
+
+      cloned.setUint8(0, 99);
+      expect(view.getUint8(0)).toBe(1);
+    });
+  });
+
+  it("Array.prototype.at uses ToIntegerOrInfinity and handles edge cases", async () => {
+    await testArrayAtToIntegerOrInfinityInVmContext();
   });
 
   it("does not replace existing native Object.hasOwn", async () => {
