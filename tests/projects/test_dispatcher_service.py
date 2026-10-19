@@ -245,7 +245,7 @@ class TestDispatcherServiceTickUser:
         assert result2["assignments_made"] == 1
 
         leases2 = await real_stores.dispatcher_store.pending_for_agent(agent_cid)
-        # Blocker's lease was resolved 'closed' by reconcile; only the blocked card's lease remains
+        # the blocker's lease was resolved 'closed' by reconcile
         assert len(leases2) == 1
         assert leases2[0]["task_id"] == blocked_id
 
