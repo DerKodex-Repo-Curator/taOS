@@ -1,9 +1,34 @@
 import { describe, it, expect, vi } from "vitest";
-import { createContext, runInContext } from "node:vm";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 const originalHasOwn = Object.hasOwn;
 const originalStructuredClone = globalThis.structuredClone;
 const originalAt = Array.prototype.at;
+
+function getAtPolyfillFromSource(): typeof Array.prototype.at {
+  const polyfillsPath = join(__dirname, "polyfills.ts");
+  const source = readFileSync(polyfillsPath, "utf-8");
+
+  const match = source.match(
+    /if \(typeof Array\.prototype\.at === "undefined"\) \{[\s\S]*?Object\.defineProperty\(Array\.prototype, "at", \{\s*value: (function at\(this: unknown, index: number\): unknown \{[\s\S]*?\n\s*\})\s*,/
+  );
+
+  if (!match) {
+    throw new Error("Could not extract at polyfill from polyfills.ts");
+  }
+
+  let fnSource = match[1];
+  fnSource = fnSource.replace(/\(this: unknown, index: number\): unknown/, "(index)");
+  fnSource = fnSource.replace(/(\w+) as \w+/g, "$1");
+  return new Function("return " + fnSource)() as typeof Array.prototype.at;
+}
+
+const atPolyfill = getAtPolyfillFromSource();
 
 function deleteGlobalHasOwn() {
   try {
@@ -56,155 +81,14 @@ async function testWithPolyfill<T>(
   vi.resetModules();
   try {
     await import("./polyfills");
-    // For Array.prototype.at, capture the polyfill then restore native so vitest internals work
-    const atPolyfill = Array.prototype.at;
+    const atPolyfillLocal = Array.prototype.at;
     if (originalAt !== undefined) {
       Array.prototype.at = originalAt;
     }
-    return await testFn({ at: atPolyfill });
+    return await testFn({ at: atPolyfillLocal });
   } finally {
     restoreGlobals();
   }
-}
-
-// Run Array.prototype.at polyfill test in a fresh VM context where we can safely delete Array.prototype.at
-async function testArrayAtInVmContext() {
-  const context = createContext({
-    Array,
-    Object,
-    globalThis: globalThis,
-    console,
-    Error,
-    WeakMap,
-    Map,
-    Set,
-    Date,
-    RegExp,
-    ArrayBuffer,
-    Uint8Array,
-    Int8Array,
-    Uint16Array,
-    Int16Array,
-    Uint32Array,
-    Int32Array,
-    Float32Array,
-    Float64Array,
-    DataView,
-    Symbol,
-    // Minimal vitest-like test functions
-    expect: (actual: any) => ({
-      toBe: (expected: any) => { if (actual !== expected) throw new Error(`Expected ${actual} to be ${expected}`); },
-      toBeUndefined: () => { if (actual !== undefined) throw new Error(`Expected undefined, got ${actual}`); },
-      toBeInstanceOf: (ctor: any) => { if (!(actual instanceof ctor)) throw new Error(`Expected instanceof ${ctor.name}`); },
-      not: { toBe: (expected: any) => { if (actual === expected) throw new Error(`Expected not to be ${expected}`); } },
-    }),
-  });
-
-  // Delete Array.prototype.at in the VM context
-  runInContext("delete Array.prototype.at", context);
-
-  // Load and execute the polyfill code in the VM context
-  const polyfillCode = `
-    if (typeof Array.prototype.at === "undefined") {
-      Object.defineProperty(Array.prototype, "at", {
-        value: function at(index) {
-          const arr = Array.from(this);
-          const len = arr.length;
-          if (len === 0) return undefined;
-          const idx = index >= 0 ? index : len + index;
-          if (idx < 0 || idx >= len) return undefined;
-          return arr[idx];
-        },
-        writable: true,
-        configurable: true,
-        enumerable: false,
-      });
-    }
-  `;
-  runInContext(polyfillCode, context);
-
-  // Run tests in the VM context
-  const testCode = `
-    const arr = [1, 2, 3];
-    if (typeof arr.at !== "function") throw new Error("at is not a function");
-    if (arr.at(0) !== 1) throw new Error("at(0) failed");
-    if (arr.at(-1) !== 3) throw new Error("at(-1) failed");
-    if (arr.at(-2) !== 2) throw new Error("at(-2) failed");
-    if (arr.at(5) !== undefined) throw new Error("at(5) failed");
-    if (arr.at(-5) !== undefined) throw new Error("at(-5) failed");
-    const arrayLike = { 0: "a", 1: "b", 2: "c", length: 3 };
-    if (Array.prototype.at.call(arrayLike, 0) !== "a") throw new Error("arrayLike at(0) failed");
-    if (Array.prototype.at.call(arrayLike, -1) !== "c") throw new Error("arrayLike at(-1) failed");
-  `;
-  runInContext(testCode, context);
-}
-
-// Run Array.prototype.at polyfill test with ToIntegerOrInfinity semantics in a fresh VM context
-async function testArrayAtToIntegerOrInfinityInVmContext() {
-  const context = createContext({
-    Array,
-    Object,
-    globalThis: globalThis,
-    console,
-    Error,
-    WeakMap,
-    Map,
-    Set,
-    Date,
-    RegExp,
-    ArrayBuffer,
-    Uint8Array,
-    Int8Array,
-    Uint16Array,
-    Int16Array,
-    Uint32Array,
-    Int32Array,
-    Float32Array,
-    Float64Array,
-    DataView,
-    Symbol,
-    // Minimal vitest-like test functions
-    expect: (actual: any) => ({
-      toBe: (expected: any) => { if (actual !== expected) throw new Error(`Expected ${actual} to be ${expected}`); },
-      toBeUndefined: () => { if (actual !== undefined) throw new Error(`Expected undefined, got ${actual}`); },
-      toBeInstanceOf: (ctor: any) => { if (!(actual instanceof ctor)) throw new Error(`Expected instanceof ${ctor.name}`); },
-      not: { toBe: (expected: any) => { if (actual === expected) throw new Error(`Expected not to be ${expected}`); } },
-    }),
-  });
-
-  // Delete Array.prototype.at in the VM context
-  runInContext("delete Array.prototype.at", context);
-
-  // Load and execute the FIXED polyfill code in the VM context
-  const polyfillCode = `
-    if (typeof Array.prototype.at === "undefined") {
-      Object.defineProperty(Array.prototype, "at", {
-        value: function at(index) {
-          const o = Object(this);
-          const len = o.length >>> 0;
-          if (len === 0) return undefined;
-          let n = Math.trunc(Number(index)) || 0;
-          if (n < 0) n += len;
-          if (n < 0 || n >= len) return undefined;
-          return o[n];
-        },
-        writable: true,
-        configurable: true,
-        enumerable: false,
-      });
-    }
-  `;
-  runInContext(polyfillCode, context);
-
-  // Run tests in the VM context
-  const testCode = `
-    const arr = [10, 20, 30];
-    if (arr.at(1.5) !== 20) throw new Error("at(1.5) failed, got " + arr.at(1.5));
-    if (arr.at() !== 10) throw new Error("at() failed, got " + arr.at());
-    if (arr.at(-1) !== 30) throw new Error("at(-1) failed, got " + arr.at(-1));
-    if ([].at(0) !== undefined) throw new Error("empty at(0) failed, got " + [].at(0));
-  `;
-  runInContext(testCode, context);
 }
 
 describe("polyfills", () => {
@@ -220,8 +104,20 @@ describe("polyfills", () => {
     });
   });
 
-  it("Array.prototype.at polyfill exists and works", async () => {
-    await testArrayAtInVmContext();
+  it("Array.prototype.at polyfill exists and works", () => {
+    expect(typeof atPolyfill).toBe("function");
+    expect(atPolyfill).not.toBe(originalAt);
+
+    const arr = [1, 2, 3];
+    expect(atPolyfill.call(arr, 0)).toBe(1);
+    expect(atPolyfill.call(arr, -1)).toBe(3);
+    expect(atPolyfill.call(arr, -2)).toBe(2);
+    expect(atPolyfill.call(arr, 5)).toBeUndefined();
+    expect(atPolyfill.call(arr, -5)).toBeUndefined();
+
+    const arrayLike = { 0: "a", 1: "b", 2: "c", length: 3 };
+    expect(atPolyfill.call(arrayLike, 0)).toBe("a");
+    expect(atPolyfill.call(arrayLike, -1)).toBe("c");
   });
 
   it("globalThis.structuredClone polyfill exists and works", async () => {
@@ -311,8 +207,18 @@ describe("polyfills", () => {
     });
   });
 
-  it("Array.prototype.at uses ToIntegerOrInfinity and handles edge cases", async () => {
-    await testArrayAtToIntegerOrInfinityInVmContext();
+  it("Array.prototype.at uses ToIntegerOrInfinity and handles edge cases", () => {
+    expect(typeof atPolyfill).toBe("function");
+    expect(atPolyfill).not.toBe(originalAt);
+
+    const arr = [10, 20, 30];
+    expect(atPolyfill.call(arr, 1.5)).toBe(20);
+    expect(atPolyfill.call(arr)).toBe(10);
+    expect(atPolyfill.call(arr, -1)).toBe(30);
+    expect(atPolyfill.call([], 0)).toBeUndefined();
+    expect(atPolyfill.call(arr, Infinity)).toBeUndefined();
+    expect(atPolyfill.call(arr, -Infinity)).toBeUndefined();
+    expect(atPolyfill.call(arr, NaN)).toBe(10);
   });
 
   it("does not replace existing native Object.hasOwn", async () => {
