@@ -675,21 +675,17 @@ describe("ProjectMembers refresh race condition with unresolved member", () => {
     vi.restoreAllMocks();
   });
 
-  it("shows unresolved member in main list when refresh resolves before mount effect", async () => {
+  it("keeps unresolved member in main list when refresh resolves before mount effect", async () => {
     // Race: mount registry fetch (call 1) deferred, user-action refresh (call 2) resolves first.
     // The unresolved member must remain in the main list after both settle.
-    let resolveCall1!: (value: unknown) => void;
-    let resolveCall2!: (value: unknown) => void;
-    const call1Promise = new Promise((resolve) => {
-      resolveCall1 = resolve;
-    });
-    const call2Promise = new Promise((resolve) => {
-      resolveCall2 = resolve;
+    let resolveMountRegistry!: (value: unknown) => void;
+    const mountRegistryPromise = new Promise((resolve) => {
+      resolveMountRegistry = resolve;
     });
 
-    let registryCallCount = 0;
-    let mountCallResolved = false;
-    let refreshCallResolved = false;
+    let totalRegistryCallCount = 0;
+    let reloadCallCount = 0;
+    let refreshResolved = false;
     const fetchMock = vi.fn().mockImplementation((input: string) => {
       if (input === "/api/projects/prj-test/members") {
         // One native agent (in /api/agents) + one unresolved member (in no registry, not in /api/agents)
@@ -706,19 +702,22 @@ describe("ProjectMembers refresh race condition with unresolved member", () => {
         return Promise.resolve({ ok: true, json: async () => [agentA], text: async () => "" });
       }
       if (input === "/api/agents/registry") {
-        registryCallCount++;
-        if (registryCallCount === 1) {
+        totalRegistryCallCount++;
+        if (totalRegistryCallCount === 1) {
           // Mount effect: deferred, resolves LAST with empty
-          return call1Promise.then(() => {
-            mountCallResolved = true;
+          return mountRegistryPromise.then(() => {
             return { ok: true, json: async () => [], text: async () => "" };
           });
         }
+        // Reload call (refresh from user action or unresolved-member effect)
+        reloadCallCount++;
         // Refresh call (user action): resolves FIRST with empty
-        return call2Promise.then(() => {
-          refreshCallResolved = true;
-          return { ok: true, json: async () => [], text: async () => "" };
-        });
+        if (reloadCallCount === 1) {
+          refreshResolved = true;
+          return Promise.resolve({ ok: true, json: async () => [], text: async () => "" });
+        }
+        // Unresolved-member effect reload: resolves with empty
+        return Promise.resolve({ ok: true, json: async () => [], text: async () => "" });
       }
       // Mock the canvas permission PATCH that the checkbox handler sends
       if (input === "/api/projects/prj-test/canvas/permissions/agent-a") {
@@ -745,22 +744,19 @@ describe("ProjectMembers refresh race condition with unresolved member", () => {
     });
     await flush();
 
-    // Now resolve the REFRESH call (call 2) first
-    resolveCall2({});
+    // After refresh resolves, unresolved-member effect also fires (both are reload calls)
+    expect(reloadCallCount).toBe(2);
+    expect(refreshResolved).toBe(true);
+
+    // Now resolve the MOUNT call (call 1) last
+    resolveMountRegistry({});
     await act(async () => {
       await new Promise((r) => setTimeout(r, 0));
     });
     await flush();
 
-    // Then resolve the MOUNT call (call 1) last
-    resolveCall1({});
-    await act(async () => {
-      await new Promise((r) => setTimeout(r, 0));
-    });
-    await flush();
-
-    // Assert: exactly 3 registry calls were made (mount + refresh + unresolved-member effect reload)
-    expect(registryCallCount).toBe(3);
+    // Assert: exactly 2 reload calls were made (refresh + unresolved-member effect)
+    expect(reloadCallCount).toBe(2);
     // Assert: unresolved-member is rendered in the main Project members list
     const mainList = screen.getByRole("list", { name: "Project members" });
     expect(within(mainList).getByText("unresolved-member")).toBeInTheDocument();
