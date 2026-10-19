@@ -85,27 +85,7 @@ class DispatcherService:
                 counts["claimed"] += 1
                 continue
 
-            # Case 3: now > lease_expires_at and still open + unclaimed -> unassign + bump_backoff
-            if now > row["lease_expires_at"]:
-                ok = await task_store.unassign_if(task_id, assignee_written, actor="dispatcher")
-                if ok:
-                    await dispatcher_store.resolve(lease_id, "expired", now)
-                    await dispatcher_store.bump_backoff(canonical_id, cfg.lease_seconds, now)
-                    counts["expired"] += 1
-                else:
-                    # If unassign_if fails (e.g. task not assigned to this agent),
-                    # still resolve as expired if the task is open and unclaimed
-                    task_claimed_by = task.get("claimed_by")
-                    if task_claimed_by is None or task_claimed_by not in agent_aliases:
-                        await dispatcher_store.resolve(lease_id, "expired", now)
-                        await dispatcher_store.bump_backoff(canonical_id, cfg.lease_seconds, now)
-                        counts["expired"] += 1
-                    else:
-                        await dispatcher_store.resolve(lease_id, "overridden", now)
-                        counts["overridden"] += 1
-                continue
-
-            # Case 4: claimed_by set to someone else, or assignee_id != row assignee_written -> resolve 'overridden'
+            # Case 3: claimed_by set to someone else, or assignee_id != row assignee_written -> resolve 'overridden'
             if task_claimed_by is not None and task_claimed_by not in agent_aliases:
                 # claimed_by is set to someone else (not this agent)
                 await dispatcher_store.resolve(lease_id, "overridden", now)
@@ -118,7 +98,18 @@ class DispatcherService:
                 counts["overridden"] += 1
                 continue
 
-            # Otherwise leave pending (no state change)
+            # Case 4: now > lease_expires_at and still open + unclaimed -> unassign + bump_backoff
+            if now > row["lease_expires_at"]:
+                ok = await task_store.unassign_if(task_id, assignee_written, actor="dispatcher")
+                if ok:
+                    await dispatcher_store.resolve(lease_id, "expired", now)
+                    await dispatcher_store.bump_backoff(canonical_id, cfg.lease_seconds, now)
+                    counts["expired"] += 1
+                else:
+                    # unassign_if failed: task not assigned to this agent -> resolve 'overridden'
+                    await dispatcher_store.resolve(lease_id, "overridden", now)
+                    counts["overridden"] += 1
+                continue
 
             # Otherwise leave pending (no state change)
 

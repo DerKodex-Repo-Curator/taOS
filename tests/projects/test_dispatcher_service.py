@@ -245,10 +245,9 @@ class TestDispatcherServiceTickUser:
         assert result2["assignments_made"] == 1
 
         leases2 = await real_stores.dispatcher_store.pending_for_agent(agent_cid)
-        # Should have 2 leases total (one from first tick, one from second)
-        assert len(leases2) == 2
-        task_ids = {l["task_id"] for l in leases2}
-        assert task_ids == {blocker_id, blocked_id}
+        # Blocker's lease was resolved 'closed' by reconcile; only the blocked card's lease remains
+        assert len(leases2) == 1
+        assert leases2[0]["task_id"] == blocked_id
 
     @pytest.mark.asyncio
     async def test_disabled_by_default_assigns_nothing(self, real_stores, tmp_path):

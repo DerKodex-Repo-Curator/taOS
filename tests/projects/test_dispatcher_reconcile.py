@@ -59,7 +59,14 @@ class TestDispatcherReconcile:
         agent_cid = await register_agent_with_grant(real_stores, "agent-a", board_id, "project_tasks")
 
         # Create a pending lease that is expired (set lease_expires_at in the past)
+        # Task must be assigned to the agent (assignee_id = assignee_written) for unassign_if to succeed
         now = 1000.0
+        await real_stores.task_store._db.execute(
+            "UPDATE project_tasks SET assignee_id = ?, claimed_by = NULL, status = 'open' WHERE id = ?",
+            (agent_cid, task_id),
+        )
+        await real_stores.task_store._db.commit()
+
         lease_id = await real_stores.dispatcher_store.insert_lease(
             user_id="u1",
             task_id=task_id,
@@ -108,20 +115,50 @@ class TestDispatcherReconcile:
         assert row[0] == 1  # consecutive_expiries
         assert row[1] == now + 900  # next_eligible_at
 
+        # Close the first task to prevent any assignment from the first tick's assignment phase
+        # from creating a lease that would expire in the second tick
+        await real_stores.task_store._db.execute(
+            "UPDATE project_tasks SET status = 'closed', closed_at = ? WHERE id = ?",
+            (now + 100, task_id),
+        )
+        await real_stores.task_store._db.commit()
+
         # Second tick with same expired lease scenario - should bump to n=2, next_eligible_at = now+1800
         # (We need a fresh now that is after the first next_eligible_at)
         now2 = now + 2000  # well past the first backoff
+        # Re-create the scenario: new task, new lease, task assigned to agent
+        board_row2, tasks2 = await seed_board_with_cards(real_stores, "u1", "Test Board 2", 1)
+        task_id2 = tasks2[0]["id"]
+        await real_stores.task_store._db.execute(
+            "UPDATE project_tasks SET labels = json_array('claimable') WHERE id = ?",
+            (task_id2,),
+        )
+        await real_stores.task_store._db.execute(
+            "UPDATE project_tasks SET assignee_id = ?, claimed_by = NULL, status = 'open' WHERE id = ?",
+            (agent_cid, task_id2),
+        )
+        await real_stores.task_store._db.commit()
+
+        lease_id2 = await real_stores.dispatcher_store.insert_lease(
+            user_id="u1",
+            task_id=task_id2,
+            project_id=board_row2["id"],
+            canonical_id=agent_cid,
+            assignee_written=agent_cid,
+            reason="test",
+            assigned_at=now2 - 100,
+            lease_expires_at=now2 - 50,  # expired
+        )
+
         result2 = await dispatcher_service.tick_user("u1", await real_stores.dispatcher_store.get_config("u1"), now2)
-        # Check the lease state is still 'expired' by querying the ledger directly
+        # Check the lease state is 'expired' by querying the ledger directly
         async with real_stores.dispatcher_store._read(
             "SELECT state FROM dispatch_ledger WHERE canonical_id = ? AND task_id = ?",
-            (agent_cid, task_id),
+            (agent_cid, task_id2),
         ) as cur:
             row2 = await cur.fetchone()
         assert row2 is not None
         assert row2[0] == "expired"
-
-        # Backoff should be n=2
 
         # Backoff should be n=2
         backoff2 = await real_stores.dispatcher_store._db.execute(
@@ -254,7 +291,7 @@ class TestDispatcherReconcile:
         result = await dispatcher_service.tick_user("u1", await real_stores.dispatcher_store.get_config("u1"), now + 100)
         assert result.get("overridden_count", 0) == 1 or "overridden" in result
 
-# Lease state should be 'overridden' - query ledger directly since pending_for_agent
+        # Lease state should be 'overridden' - query ledger directly since pending_for_agent
         # only returns state='pending' rows
         async with real_stores.dispatcher_store._read(
             "SELECT state, resolved_at FROM dispatch_ledger WHERE task_id = ? AND canonical_id = ?",
@@ -263,6 +300,82 @@ class TestDispatcherReconcile:
             row = await cur.fetchone()
         assert row is not None
         assert row[0] == "overridden"
+
+    @pytest.mark.asyncio
+    async def test_expired_lease_assignee_changed_by_human_overridden_no_backoff(self, dispatcher_service, real_stores, tmp_path):
+        """Case (c) expired variant: EXPIRED pending lease whose card assignee a human changed to another id,
+        card still open and unclaimed -> 'overridden', card untouched, no backoff bump."""
+        board_row, tasks = await seed_board_with_cards(real_stores, "u1", "Test Board", 1)
+        board_id = board_row["id"]
+        task_id = tasks[0]["id"]
+
+        await real_stores.task_store._db.execute(
+            "UPDATE project_tasks SET labels = json_array('claimable') WHERE id = ?",
+            (task_id,),
+        )
+        await real_stores.task_store._db.commit()
+
+        agent_cid = await register_agent_with_grant(real_stores, "agent-a", board_id, "project_tasks")
+
+        # Create a pending lease that is EXPIRED (now > lease_expires_at)
+        now = 1000.0
+        await real_stores.dispatcher_store.insert_lease(
+            user_id="u1",
+            task_id=task_id,
+            project_id=board_id,
+            canonical_id=agent_cid,
+            assignee_written=agent_cid,
+            reason="test",
+            assigned_at=now - 100,
+            lease_expires_at=now - 50,  # expired
+        )
+
+        await real_stores.dispatcher_store.set_config(
+            "u1",
+            DispatcherConfig(
+                user_id="u1",
+                enabled=True,
+                eligible_agents=[agent_cid],
+                max_concurrent_per_agent=1,
+                lease_seconds=900,
+            ),
+            updated_by="test",
+        )
+
+        # A human changes the assignee to someone else (card still open, unclaimed)
+        await real_stores.task_store._db.execute(
+            "UPDATE project_tasks SET assignee_id = 'human-agent' WHERE id = ?",
+            (task_id,),
+        )
+        await real_stores.task_store._db.commit()
+
+        # Tick - should resolve as 'overridden' since assignee changed, NOT 'expired'
+        result = await dispatcher_service.tick_user("u1", await real_stores.dispatcher_store.get_config("u1"), now)
+        assert result.get("overridden_count", 0) == 1 or "overridden" in result
+        assert result.get("expired_count", 0) == 0
+
+        # Lease state should be 'overridden' - query ledger directly
+        async with real_stores.dispatcher_store._read(
+            "SELECT state, resolved_at FROM dispatch_ledger WHERE task_id = ? AND canonical_id = ?",
+            (task_id, agent_cid),
+        ) as cur:
+            row = await cur.fetchone()
+        assert row is not None
+        assert row[0] == "overridden"
+
+        # Card's assignee should still be the human's id (card untouched)
+        task = await real_stores.task_store.get_task(task_id)
+        assert task["assignee_id"] == "human-agent"
+
+        # Agent should have NO backoff row with consecutive_expiries >= 1
+        backoff = await real_stores.dispatcher_store._db.execute(
+            "SELECT consecutive_expiries FROM dispatch_agent_backoff WHERE canonical_id = ?",
+            (agent_cid,),
+        )
+        row = await backoff.fetchone()
+        # Either no row exists, or consecutive_expiries is 0
+        if row is not None:
+            assert row[0] == 0
 
     @pytest.mark.asyncio
     async def test_card_closed(self, dispatcher_service, real_stores, tmp_path):
@@ -521,6 +634,13 @@ class TestDispatcherReconcile:
         agent_cid = await register_agent_with_grant(real_stores, "agent-a", board_id, "project_tasks")
 
         now = 1000.0
+
+        # Task must be assigned to the agent for unassign_if to succeed
+        await real_stores.task_store._db.execute(
+            "UPDATE project_tasks SET assignee_id = ?, claimed_by = NULL, status = 'open' WHERE id = ?",
+            (agent_cid, task_id),
+        )
+        await real_stores.task_store._db.commit()
 
         # Create a pending expired lease
         lease_id = await real_stores.dispatcher_store.insert_lease(
