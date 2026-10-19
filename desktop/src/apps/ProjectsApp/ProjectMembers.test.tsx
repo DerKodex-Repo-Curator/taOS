@@ -670,64 +670,59 @@ describe("ProjectMembers registry race condition guard", () => {
     expect(within(mainList).queryByText("agent-new")).not.toBeInTheDocument();
   });
 });
-
 describe("ProjectMembers refresh race condition with unresolved member", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
   });
 
   it("shows unresolved member in main list when refresh resolves before mount effect", async () => {
-    // We need to ensure:
-    // 1. Members list contains one member id that is in NO registry response and NOT in /api/agents
-    // 2. The MOUNT registry fetch is deferred and resolves LAST
-    // 3. A user-action refresh is triggered while it is pending and its reload resolves first
-    // 4. Assert the unresolved member's row is rendered in the main members list
-
-    let mountRegistryPromise!: Promise<unknown>;
-    let resolveMount!: () => void;
-    let mountRegistry: Promise<unknown>;
-    mountRegistry = new Promise((resolve) => {
-      resolveMount = resolve;
-      mountRegistryPromise = mountRegistry;
+    // Race: mount registry fetch (call 1) deferred, user-action refresh (call 2) resolves first.
+    // The unresolved member must remain in the main list after both settle.
+    let resolveCall1!: (value: unknown) => void;
+    let resolveCall2!: (value: unknown) => void;
+    const call1Promise = new Promise((resolve) => {
+      resolveCall1 = resolve;
+    });
+    const call2Promise = new Promise((resolve) => {
+      resolveCall2 = resolve;
     });
 
-    let resolveRefresh!: () => void;
-    const refreshPromise = new Promise((resolve) => {
-      resolveRefresh = resolve;
-    });
-
+    let registryCallCount = 0;
+    let mountCallResolved = false;
+    let refreshCallResolved = false;
     const fetchMock = vi.fn().mockImplementation((input: string) => {
       if (input === "/api/projects/prj-test/members") {
-        // Return one member that is unresolved (not in registry, not in /api/agents)
+        // One native agent (in /api/agents) + one unresolved member (in no registry, not in /api/agents)
         return Promise.resolve({
           ok: true,
           json: async () => ({
-            items: [memberRow("unresolved-member")]
+            items: [memberRow("agent-a"), memberRow("unresolved-member")],
           }),
           text: async () => "",
         });
       }
       if (input === "/api/agents") {
-        // No agents in registry
-        return Promise.resolve({ ok: true, json: async () => [], text: async () => "" });
+        // agent-a exists so its canvas checkbox renders
+        return Promise.resolve({ ok: true, json: async () => [agentA], text: async () => "" });
       }
       if (input === "/api/agents/registry") {
-        if (!mountRegistryPromise) {
-          // This is a refresh call (user action) - resolve immediately with empty to simulate refresh before mount
-          return Promise.resolve({
-            ok: true,
-            json: async () => [],
-            text: async () => "",
+        registryCallCount++;
+        if (registryCallCount === 1) {
+          // Mount effect: deferred, resolves LAST with empty
+          return call1Promise.then(() => {
+            mountCallResolved = true;
+            return { ok: true, json: async () => [], text: async () => "" };
           });
         }
-        // This is the mount effect - defer resolution
-        return mountRegistryPromise.then(() => {
-          return Promise.resolve({
-            ok: true,
-            json: async () => [],
-            text: async () => "",
-          });
+        // Refresh call (user action): resolves FIRST with empty
+        return call2Promise.then(() => {
+          refreshCallResolved = true;
+          return { ok: true, json: async () => [], text: async () => "" };
         });
+      }
+      // Mock the canvas permission PATCH that the checkbox handler sends
+      if (input === "/api/projects/prj-test/canvas/permissions/agent-a") {
+        return Promise.resolve({ ok: true, json: async () => ({ ok: true }), text: async () => "" });
       }
       throw new Error(`Unmocked fetch: ${input}`);
     });
@@ -736,60 +731,37 @@ describe("ProjectMembers refresh race condition with unresolved member", () => {
     render(<ProjectMembers project={baseProject} onChanged={vi.fn()} />);
     await flush();
 
-    // Wait a tick to let the mount effect start
+    // Wait for mount effect to start (it will hit the deferred promise)
     await act(async () => {
       await new Promise((r) => setTimeout(r, 0));
-      await flush();
     });
+    await flush();
 
-    // NOW WE NEED TO ACTUALLY TRIGGER A REFRESH
-    // The test should simulate a real user action that calls refresh()
-    // This would be like toggling a canvas permission checkbox
-    // In the real component, this would call onRefresh -> refresh -> reloadExternalRegistry
-    
-    // For this test to properly trigger the race condition, we need to
-    // actually call refresh() which will call reloadExternalRegistry()
-    // We can't easily access the component's internal methods from here,
-    // so we'll simulate the race condition more directly
-    
-    // The key is: we need to trigger reloadExternalRegistry() while the
-    // mount effect is pending. We can do this by calling the same function
-    // that the real component would call.
-    
-    // Since we can't easily access the component's reloadExternalRegistry,
-    // we'll simulate the race condition by actually triggering a real refresh
-    
-    // The test needs to actually trigger reloadExternalRegistry() via the
-    // refresh() call that happens when a user toggles canvas permissions
-    
-    // For testing purposes, we'll simulate the exact race condition
-    
+    // Click the "Can read canvas" checkbox for agent-a -> triggers onRefresh -> refresh -> reloadExternalRegistry
+    const readCheckbox = screen.getByLabelText("Can read canvas for Alpha") as HTMLInputElement;
     await act(async () => {
-      // This simulates the exact race condition:
-      // 1. Mount effect has started but not resolved (waiting on mountRegistryPromise)
-      // 2. User triggers refresh (this calls reloadExternalRegistry())
-      // 3. This reloadExternalRegistry() call returns immediately (with empty response) because
-      //    the mock check `!mountRegistryPromise` detects this is the refresh call
-      // 4. Then the mount effect resolves (mountRegistryPromise.then(...))
-      
-      // Trigger the user action that would call refresh
-      // In the real component, this would be triggered by a canvas permission toggle
-      // which calls onRefresh -> refresh -> reloadExternalRegistry()
-      
-      // We're simulating this by calling the same logic
-      resolveRefresh();
-      await flush();
+      fireEvent.click(readCheckbox);
+      await new Promise((r) => setTimeout(r, 0));
     });
+    await flush();
 
-    // Now resolve the mount effect
+    // Now resolve the REFRESH call (call 2) first
+    resolveCall2({});
     await act(async () => {
-      resolveMount();
-      await flush();
+      await new Promise((r) => setTimeout(r, 0));
     });
+    await flush();
 
-    // The unresolved member should be in the main members list
-    // This should pass AFTER the fix is applied
-    // Before the fix, this would fail because externalRegistryLoaded would remain false
+    // Then resolve the MOUNT call (call 1) last
+    resolveCall1({});
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    await flush();
+
+    // Assert: exactly 3 registry calls were made (mount + refresh + unresolved-member effect reload)
+    expect(registryCallCount).toBe(3);
+    // Assert: unresolved-member is rendered in the main Project members list
     const mainList = screen.getByRole("list", { name: "Project members" });
     expect(within(mainList).getByText("unresolved-member")).toBeInTheDocument();
   });

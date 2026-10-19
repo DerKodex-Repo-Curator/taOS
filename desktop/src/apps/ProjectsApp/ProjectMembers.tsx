@@ -349,22 +349,22 @@ export function ProjectMembers({ project, onChanged }: { project: Project; onCha
       .then((r) => (r.ok ? r.json() : []))
       .then((rows) => {
         if (seq !== registryReqSeq.current) return;
-        const active = Array.isArray(rows)
-          ? rows.filter(
-              (e: { origin?: string; status?: string }) =>
-                e.origin === "external-selfjoin" && e.status === "active",
-            )
-          : [];
-        setExternalAgents(
-          active.map(
-            (e: { handle?: string; canonical_id?: string; display_name?: string; framework?: string }) => ({
-              handle: e.handle || "",
-              canonical_id: e.canonical_id,
-              display_name: e.display_name,
-              framework: e.framework,
-            }),
-          ),
-        );
+        if (Array.isArray(rows)) {
+          const active = rows.filter(
+            (e: { origin?: string; status?: string }) =>
+              e.origin === "external-selfjoin" && e.status === "active",
+          );
+          setExternalAgents(
+            active.map(
+              (e: { handle?: string; canonical_id?: string; display_name?: string; framework?: string }) => ({
+                handle: e.handle || "",
+                canonical_id: e.canonical_id,
+                display_name: e.display_name,
+                framework: e.framework,
+              }),
+            ),
+          );
+        }
         setExternalRegistryLoaded(true);
       })
       .catch(() => {
