@@ -1000,7 +1000,9 @@ export function MessagesApp({
   const reconnectDelayRef = useRef(1000);
   const reconnectAttemptsRef = useRef(0);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const agentListTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const prevChannelRef = useRef<string | null>(null);
+  const lastFetchRef = useRef<number>(0);
 
   /* ---- fetch channels + unread ---- */
   const fetchChannels = useCallback(async () => {
@@ -1410,6 +1412,44 @@ export function MessagesApp({
   }, [fetchChannels, fetchArchivedChannels, fetchAgentLists, connectWs]);
 
   useRefreshOnFocus(fetchChannels);
+
+  /* ---- refresh agent lists on focus/visibility (guest agents granted while open) ---- */
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const THROTTLE_MS = 10000;
+
+    const clearTimer = () => {
+      if (agentListTimerRef.current) {
+        clearTimeout(agentListTimerRef.current);
+        agentListTimerRef.current = null;
+      }
+    };
+
+    const scheduleFetch = () => {
+      const now = Date.now();
+      if (now - lastFetchRef.current < THROTTLE_MS) return;
+      lastFetchRef.current = now;
+      clearTimer();
+      agentListTimerRef.current = setTimeout(() => {
+        agentListTimerRef.current = null;
+        fetchAgentLists();
+      }, 0);
+    };
+
+    const onFocus = () => scheduleFetch();
+    const onVisibilityChange = () => {
+      if (!document.hidden) scheduleFetch();
+    };
+
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      clearTimer();
+    };
+  }, [fetchAgentLists]);
 
   /* ---- keep unreadRef in sync with the unread state without re-running
   * the channel-selection effect (which would re-capture the pending count). ---- */
