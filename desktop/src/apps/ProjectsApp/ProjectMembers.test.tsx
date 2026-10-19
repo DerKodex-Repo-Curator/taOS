@@ -539,8 +539,7 @@ describe("ProjectMembers registry race condition guard", () => {
 
     let totalRegistryCallCount = 0;
     let reloadCallCount = 0;
-    let call1Returned = false;
-    let call2Returned = false;
+    let call1Returned = false, call2Returned = false;
     const fetchMock = vi.fn().mockImplementation((input: string) => {
       if (input === "/api/projects/prj-test/members") {
         return Promise.resolve({
@@ -628,8 +627,7 @@ describe("ProjectMembers registry race condition guard", () => {
     });
     await flush();
 
-    // Immediately before resolveCall2({}), assert expect(reloadCallCount).toBe(2)
-    // Both deferred reloads started, neither resolved yet
+    // Verify both reloads are in flight before resolving call2
     expect(reloadCallCount).toBe(2);
 
     // Now we have two deferred reloads in flight: call 1 (unresolved-member) and call 2 (permission change -> refresh)
