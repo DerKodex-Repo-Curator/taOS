@@ -3,11 +3,11 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
+import { transformWithOxc } from "vite";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const projectRoot = resolve(__dirname, "..");
-const { transformSync } = require("esbuild");
 
 const entries = [
   "src/main.tsx",
@@ -19,15 +19,14 @@ describe("entry syntax compatibility with Chrome 87", () => {
   for (const entry of entries) {
     const filePath = join(projectRoot, entry);
 
-    it(`${entry} transforms without error for target chrome87`, () => {
+    it(`${entry} transforms without error for target chrome87`, async () => {
       const source = readFileSync(filePath, "utf-8");
-      expect(() => {
-        transformSync(source, {
-          loader: "tsx",
-          format: "esm",
-          target: "chrome87",
-        });
-      }).not.toThrow();
+      const result = await transformWithOxc(source, entry, {
+        lang: "tsx",
+        target: "chrome87",
+      });
+      const parseErrors = result.warnings.filter((w) => w.code === "PARSE_ERROR");
+      expect(parseErrors).toHaveLength(0);
     });
 
     it(`${entry} has ./polyfills as the first import`, () => {

@@ -84,4 +84,4 @@ async function boot() {
   }
 }
 
-void boot();
+export const booted = boot();
