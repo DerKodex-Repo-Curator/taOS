@@ -1150,7 +1150,7 @@ async def mint_collab_invite(
     envelope: dict | None = None
     delivery_error: str | None = None
     try:
-        from tinyagentos.peer import build_envelope, local_contact_id
+        from tinyagentos.peer import build_envelope, deliver_to_peer, local_contact_id
 
         # Both ends are canonical hub:<fingerprint> ids: ours from the
         # keystore, theirs is the contact row key.  hub_username is display only.
@@ -1172,39 +1172,19 @@ async def mint_collab_invite(
             )
 
             # POST the envelope to the remote contact's peer inbox.
-            # The peer link's endpoints are tried in priority order.
+            # The peer link's endpoints are tried in priority order, through
+            # the SSRF guard with the link's own endpoints as the allowance.
             peer_link = await contacts_store.get_peer_link(payload.contact_id)
             if peer_link is None or not peer_link.get("endpoints"):
                 delivery_error = "no peer endpoints for contact"
-            else:
-                import httpx
-
-                outbound_token = peer_link.get("outbound_token", "")
-                delivered = False
-                for ep in sorted(
-                    peer_link["endpoints"],
-                    key=lambda e: e.get("priority", 99),
-                ):
-                    inbox_url = f"{ep['url'].rstrip('/')}/api/peer/inbox"
-                    try:
-                        async with httpx.AsyncClient(timeout=10.0) as client:
-                            resp = await client.post(
-                                inbox_url,
-                                json={"envelope": envelope},
-                                headers={
-                                    "Authorization": f"Bearer {outbound_token}",
-                                    "Content-Type": "application/json",
-                                },
-                            )
-                            if 200 <= resp.status_code < 300:
-                                delivered = True
-                                break
-                    except Exception:
-                        continue
-                if not delivered:
-                    delivery_error = (
-                        "failed to deliver invite envelope to any peer endpoint"
-                    )
+            elif not peer_link.get("outbound_token"):
+                delivery_error = "peer handshake incomplete: no token for contact"
+            elif not await deliver_to_peer(
+                contacts_store, payload.contact_id, "/api/peer/inbox", envelope,
+            ):
+                delivery_error = (
+                    "failed to deliver invite envelope to any peer endpoint"
+                )
     except Exception as exc:
         delivery_error = f"envelope delivery failed: {exc}"
 
@@ -1291,6 +1271,15 @@ async def redeem_invite(request: Request, body: RedeemInviteIn):
     if "project_tasks" not in scopes:
         scopes = ["project_tasks"] + scopes
 
+    # Extract sponsor_contact_id from delegation-sponsored invites (D1).
+    invite_metadata = invite.get("metadata") or {}
+    if isinstance(invite_metadata, str):
+        try:
+            invite_metadata = json.loads(invite_metadata)
+        except (ValueError, TypeError):
+            invite_metadata = {}
+    sponsor_contact_id = invite_metadata.get("sponsor_contact_id") if isinstance(invite_metadata, dict) else None
+
     handle = _derive_handle(project.get("slug") or invite["project_id"], body.harness, body.label)
     handle = await _dedupe_handle(request, handle)
 
@@ -1325,6 +1314,7 @@ async def redeem_invite(request: Request, body: RedeemInviteIn):
                 effective_project=invite["project_id"],
                 decided_by=invite["created_by"],
                 project_id=invite["project_id"],
+                sponsor_contact_id=sponsor_contact_id,
             )
         except Exception as exc:  # noqa: BLE001 - surface as JSON error
             await store.rollback_to_pending(body.invite_id)
@@ -1382,6 +1372,15 @@ async def _redeem_os_level(request: Request, body: RedeemInviteIn, invite: dict,
             raw_scopes = []
     scopes = list(raw_scopes)
 
+    # Extract sponsor_contact_id from delegation-sponsored invites (D1).
+    invite_metadata = invite.get("metadata") or {}
+    if isinstance(invite_metadata, str):
+        try:
+            invite_metadata = json.loads(invite_metadata)
+        except (ValueError, TypeError):
+            invite_metadata = {}
+    sponsor_contact_id = invite_metadata.get("sponsor_contact_id") if isinstance(invite_metadata, dict) else None
+
     display_name = invite.get("display_name")
     handle = _derive_os_handle(display_name, body.harness, body.label)
     handle = await _dedupe_handle(request, handle)
@@ -1409,6 +1408,7 @@ async def _redeem_os_level(request: Request, body: RedeemInviteIn, invite: dict,
                 decided_by=invite["created_by"],
                 project_id=None,
                 display_name=display_name,
+                sponsor_contact_id=sponsor_contact_id,
             )
         except Exception as exc:  # noqa: BLE001 - surface as JSON error
             await store.rollback_to_pending(body.invite_id)
