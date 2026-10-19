@@ -491,15 +491,53 @@ class TestDispatcherReconcile:
         )
         await real_stores.dispatcher_store._db.commit()
 
-        # Second tick: agent-a should be backed off, agent-b should still get a lease
-        result2 = await dispatcher_service.tick_user("u1", await real_stores.dispatcher_store.get_config("u1"), now + 2000)
+        # Close the first tasks so agents' load resets
+        for task in tasks1 + tasks2:
+            await real_stores.task_store._db.execute(
+                "UPDATE project_tasks SET status = 'closed', closed_at = ? WHERE id = ?",
+                (now + 100, task["id"]),
+            )
+        await real_stores.task_store._db.commit()
+
+        # Create new claimable tasks for the second tick
+        board1_row2, tasks1_2 = await seed_board_with_cards(real_stores, "u1", "Board One Second", 1)
+        board2_row2, tasks2_2 = await seed_board_with_cards(real_stores, "u1", "Board Two Second", 1)
+        board1_id_2 = board1_row2["id"]
+        board2_id_2 = board2_row2["id"]
+        for task in tasks1_2 + tasks2_2:
+            await real_stores.task_store._db.execute(
+                "UPDATE project_tasks SET labels = json_array('claimable') WHERE id = ?",
+                (task["id"],),
+            )
+        await real_stores.task_store._db.commit()
+
+        # Add grants for agents on new boards
+        await real_stores.grants.add_grant(canonical_id=agent1_cid, scope="project_tasks", project_id=board1_id_2)
+        await real_stores.grants.add_grant(canonical_id=agent1_cid, scope="project_tasks", project_id=board2_id_2)
+        await real_stores.grants.add_grant(canonical_id=agent2_cid, scope="project_tasks", project_id=board1_id_2)
+        await real_stores.grants.add_grant(canonical_id=agent2_cid, scope="project_tasks", project_id=board2_id_2)
+
+        # Second tick at a time BEFORE backed_off_until: agent-a should be backed off, agent-b should still get a lease
+        now2 = now + 200  # before backed_off_until (now + 900)
+        result2 = await dispatcher_service.tick_user("u1", await real_stores.dispatcher_store.get_config("u1"), now2)
         # agent-b should get an assignment
         assert result2["assignments_made"] >= 1
+        # agent-a should be counted as backed off
+        assert result2["agents_backed_off"] >= 1
 
-        # Check that agent-a's lease was resolved as 'expired' or 'overridden' due to backoff
+        # Check that agent-a has NO new pending lease (back-off took effect)
         leases_a = await real_stores.dispatcher_store.pending_for_agent(agent1_cid)
-        # agent-a should not have a pending lease (it's backed off)
-        # The lease should have been resolved
+        assert len(leases_a) == 0, "Backed-off agent should not receive new lease"
+
+        # Verify backoff entry still exists with consecutive_expiries >= 1
+        async with real_stores.dispatcher_store._read(
+            "SELECT consecutive_expiries, next_eligible_at FROM dispatch_agent_backoff WHERE canonical_id = ?",
+            (agent1_cid,),
+        ) as cur:
+            row = await cur.fetchone()
+        assert row is not None
+        assert row[0] >= 1
+        assert row[1] > now2
 
     @pytest.mark.asyncio
     async def test_card_expiry_cap_5_expired_not_assigned(self, dispatcher_service, real_stores, tmp_path):
@@ -522,6 +560,8 @@ class TestDispatcherReconcile:
 
         # Register one agent
         agent_cid = await register_agent_with_grant(real_stores, "agent-a", board1_id, "project_tasks")
+        # Add grant for agent on board2 as well
+        await real_stores.grants.add_grant(canonical_id=agent_cid, scope="project_tasks", project_id=board2_id)
 
         # Create 5 expired leases on board one task (simulating 5 expiries in 48h)
         # We need to use the dispatcher_store to create ledger entries with state='expired'
@@ -540,10 +580,10 @@ class TestDispatcherReconcile:
             lease_expires_at=now - 50,  # expired
         )
 
-        # Set up the task as claimed/assigned
+        # Set up the task as assigned but NOT claimed (so it's a candidate after unassign)
         await real_stores.task_store._db.execute(
-            "UPDATE project_tasks SET assignee_id = ?, claimed_by = ?, status = 'open' WHERE id = ?",
-            (agent_cid, agent_cid, task_id),
+            "UPDATE project_tasks SET assignee_id = ?, claimed_by = NULL, status = 'open' WHERE id = ?",
+            (agent_cid, task_id),
         )
         await real_stores.task_store._db.commit()
 
@@ -581,6 +621,7 @@ class TestDispatcherReconcile:
         # Now run tick - with 5 expiries, card should be paused (not assigned)
         result = await dispatcher_service.tick_user("u1", await real_stores.dispatcher_store.get_config("u1"), now + 100)
         # With 5 expiries >= CARD_EXPIRY_CAP, the card should be paused
+        assert result["cards_paused"] >= 1
 
         # Test with 4 expired entries - card should be assigned
         # Clean up and create only 4 expired entries

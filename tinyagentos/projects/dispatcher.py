@@ -169,12 +169,12 @@ class DispatcherService:
         # Filter out backed-off agents
         all_canonical_ids = [ref.canonical_id for ref in agent_refs]
         backed_off = await dispatcher_store.backed_off(all_canonical_ids, now)
-        board_agent_refs = []
+        eligible_refs = []
         for ref in agent_refs:
             if ref.canonical_id in backed_off:
                 agents_backed_off += 1
                 continue
-            board_agent_refs.append(ref)
+            eligible_refs.append(ref)
 
         for board_id in board_ids:
             # Re-check board is active and owned by this user every tick
@@ -210,13 +210,13 @@ class DispatcherService:
                 else:
                     final_candidates.append(task)
             filtered_candidates = final_candidates
+            cards_paused += cards_paused_local
             if not filtered_candidates:
                 continue
-            cards_paused += cards_paused_local
 
             # Build eligible agents for this board (must have grant + wake budget)
             board_agent_refs = []
-            for ref in agent_refs:
+            for ref in eligible_refs:
                 grants = await active_project_grants(
                     agent_registry, agent_grants, ref.canonical_id, "project_tasks"
                 )
@@ -458,6 +458,7 @@ async def dispatcher_tick_loop(app_state, interval: float = 10.0) -> None:
             for cfg in configs:
                 if not cfg.enabled:
                     # Disabled users: still reconcile pending leases to avoid stranding them
+                    now = time.time()
                     pending = await dispatcher_store.list_pending(cfg.user_id)
                     if pending:
                         try:

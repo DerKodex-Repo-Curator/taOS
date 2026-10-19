@@ -791,3 +791,61 @@ async def test_loop_gives_each_user_a_fresh_now_and_records_completion():
     assert call_dict["u1"] == 1000.0
     assert call_dict["u2"] == 1100.0
     assert app_state.dispatcher_service._last_tick_times["u1"] == 1100.0
+
+
+@pytest.mark.asyncio
+async def test_loop_disabled_user_reconcile_called_with_now():
+    """Disabled user (enabled=False) with pending lease: reconcile_user is called with a valid now float."""
+    import asyncio
+    from tinyagentos.projects.dispatcher import dispatcher_tick_loop
+    from types import SimpleNamespace
+    from tinyagentos.projects.dispatcher_store import DispatcherConfig
+
+    class DummyStore:
+        def __init__(self):
+            self.configs = [
+                DispatcherConfig(user_id="u1", enabled=False, poll_seconds=0)
+            ]
+            self.pending_called = False
+
+        async def list_configs(self):
+            return self.configs
+
+        async def list_pending(self, user_id):
+            if not self.pending_called:
+                self.pending_called = True
+                return [{"id": "lease-1", "task_id": "task-1", "canonical_id": "agent-1"}]
+            return []
+
+    reconcile_calls = []
+
+    class DummyService:
+        def __init__(self):
+            self._last_tick_times = {}
+            self._locks = {}
+
+        async def reconcile_user(self, user_id, cfg, now):
+            reconcile_calls.append((user_id, now))
+            return {"claimed": 0, "overridden": 0, "closed": 0, "expired": 0}
+
+        async def tick_user(self, user_id, cfg, now):
+            return {}
+
+    app_state = SimpleNamespace(
+        dispatcher_service=DummyService(),
+        dispatcher_store=DummyStore(),
+    )
+
+    task = asyncio.create_task(dispatcher_tick_loop(app_state, interval=0.001))
+    await asyncio.sleep(0.02)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # reconcile_user should have been called at least once for the disabled user
+    assert len(reconcile_calls) >= 1
+    # The `now` argument should be a float (not UnboundLocalError)
+    for user_id, now_arg in reconcile_calls:
+        assert user_id == "u1"
+        assert isinstance(now_arg, float)
+        assert now_arg > 0
