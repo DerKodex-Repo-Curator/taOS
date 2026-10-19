@@ -28,8 +28,6 @@ function getAtPolyfillFromSource(): typeof Array.prototype.at {
   return new Function("return " + fnSource)() as typeof Array.prototype.at;
 }
 
-const atPolyfill = getAtPolyfillFromSource();
-
 function deleteGlobalHasOwn() {
   try {
     delete (Object as any).hasOwn;
@@ -81,11 +79,11 @@ async function testWithPolyfill<T>(
   vi.resetModules();
   try {
     await import("./polyfills");
-    const atPolyfillLocal = Array.prototype.at;
+    const atPolyfill = Array.prototype.at;
     if (originalAt !== undefined) {
       Array.prototype.at = originalAt;
     }
-    return await testFn({ at: atPolyfillLocal });
+    return await testFn({ at: atPolyfill });
   } finally {
     restoreGlobals();
   }
@@ -105,6 +103,7 @@ describe("polyfills", () => {
   });
 
   it("Array.prototype.at polyfill exists and works", () => {
+    const atPolyfill = getAtPolyfillFromSource();
     expect(typeof atPolyfill).toBe("function");
     expect(atPolyfill).not.toBe(originalAt);
 
@@ -208,6 +207,7 @@ describe("polyfills", () => {
   });
 
   it("Array.prototype.at uses ToIntegerOrInfinity and handles edge cases", () => {
+    const atPolyfill = getAtPolyfillFromSource();
     expect(typeof atPolyfill).toBe("function");
     expect(atPolyfill).not.toBe(originalAt);
 
