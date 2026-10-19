@@ -543,36 +543,30 @@ class TestDispatcherReconcile:
     async def test_card_expiry_cap_5_expired_not_assigned(self, dispatcher_service, real_stores, tmp_path):
         """Case (f): card with 5 'expired' rows in 48h is not assigned, still status open;
         with 4 it is."""
-        import time as time_mod
+        import uuid
 
-        # Two boards with tasks
-        board1_row, tasks1 = await seed_board_with_cards(real_stores, "u1", "Board One", 1)
-        board2_row, tasks2 = await seed_board_with_cards(real_stores, "u1", "Board Two", 1)
-        board1_id = board1_row["id"]
-        board2_id = board2_row["id"]
+        # One board with one task
+        board_row, tasks = await seed_board_with_cards(real_stores, "u1", "Board One", 1)
+        board_id = board_row["id"]
+        task_id = tasks[0]["id"]
 
-        for task in tasks1 + tasks2:
-            await real_stores.task_store._db.execute(
-                "UPDATE project_tasks SET labels = json_array('claimable') WHERE id = ?",
-                (task["id"],),
-            )
+        await real_stores.task_store._db.execute(
+            "UPDATE project_tasks SET labels = json_array('claimable') WHERE id = ?",
+            (task_id,),
+        )
         await real_stores.task_store._db.commit()
 
         # Register one agent
-        agent_cid = await register_agent_with_grant(real_stores, "agent-a", board1_id, "project_tasks")
-        # Add grant for agent on board2 as well
-        await real_stores.grants.add_grant(canonical_id=agent_cid, scope="project_tasks", project_id=board2_id)
+        agent_cid = await register_agent_with_grant(real_stores, "agent-a", board_id, "project_tasks")
 
-        # Create 5 expired leases on board one task (simulating 5 expiries in 48h)
-        # We need to use the dispatcher_store to create ledger entries with state='expired'
+        # Create 5 expired leases on the task (simulating 5 expiries in 48h)
         now = 1000.0
-        task_id = tasks1[0]["id"]
 
-        # First, create a pending lease
+        # First, create a pending lease that will be reconciled
         lease_id = await real_stores.dispatcher_store.insert_lease(
             user_id="u1",
             task_id=task_id,
-            project_id=board1_id,
+            project_id=board_id,
             canonical_id=agent_cid,
             assignee_written=agent_cid,
             reason="test",
@@ -588,8 +582,6 @@ class TestDispatcherReconcile:
         await real_stores.task_store._db.commit()
 
         # Now set up 5 'expired' entries in the ledger for this task
-        # Insert rows directly as 'expired' since insert_lease has a unique constraint
-        # on task_id WHERE state='pending' which prevents duplicate pending rows
         for i in range(5):
             expired_lease_id = uuid.uuid4().hex
             await real_stores.dispatcher_store._db.execute(
@@ -602,7 +594,7 @@ class TestDispatcherReconcile:
                     expired_lease_id,
                     "u1",
                     task_id,
-                    board1_id,
+                    board_id,
                     agent_cid,
                     agent_cid,
                     "expired",
@@ -618,46 +610,66 @@ class TestDispatcherReconcile:
         expired_counts = await real_stores.dispatcher_store.expired_counts_48h(now)
         assert expired_counts.get(task_id, 0) >= 5
 
-        # Now run tick - with 5 expiries, card should be paused (not assigned)
+        # Configure dispatcher
+        await real_stores.dispatcher_store.set_config(
+            "u1",
+            DispatcherConfig(
+                user_id="u1",
+                enabled=True,
+                eligible_agents=[agent_cid],
+                max_concurrent_per_agent=1,
+                lease_seconds=900,
+            ),
+            updated_by="test",
+        )
+
+        # First tick - with 5 expiries, card should be paused (not assigned)
         result = await dispatcher_service.tick_user("u1", await real_stores.dispatcher_store.get_config("u1"), now + 100)
-        # With 5 expiries >= CARD_EXPIRY_CAP, the card should be paused
         assert result["cards_paused"] >= 1
 
-        # Test with 4 expired entries - card should be assigned
-        # Clean up and create only 4 expired entries
+        # Clean up expired entries and create only 4
         await real_stores.dispatcher_store._db.execute(
             "DELETE FROM dispatch_ledger WHERE state = 'expired' AND task_id = ?",
             (task_id,),
         )
-        await real_stores.dispatcher_store._db.execute(
-            "DELETE FROM dispatch_ledger WHERE state = 'expired'",
-        )
         await real_stores.dispatcher_store._db.commit()
 
-        # Create only 4 expired entries
+        # Create only 4 expired entries directly
         for i in range(4):
-            expired_lease_id = await real_stores.dispatcher_store.insert_lease(
-                user_id="u1",
-                task_id=task_id,
-                project_id=board1_id,
-                canonical_id=agent_cid,
-                assignee_written=agent_cid,
-                reason="test",
-                assigned_at=now - 100 - i * 100,
-                lease_expires_at=now - 50 - i * 100,
-            )
+            expired_lease_id = uuid.uuid4().hex
             await real_stores.dispatcher_store._db.execute(
-                "UPDATE dispatch_ledger SET state = 'expired', resolved_at = ? WHERE id = ?",
-                (now - 100, expired_lease_id),
+                """
+                INSERT INTO dispatch_ledger
+                    (id, user_id, task_id, project_id, canonical_id, assignee_written, state, reason, assigned_at, lease_expires_at, resolved_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    expired_lease_id,
+                    "u1",
+                    task_id,
+                    board_id,
+                    agent_cid,
+                    agent_cid,
+                    "expired",
+                    "test",
+                    now - 100 - i * 100,
+                    now - 50 - i * 100,
+                    now - 100,
+                ),
             )
         await real_stores.dispatcher_store._db.commit()
 
         expired_counts2 = await real_stores.dispatcher_store.expired_counts_48h(now)
         assert expired_counts2.get(task_id, 0) == 4
 
-        # Now run tick - with 4 expiries < CARD_EXPIRY_CAP, card should be assigned
-        result2 = await dispatcher_service.tick_user("u1", await real_stores.dispatcher_store.get_config("u1"), now + 100)
-        # With 4 expiries < 5, the card should NOT be paused
+        # Second tick at a later time so backoff has expired
+        now2 = now + 2000
+        result2 = await dispatcher_service.tick_user("u1", await real_stores.dispatcher_store.get_config("u1"), now2)
+        assert result2["cards_paused"] == 0
+        # The 4-expiry card should get a pending lease
+        leases = await real_stores.dispatcher_store.pending_for_agent(agent_cid)
+        assert len(leases) == 1
+        assert leases[0]["task_id"] == task_id
 
     @pytest.mark.asyncio
     async def test_disabled_user_with_expired_lease_unassigns(self, dispatcher_service, real_stores, tmp_path):

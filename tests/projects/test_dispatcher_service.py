@@ -646,6 +646,75 @@ class TestDispatcherServiceTick:
         # We can't easily cause a per-user failure without more mocking,
         # so this test mainly verifies the try/except structure exists
 
+    @pytest.mark.asyncio
+    async def test_tick_disabled_user_expired_lease_counts_expired(self, real_stores, tmp_path):
+        """tick() with a disabled user holding an expired pending lease returns
+        totals with expired_count >= 1."""
+        board_row, tasks = await seed_board_with_cards(real_stores, "u1", "Test Board", 1)
+        board_id = board_row["id"]
+        task_id = tasks[0]["id"]
+
+        await real_stores.task_store._db.execute(
+            "UPDATE project_tasks SET labels = json_array('claimable') WHERE id = ?",
+            (task_id,),
+        )
+        await real_stores.task_store._db.commit()
+
+        agent_cid = await register_agent_with_grant(real_stores, "agent-disabled-expired", board_id, "project_tasks")
+
+        now = 1000.0
+
+        # Task must be assigned to the agent for unassign_if to succeed
+        await real_stores.task_store._db.execute(
+            "UPDATE project_tasks SET assignee_id = ?, claimed_by = NULL, status = 'open' WHERE id = ?",
+            (agent_cid, task_id),
+        )
+        await real_stores.task_store._db.commit()
+
+        # Create a pending expired lease
+        lease_id = await real_stores.dispatcher_store.insert_lease(
+            user_id="u1",
+            task_id=task_id,
+            project_id=board_id,
+            canonical_id=agent_cid,
+            assignee_written=agent_cid,
+            reason="test",
+            assigned_at=now - 100,
+            lease_expires_at=now - 50,  # expired
+        )
+
+        # Configure dispatcher as DISABLED
+        await real_stores.dispatcher_store.set_config(
+            "u1",
+            DispatcherConfig(
+                user_id="u1",
+                enabled=False,  # Disabled
+                eligible_agents=[agent_cid],
+                max_concurrent_per_agent=1,
+                lease_seconds=900,
+            ),
+            updated_by="test",
+        )
+
+        config = SimpleNamespace(agents=[], wake_budget={"global_default": 100})
+        app_state = SimpleNamespace(
+            config=config,
+            data_dir=tmp_path,
+            project_store=real_stores.project_store,
+            project_task_store=real_stores.task_store,
+            dispatcher_store=real_stores.dispatcher_store,
+            agent_registry=real_stores.registry,
+            agent_grants=real_stores.grants,
+            chat_channels=None,
+            chat_messages=None,
+        )
+        service = DispatcherService(app_state)
+
+        # tick() should reconcile the expired lease and return expired_count >= 1
+        result = await service.tick(now=now + 100)
+
+        assert result["expired_count"] >= 1, f"Expected expired_count >= 1, got {result['expired_count']}"
+
 
 @pytest.mark.asyncio
 async def test_dispatcher_loop_cancel_raises_cancelled_error():

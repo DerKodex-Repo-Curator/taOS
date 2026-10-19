@@ -387,31 +387,32 @@ class DispatcherStore(ProjectsDBStore):
         where n is the new consecutive_expiries count after increment.
         Returns the new n.
         """
-        # First, get current consecutive_expiries
-        backoff = await self._db.execute(
-            "SELECT consecutive_expiries FROM dispatch_agent_backoff WHERE canonical_id = ?",
-            (canonical_id,),
-        )
-        row = await backoff.fetchone()
-        if row is None:
-            current_expiries = 0
-        else:
-            current_expiries = row[0]
+        async with self._tx():
+            # First, get current consecutive_expiries
+            backoff = await self._db.execute(
+                "SELECT consecutive_expiries FROM dispatch_agent_backoff WHERE canonical_id = ?",
+                (canonical_id,),
+            )
+            row = await backoff.fetchone()
+            if row is None:
+                current_expiries = 0
+            else:
+                current_expiries = row[0]
 
-        n = current_expiries + 1
-        backoff_time = now + min(lease_seconds * 2 ** (n - 1), 21600)
+            n = current_expiries + 1
+            backoff_time = now + min(lease_seconds * 2 ** (n - 1), 21600)
 
-        await self._db.execute(
-            """
-            INSERT INTO dispatch_agent_backoff (canonical_id, consecutive_expiries, next_eligible_at, last_assigned_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(canonical_id) DO UPDATE SET
-                consecutive_expiries = excluded.consecutive_expiries,
-                next_eligible_at = excluded.next_eligible_at,
-                last_assigned_at = excluded.last_assigned_at
-            """,
-            (canonical_id, n, backoff_time, now),
-        )
+            await self._db.execute(
+                """
+                INSERT INTO dispatch_agent_backoff (canonical_id, consecutive_expiries, next_eligible_at, last_assigned_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(canonical_id) DO UPDATE SET
+                    consecutive_expiries = excluded.consecutive_expiries,
+                    next_eligible_at = excluded.next_eligible_at,
+                    last_assigned_at = excluded.last_assigned_at
+                """,
+                (canonical_id, n, backoff_time, now),
+            )
         return n
 
     async def reset_backoff(self, canonical_id: str) -> None:
