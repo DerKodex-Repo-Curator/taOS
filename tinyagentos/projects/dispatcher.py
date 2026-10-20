@@ -253,10 +253,6 @@ class DispatcherService:
                 all_aliases.extend(ref.aliases())
             board_inflight = await task_store.count_open_load_by_project(all_aliases)
 
-            # Get recent expiries and card expiry counts
-            recent_expiries = await dispatcher_store.recent_expiries(now - 48 * 3600)
-            card_expiry_counts = await dispatcher_store.expired_counts_48h(now)
-
             # Get last_assigned_at map
             canonical_ids = [ref.canonical_id for ref in board_agent_refs]
             last_assigned_map = await dispatcher_store.last_assigned_map(canonical_ids)
@@ -412,7 +408,11 @@ class DispatcherService:
                 pending = await dispatcher_store.list_pending(cfg.user_id)
                 if pending:
                     try:
-                        await self.reconcile_user(cfg.user_id, cfg, now)
+                        reconcile_counts = await self.reconcile_user(cfg.user_id, cfg, now)
+                        total["claimed_count"] += reconcile_counts["claimed"]
+                        total["overridden_count"] += reconcile_counts["overridden"]
+                        total["closed_count"] += reconcile_counts["closed"]
+                        total["expired_count"] += reconcile_counts["expired"]
                     except Exception:
                         logger.exception("dispatcher: reconcile failed for disabled user %s", cfg.user_id)
                 continue
