@@ -471,7 +471,7 @@ def create_app(data_dir: Path | None = None, catalog_dir: Path | None = None) ->
     chat_messages = ChatMessageStore(data_dir / "chat.db")
     chat_channels = ChatChannelStore(data_dir / "chat.db")
     peer_outbox_store = PeerOutboxStore(data_dir / "peer_outbox.db")
-    from tinyagentos.chat.guest_outbox import GuestOutbox
+    from tinyagentos.chat.guest_outbox import GuestOutbox, prune_loop
     guest_outbox = GuestOutbox(data_dir / "guest_outbox.db")
     from tinyagentos.projects.project_store import ProjectStore
     from tinyagentos.projects.task_store import ProjectTaskStore
@@ -977,17 +977,7 @@ def create_app(data_dir: Path | None = None, catalog_dir: Path | None = None) ->
 
         _create_supervised_task(_browser_reap_loop(app), app.state._background_tasks)
 
-        async def _guest_outbox_prune_loop(app: FastAPI) -> None:
-            import asyncio as _asyncio
-            _outbox = app.state.guest_outbox
-            while True:
-                try:
-                    await _outbox.prune()
-                except Exception as _e:
-                    logger.exception("guest outbox prune failed: %s", _e)
-                await _asyncio.sleep(6 * 3600)  # 6 hours
-
-        _create_supervised_task(_guest_outbox_prune_loop(app), app.state._background_tasks)
+        _create_supervised_task(prune_loop(app.state.guest_outbox), app.state._background_tasks)
 
         # Per-agent state lives on the host and is mounted into containers.
         # See docs/design/framework-agnostic-runtime.md.

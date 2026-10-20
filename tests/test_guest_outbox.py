@@ -11,7 +11,7 @@ import pytest
 import pytest_asyncio
 
 from tinyagentos.bridge_session import BridgeSessionRegistry
-from tinyagentos.chat.guest_outbox import GuestOutbox
+from tinyagentos.chat.guest_outbox import GuestOutbox, prune_loop
 
 from test_agent_chat_session_routes import EVENTS, _agent, _bare, _hdr, chat_app  # noqa: F401
 
@@ -219,51 +219,62 @@ class TestPruneBackgroundTask:
     """Test that the periodic prune background task is created and calls prune."""
 
     async def test_prune_loop_calls_prune(self, outbox):
-        """The prune loop should call prune on the outbox periodically.
-        
-        We patch asyncio.sleep to return immediately once, then cancel the task,
-        to verify the loop body executes prune at least once.
-        """
-        # Track prune calls
+        """The prune loop should call prune on the outbox periodically."""
         prune_calls = []
         original_prune = outbox.prune
-        
+
         async def tracking_prune(*args, **kwargs):
             prune_calls.append((args, kwargs))
             return await original_prune(*args, **kwargs)
-        
+
         outbox.prune = tracking_prune
-        
-        # Create a mock app state with the outbox
-        class MockApp:
-            def __init__(self, outbox):
-                self.state = type('State', (), {'guest_outbox': outbox})()
-        
-        mock_app = MockApp(outbox)
-        
-        # Import the prune loop function - we need to test the loop logic
-        # Since the loop is defined inside the lifespan, we'll recreate the pattern here
-        async def _guest_outbox_prune_loop(app):
-            _outbox = app.state.guest_outbox
-            while True:
-                try:
-                    await _outbox.prune()
-                except Exception as _e:
-                    # In the real code, this logs via logger.exception
-                    pass
-                await asyncio.sleep(6 * 3600)  # 6 hours
-        
-        # Run the loop once by patching sleep to raise CancelledError after first call
-        async def mock_sleep(duration):
-            if duration > 100:  # Only intercept the 6-hour sleep
-                raise asyncio.CancelledError()
-            await asyncio.sleep(duration)
-        
-        with patch('asyncio.sleep', side_effect=mock_sleep):
+
+        task = asyncio.create_task(prune_loop(outbox, interval=0.01))
+        try:
+            # Wait for at least 2 prune calls (with 0.01s interval, should happen quickly)
+            for _ in range(100):  # up to 1 second
+                if len(prune_calls) >= 2:
+                    break
+                await asyncio.sleep(0.01)
+        finally:
+            task.cancel()
             try:
-                await _guest_outbox_prune_loop(mock_app)
+                await task
             except asyncio.CancelledError:
                 pass
-        
-        # Verify prune was called at least once
-        assert len(prune_calls) >= 1
+
+        assert len(prune_calls) >= 2
+
+    async def test_prune_loop_continues_after_exception(self, outbox):
+        """The prune loop should continue after prune raises an exception."""
+        prune_calls = []
+        call_count = 0
+        original_prune = outbox.prune
+
+        async def raising_prune(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            prune_calls.append((args, kwargs))
+            if call_count == 1:
+                raise RuntimeError("simulated prune failure")
+            return await original_prune(*args, **kwargs)
+
+        outbox.prune = raising_prune
+
+        task = asyncio.create_task(prune_loop(outbox, interval=0.01))
+        try:
+            # Wait for at least 2 prune calls (first raises, second succeeds)
+            for _ in range(100):  # up to 1 second
+                if len(prune_calls) >= 2:
+                    break
+                await asyncio.sleep(0.01)
+        finally:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        # First call raised, second call should have been attempted
+        assert len(prune_calls) >= 2
+        assert call_count >= 2
